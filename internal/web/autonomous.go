@@ -132,6 +132,14 @@ For testing that requires a real browser (JavaScript execution, login flows, DOM
 **Multi-field form shortcut:**
 ` + "`" + `browser_action` + "`" + ` command=fill_form fields=email={{AGENTMAIL_EMAIL}}|password=Pass123!|name=Test
 
+**Multi-step login (e.g., SSO, OAuth, magic links, 2FA):**
+- Step 1: Fill first form and submit
+- Step 2: snapshot → see what comes next (redirect, 2FA prompt, SSO button)
+- Step 3: If redirected to SSO/OAuth: use ` + "`" + `browser_action command=goto url=SsoUrl` + "`" + `
+- Step 4: If 2FA: use browser to fill TOTP, or check agentmail for 2FA code
+- Step 5: If magic link: agentmail wait_for_email for the link
+- Repeat snapshot/wait until fully logged in, then save_session
+
 **Iframe handling (for CAPTCHAs, embedded forms):**
 ` + "`" + `browser_action` + "`" + ` command=iframe selector=iframe#captcha-frame
 ` + "`" + `browser_action` + "`" + ` command=snapshot → see iframe contents
