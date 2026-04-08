@@ -228,6 +228,19 @@ func (m *Model) handleEvent(evt agent.Event) {
 				dimStyle.Render("     → "+truncStr(output, 200)),
 			)
 		}
+		// Real-time vuln display when report_vulnerability succeeds
+		if evt.ToolName == "report_vulnerability" && evt.ToolResult.Error == "" {
+			vulns := reporting.GetVulnerabilities()
+			if len(vulns) > 0 {
+				m.vulnCount = len(vulns)
+				v := vulns[len(vulns)-1]
+				icon := severityIcon(v.Severity)
+				sev := severityStyle(v.Severity).Render(strings.ToUpper(v.Severity))
+				m.chatLog = append(m.chatLog, "")
+				m.chatLog = append(m.chatLog, titleStyle.Render(fmt.Sprintf("  🐛 VULNERABILITY FOUND — %s", icon)))
+				m.chatLog = append(m.chatLog, fmt.Sprintf("     %s [%s] %s — %s", icon, v.ID, v.Title, sev))
+			}
+		}
 		m.chatLog = append(m.chatLog, "")
 
 	case "message":
