@@ -73,13 +73,13 @@
     };
 
     const LLM_PROVIDERS = {
-        openai: { model: 'gpt-5.4', prefix: 'openai', base: 'https://api.openai.com/v1' },
+        openai: { model: 'gpt-4o', prefix: 'openai', base: 'https://api.openai.com/v1' },
         anthropic: { model: 'claude-sonnet-4.6', prefix: 'anthropic', base: 'https://api.anthropic.com/' },
-        google: { model: 'gemini-3.1-pro', prefix: 'google', base: 'https://generativelanguage.googleapis.com/v1beta/openai/' },
-        deepseek: { model: 'deepseek-v4', prefix: 'deepseek', base: 'https://api.deepseek.com/' },
-        groq: { model: 'llama-4', prefix: 'groq', base: 'https://api.groq.com/openai/v1' },
-        minimax: { model: 'MiniMax-M2.5', prefix: 'minimax', base: 'https://api.minimax.io/' },
-        ollama: { model: 'llama3.3', prefix: 'ollama', base: 'http://localhost:11434/v1' },
+        google: { model: 'gemini-2.0-flash', prefix: 'google', base: 'https://generativelanguage.googleapis.com/v1beta/openai/' },
+        deepseek: { model: 'deepseek-chat-v3', prefix: 'deepseek', base: 'https://api.deepseek.com/' },
+        groq: { model: 'llama-3.3-70b', prefix: 'groq', base: 'https://api.groq.com/openai/v1' },
+        minimax: { model: 'MiniMax-M2.7', prefix: 'minimax', base: 'https://api.minimax.io/' },
+        ollama: { model: 'llama-3.3-70b-instruct', prefix: 'ollama', base: 'http://localhost:11434/v1' },
         custom: { model: '', prefix: '', base: '' },
     };
 
@@ -89,6 +89,7 @@
     const wsMaxReconnectDelay = 30000;
     let wsReconnecting = false;
     let isConnecting = false; // prevent duplicate connection attempts
+    let wsReconnectTimer = null; // track scheduled reconnect to cancel on manual reconnect
     
     function connect() {
         // Prevent duplicate connection attempts
@@ -143,7 +144,7 @@
             console.log(`WS reconnecting in ${delay}ms (attempt ${wsReconnectAttempts})`);
             showReconnectIndicator(wsReconnectAttempts);
             
-            setTimeout(connect, delay);
+            wsReconnectTimer = setTimeout(connect, delay);
         };
         
         ws.onerror = (e) => {
@@ -205,6 +206,7 @@
     
     // Function to manually reconnect
     window.reconnectWebSocket = function() {
+        if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
         isConnecting = false; // reset flag so connect() can proceed
         wsReconnectAttempts = 0;
         wsReconnectDelay = 1000;
@@ -516,8 +518,8 @@
                     <span class="vuln-badge ${v.severity.toLowerCase()}">${v.severity.toUpperCase()}</span>
                 </div>
             `;
-            // Add click handler to open modal
-            li.querySelector('.vuln-header').addEventListener('click', function() {
+            // Store vuln data for delegated event handler
+            li.addEventListener('click', function() {
                 openVulnModal(v);
             });
             list.appendChild(li);
@@ -739,11 +741,13 @@
     // ── Chat Functions ─────────────────────────────────────
     window.sendChatMessage = async function() {
         const input = document.getElementById('chat-input');
+        const btn = document.getElementById('chat-send-btn');
         const message = input.value.trim();
         if (!message) return;
-        
+
         input.value = '';
-        
+        if (btn) { btn.disabled = true; btn.textContent = '...'; }
+
         // Add user message to feed
         const feedBody = document.getElementById('feed-body');
         const userMsg = document.createElement('div');
@@ -756,7 +760,7 @@
         userMsg.innerHTML = '<strong style="color: #2DD4BF">You:</strong> ' + esc(message);
         feedBody.appendChild(userMsg);
         scrollToBottom();
-        
+
         // Send to server
         try {
             const resp = await fetch('/api/chat', {
@@ -765,7 +769,7 @@
                 body: JSON.stringify({message})
             });
             const data = await resp.json();
-            
+
             // Add Xalgorix response to feed
             const botMsg = document.createElement('div');
             botMsg.className = 'event event-message';
@@ -777,6 +781,9 @@
             scrollToBottom();
         } catch (e) {
             console.error('Chat error:', e);
+            showToast('Chat error: ' + e.message, 'error');
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = '➤'; }
         }
     }
 

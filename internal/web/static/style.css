@@ -139,7 +139,7 @@ body::after {
   content: '';
   position: fixed;
   inset: 0;
-  z-index: 9999;
+  z-index: 1;
   pointer-events: none;
   background: repeating-linear-gradient(
     0deg,
@@ -368,7 +368,6 @@ a:hover { color: #00ffaa; text-shadow: 0 0 8px rgba(0, 255, 136, 0.5); }
   grid-template-columns: 1fr 300px;
   gap: var(--space-5);
   flex: 1;
-  min-width: 0;
 }
 
 /* ── Queue Bar ─────────────────────────────────────────────────────── */
@@ -451,6 +450,7 @@ a:hover { color: #00ffaa; text-shadow: 0 0 8px rgba(0, 255, 136, 0.5); }
 
 .input-field {
   flex: 1;
+  min-width: 0;
   padding: 10px 14px;
   padding-left: 24px;
   background: var(--bg-primary);
@@ -544,7 +544,8 @@ a:hover { color: #00ffaa; text-shadow: 0 0 8px rgba(0, 255, 136, 0.5); }
   clip-path: polygon(0 3px, 3px 0, calc(100% - 3px) 0, 100% 3px, 100% calc(100% - 3px), calc(100% - 3px) 100%, 3px 100%, 0 calc(100% - 3px));
 }
 
-.severity-checkbox input { display: none; }
+.severity-checkbox input { position: absolute; opacity: 0; width: 0; height: 0; }
+.severity-checkbox { cursor: pointer; }
 
 .severity-checkbox.critical { color: var(--sev-critical); border-color: rgba(255, 51, 102, 0.3); }
 .severity-checkbox.critical:has(input:checked) { background: rgba(255, 51, 102, 0.15); border-color: var(--sev-critical); box-shadow: 0 0 8px rgba(255, 51, 102, 0.3); }
@@ -1146,6 +1147,20 @@ a:hover { color: #00ffaa; text-shadow: 0 0 8px rgba(0, 255, 136, 0.5); }
 .vuln-item.info { background: rgba(0, 212, 255, 0.05); border-left: 2px solid var(--sev-info); }
 .vuln-item.info:hover { background: rgba(0, 212, 255, 0.1); border-color: var(--sev-info); box-shadow: 0 0 8px rgba(0, 212, 255, 0.3); }
 
+.vuln-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border: 1px solid;
+  font-family: var(--font-mono);
+  letter-spacing: 0.08em;
+}
+.vuln-badge.critical { color: var(--sev-critical); border-color: var(--sev-critical); }
+.vuln-badge.high { color: var(--sev-high); border-color: var(--sev-high); }
+.vuln-badge.medium { color: var(--sev-medium); border-color: var(--sev-medium); }
+.vuln-badge.low { color: var(--sev-low); border-color: var(--sev-low); }
+.vuln-badge.info { color: var(--sev-info); border-color: var(--sev-info); }
+
 .vuln-severity-dot {
   width: 8px;
   height: 8px;
@@ -1693,4 +1708,28 @@ a:hover { color: #00ffaa; text-shadow: 0 0 8px rgba(0, 255, 136, 0.5); }
     transition-duration: 0.01ms !important;
   }
   body::after { display: none; }
+}
+
+/* WebSocket reconnect bar */
+.ws-reconnecting {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: rgba(255, 170, 0, 0.9);
+  color: #000;
+  padding: 8px;
+  text-align: center;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+/* Spinner animation for reconnect bar */
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
