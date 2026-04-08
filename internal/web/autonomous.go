@@ -28,7 +28,7 @@ For EVERY potential vulnerability found in Phase 2, you MUST:
 
 **SQL Injection:**
 - Confirm with time-based: ` + "`" + `' AND SLEEP(5)--` + "`" + ` (measure response time)
-- Extract data: ` + "`" + `sqlmap -u "URL" --dump --batch --risk=3 --level=5` + "`" + `
+- Extract data: ` + "`" + `sqlmap -u "URL" --dbs --batch --risk=3 --level=5` + "`" + `
 - If data extracted → report as CRITICAL/HIGH with the dumped data as proof
 - If only time-based confirmed → report as HIGH with timing measurements
 
@@ -157,7 +157,7 @@ Create folder: mkdir -p ./TARGET && cd ./TARGET
 
 ## EXPLOITATION REQUIRED FOR EACH FINDING:
 
-**SQLi:** Extract actual data with sqlmap --dump, OR confirm with time-based (SLEEP)
+**SQLi:** Extract actual data with sqlmap --dbs, OR confirm with time-based (SLEEP)
 **XSS:** Show reflected payload in response body (curl + grep)
 **SSRF:** Get callback or read internal metadata
 **RCE:** Execute id/whoami and show output

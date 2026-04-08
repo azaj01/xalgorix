@@ -2670,7 +2670,7 @@ func (s *Server) broadcastToInstance(instanceID string, evt WSEvent) {
 			inst.events = append(inst.events[100:], evt)
 		}
 		// Also buffer vulns
-		if evt.Type == "vuln" && len(evt.Vulns) > 0 {
+		if len(evt.Vulns) > 0 {
 			inst.Vulns = append(inst.Vulns, evt.Vulns...)
 		}
 		inst.mu.Unlock()
