@@ -105,7 +105,7 @@ type geminiPart struct {
 }
 
 type geminiContent struct {
-	Role  string       `json:"role"`
+	Role  string       `json:"role,omitempty"`
 	Parts []geminiPart `json:"parts"`
 }
 
@@ -126,6 +126,41 @@ type geminiResponse struct {
 
 // geminiStreamResponse is the same structure but used for SSE streaming responses.
 type geminiStreamResponse = geminiResponse
+
+// ── Anthropic types ──────────────────────────────────────────────────────────
+
+type anthropicRequest struct {
+	Model    string    `json:"model"`
+	Messages []Message `json:"messages"`
+	System  string    `json:"system,omitempty"`
+	MaxTokens int      `json:"max_tokens"`
+	Stream   bool     `json:"stream"`
+}
+
+type anthropicContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
+type anthropicMessage struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	Role      string `json:"role"`
+	Content   []anthropicContentBlock `json:"content"`
+	Model     string `json:"model"`
+	StopReason string `json:"stop_reason,omitempty"`
+	Usage     struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
+}
+
+type anthropicResponse struct {
+	Type     string `json:"type"`
+	Message  anthropicMessage `json:"message,omitempty"`
+	Delta    struct{ Text string `json:"text"` } `json:"delta,omitempty"`
+	Index    int    `json:"index,omitempty"`
+}
 
 // resolveEndpoint returns the full chat completions URL and clean model name.
 // Handles provider prefixes like "minimax/", "openai/", "anthropic/", etc.
@@ -245,10 +280,10 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 
 		endpoint, model := c.resolveEndpoint()
 		isGoogle := c.provider == "google" || c.provider == "gemini"
+		isAnthropic := c.provider == "anthropic"
 
 		var body []byte
 		if isGoogle {
-			// Google Gemini streaming: use streamGenerateContent endpoint
 			endpoint = strings.TrimSuffix(endpoint, "generateContent") + "streamGenerateContent"
 			var systemParts []geminiPart
 			contents := make([]geminiContent, 0, len(messages))
@@ -268,6 +303,25 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 				gemReq.SystemInstruction = &geminiContent{Role: "user", Parts: systemParts}
 			}
 			body, _ = json.Marshal(gemReq)
+		} else if isAnthropic {
+			var systemPrompt string
+			anthropicMsgs := make([]Message, 0, len(messages))
+			for _, m := range messages {
+				if m.Role == "system" {
+					systemPrompt = m.Content
+				} else {
+					anthropicMsgs = append(anthropicMsgs, m)
+				}
+			}
+			maxTokens := 4096
+			anReq := anthropicRequest{
+				Model:     model,
+				Messages:  anthropicMsgs,
+				System:    systemPrompt,
+				MaxTokens: maxTokens,
+				Stream:    true,
+			}
+			body, _ = json.Marshal(anReq)
 		} else {
 			reqBody := chatRequest{Model: model, Messages: messages, Stream: true}
 			body, _ = json.Marshal(reqBody)
@@ -313,6 +367,52 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 1024*1024)
 
+		if isAnthropic {
+			// Anthropic SSE: each line is "event: TYPE" followed by "data: JSON"
+			var currentEvent string
+			var anResp anthropicResponse
+			for scanner.Scan() {
+				line := scanner.Text()
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				if ev, ok := strings.CutPrefix(line, "event: "); ok {
+					currentEvent = ev
+					continue
+				}
+				data, ok := strings.CutPrefix(line, "data: ")
+				if !ok {
+					continue
+				}
+				data = strings.TrimSpace(data)
+
+				if err := json.Unmarshal([]byte(data), &anResp); err != nil {
+					continue
+				}
+
+				switch currentEvent {
+				case "message_start":
+					c.mu.Lock()
+					c.totalIn += anResp.Message.Usage.InputTokens
+					c.totalOut += anResp.Message.Usage.OutputTokens
+					c.mu.Unlock()
+				case "content_block_delta":
+					if anResp.Delta.Text != "" {
+						ch <- StreamChunk{Content: anResp.Delta.Text}
+					}
+				case "message_delta":
+					// Final usage update if present
+				case "message_stop":
+					ch <- StreamChunk{Done: true}
+					return
+				}
+			}
+			ch <- StreamChunk{Done: true}
+			return
+		}
+
+		// OpenAI/Google streaming: "data: JSON" lines
 		for scanner.Scan() {
 			line := scanner.Text()
 			if !strings.HasPrefix(line, "data: ") {
@@ -368,6 +468,7 @@ func (c *Client) doChat(messages []Message) (string, error) {
 	log.Printf("[llm] Request → URL=%s model=%s apiModel=%s cfgLLM=%s cfgAPIBase=%s", endpoint, model, c.apiModel, c.cfg.LLM, c.cfg.APIBase)
 
 	isGoogle := c.provider == "google" || c.provider == "gemini"
+	isAnthropic := c.provider == "anthropic"
 
 	var body []byte
 	var err error
@@ -377,10 +478,8 @@ func (c *Client) doChat(messages []Message) (string, error) {
 		contents := make([]geminiContent, 0, len(messages))
 		for _, m := range messages {
 			if m.Role == "system" {
-				// System messages go to system_instruction
 				systemParts = append(systemParts, geminiPart{Text: m.Content})
 			} else {
-				// Map "assistant" to "model", keep "user" as-is
 				role := m.Role
 				if role == "assistant" {
 					role = "model"
@@ -395,6 +494,30 @@ func (c *Client) doChat(messages []Message) (string, error) {
 		body, err = json.Marshal(gemReq)
 		if err != nil {
 			return "", fmt.Errorf("failed to marshal Gemini request: %w", err)
+		}
+	} else if isAnthropic {
+		// Anthropic: system as top-level field, max_tokens required
+		var systemPrompt string
+		anthropicMsgs := make([]Message, 0, len(messages))
+		for _, m := range messages {
+			if m.Role == "system" {
+				systemPrompt = m.Content
+			} else {
+				anthropicMsgs = append(anthropicMsgs, m)
+			}
+		}
+		// Default max_tokens; user can override via config if needed
+		maxTokens := 4096
+		anReq := anthropicRequest{
+			Model:     model,
+			Messages:  anthropicMsgs,
+			System:    systemPrompt,
+			MaxTokens: maxTokens,
+			Stream:    false,
+		}
+		body, err = json.Marshal(anReq)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal Anthropic request: %w", err)
 		}
 	} else {
 		reqBody := chatRequest{Model: model, Messages: messages, Stream: false}
@@ -415,7 +538,6 @@ func (c *Client) doChat(messages []Message) (string, error) {
 
 	req.Header.Set("Content-Type", "application/json")
 	if isGoogle {
-		// Google AI API uses x-goog-api-key header
 		if c.cfg.APIKey != "" {
 			req.Header.Set("x-goog-api-key", c.cfg.APIKey)
 		}
@@ -446,6 +568,25 @@ func (c *Client) doChat(messages []Message) (string, error) {
 			return "", fmt.Errorf("no content in Gemini response")
 		}
 		return gemResp.Candidates[0].Content.Parts[0].Text, nil
+	}
+
+	if isAnthropic {
+		var anResp anthropicResponse
+		if err := json.Unmarshal(respBody, &anResp); err != nil {
+			return "", fmt.Errorf("failed to parse Anthropic response: %w", err)
+		}
+		// Track token usage
+		c.mu.Lock()
+		c.totalIn += anResp.Message.Usage.InputTokens
+		c.totalOut += anResp.Message.Usage.OutputTokens
+		c.mu.Unlock()
+		// Extract text from content blocks
+		for _, block := range anResp.Message.Content {
+			if block.Type == "text" && block.Text != "" {
+				return block.Text, nil
+			}
+		}
+		return "", fmt.Errorf("no text content in Anthropic response")
 	}
 
 	var chatResp chatResponse
