@@ -73,9 +73,9 @@
     };
 
     const LLM_PROVIDERS = {
-        openai: { model: 'gpt-4o', prefix: 'openai', base: 'https://api.openai.com/v1' },
-        anthropic: { model: 'claude-sonnet-4.6', prefix: 'anthropic', base: 'https://api.anthropic.com/' },
-        google: { model: 'gemini-2.0-flash', prefix: 'google', base: 'https://generativelanguage.googleapis.com/v1beta/openai/' },
+        openai: { model: 'gpt-5.4', prefix: 'openai', base: 'https://api.openai.com/v1' },
+        anthropic: { model: 'claude-sonnet-4-6', prefix: 'anthropic', base: 'https://api.anthropic.com/' },
+        google: { model: 'gemini-3-flash-preview', prefix: 'google', base: 'https://generativelanguage.googleapis.com/v1beta/openai/' },
         deepseek: { model: 'deepseek-chat-v3', prefix: 'deepseek', base: 'https://api.deepseek.com/' },
         groq: { model: 'llama-3.3-70b', prefix: 'groq', base: 'https://api.groq.com/openai/v1' },
         minimax: { model: 'MiniMax-M2.7', prefix: 'minimax', base: 'https://api.minimax.io/' },

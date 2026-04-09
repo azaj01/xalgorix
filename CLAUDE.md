@@ -81,7 +81,7 @@ All config is via environment variables (loaded from `~/.xalgorix.env` and `/etc
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `XALGORIX_LLM` | Yes | Model e.g. `openai/gpt-4o`, `anthropic/claude-sonnet-4.7` |
+| `XALGORIX_LLM` | Yes | Model e.g. `openai/gpt-5.4`, `anthropic/claude-sonnet-4-6` |
 | `XALGORIX_API_KEY` | Yes | API key |
 | `XALGORIX_API_BASE` | No | Custom endpoint (auto-detected from provider prefix) |
 | `XALGORIX_DISCORD_WEBHOOK` | No | Discord alerts |

@@ -122,7 +122,7 @@ CONFIGURATION
 ═════════════
 
 ~/.xalgorix.env:
-├── XALGORIX_LLM          = "openai/gpt-4o"
+├── XALGORIX_LLM          = "openai/gpt-5.4"
 ├── XALGORIX_API_KEY     = "sk-..."
 ├── XALGORIX_API_BASE    = "https://api.openai.com/"
 ├── GEMINI_API_KEY        = "AIza..."    (optional)

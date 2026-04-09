@@ -119,7 +119,7 @@ func TestConfig_Validate(t *testing.T) {
 		t.Error("expected error for empty LLM")
 	}
 
-	cfg.LLM = "openai/gpt-4o"
+	cfg.LLM = "openai/gpt-5.4"
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("expected no error with LLM set, got: %v", err)
 	}
@@ -140,9 +140,9 @@ func TestConfig_WorkspacePath(t *testing.T) {
 }
 
 func TestConfig_ResolveModel(t *testing.T) {
-	cfg := &Config{LLM: "openai/gpt-4o"}
-	if api := cfg.ResolveModel(); api != "openai/gpt-4o" {
-		t.Errorf("expected 'openai/gpt-4o', got %q", api)
+	cfg := &Config{LLM: "openai/gpt-5.4"}
+	if api := cfg.ResolveModel(); api != "openai/gpt-5.4" {
+		t.Errorf("expected 'openai/gpt-5.4', got %q", api)
 	}
 
 	cfg.LLM = ""

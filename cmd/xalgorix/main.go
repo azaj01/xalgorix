@@ -132,7 +132,7 @@ func main() {
 
 		if err := cfg.Validate(); err != nil {
 			fmt.Fprintf(os.Stderr, "Configuration error: %s\n\n", err)
-			fmt.Fprintf(os.Stderr, "Set your model:     export XALGORIX_LLM='openai/gpt-4o'\n")
+			fmt.Fprintf(os.Stderr, "Set your model:     export XALGORIX_LLM='openai/gpt-5.4'\n")
 			fmt.Fprintf(os.Stderr, "Set your API key:    export XALGORIX_API_KEY='sk-...'\n")
 			os.Exit(1)
 		}
@@ -164,7 +164,7 @@ func main() {
 
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "Configuration error: %s\n\n", err)
-		fmt.Fprintf(os.Stderr, "Set your model:     export XALGORIX_LLM='openai/gpt-4o'\n")
+		fmt.Fprintf(os.Stderr, "Set your model:     export XALGORIX_LLM='openai/gpt-5.4'\n")
 		fmt.Fprintf(os.Stderr, "Set your API key:    export XALGORIX_API_KEY='sk-...'\n")
 		os.Exit(1)
 	}

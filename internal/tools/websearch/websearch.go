@@ -375,7 +375,7 @@ func searchGemini(query string, max int) ([]searchResult, error) {
 	}
 
 	// Use Gemini's generateContent with grounding (search)
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=%s", apiKey)
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=%s", apiKey)
 
 	requestBody := map[string]interface{}{
 		"contents": []map[string]interface{}{
