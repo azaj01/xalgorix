@@ -11,7 +11,7 @@ Xalgorix is an autonomous AI pentesting agent written in Go. It uses an LLM-driv
 ## Build Commands
 
 ```bash
-make build       # Build binary to ./build/xalgorix (v4.0.7 with injected LDFLAGS)
+make build       # Build binary to ./build/xalgorix (v4.0.8 with injected LDFLAGS)
 make run         # Run with: go run ./cmd/xalgorix/ [args]
 make test        # Run all tests
 make lint        # go fmt + go vet
