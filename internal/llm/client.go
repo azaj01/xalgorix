@@ -36,6 +36,7 @@ type Client struct {
 	cfg        *config.Config
 	httpClient *http.Client
 	apiModel   string
+	provider   string // "openai", "anthropic", "google", "gemini", "deepseek", etc.
 	mu         sync.Mutex
 	totalIn    int
 	totalOut   int
@@ -59,10 +60,15 @@ func (c *Client) GetTokens() (promptTokens, completionTokens, totalTokens int) {
 // NewClient creates a new LLM client.
 func NewClient(cfg *config.Config) *Client {
 	apiModel := cfg.ResolveModel()
+	provider := ""
+	if idx := strings.Index(apiModel, "/"); idx >= 0 {
+		provider = strings.ToLower(apiModel[:idx])
+	}
 	return &Client{
 		cfg:        cfg,
 		httpClient: &http.Client{Timeout: 10 * time.Minute},
 		apiModel:   apiModel,
+		provider:   provider,
 		ctx:        context.Background(), // default context, overridden by SetContext
 	}
 }
@@ -92,6 +98,34 @@ type chatResponse struct {
 	Choices []chatChoice `json:"choices"`
 	Usage   *TokenUsage  `json:"usage,omitempty"`
 }
+
+// ── Google Gemini types ──────────────────────────────────────────────────────
+
+type geminiPart struct {
+	Text string `json:"text"`
+}
+
+type geminiContent struct {
+	Role  string       `json:"role"`
+	Parts []geminiPart `json:"parts"`
+}
+
+type geminiRequest struct {
+	Contents []geminiContent `json:"contents"`
+}
+
+type geminiCandidate struct {
+	Content struct {
+		Parts []geminiPart `json:"parts"`
+	} `json:"content"`
+}
+
+type geminiResponse struct {
+	Candidates []geminiCandidate `json:"candidates"`
+}
+
+// geminiStreamResponse is the same structure but used for SSE streaming responses.
+type geminiStreamResponse = geminiResponse
 
 // resolveEndpoint returns the full chat completions URL and clean model name.
 // Handles provider prefixes like "minimax/", "openai/", "anthropic/", etc.
@@ -210,18 +244,27 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 		defer close(ch)
 
 		endpoint, model := c.resolveEndpoint()
+		isGoogle := c.provider == "google" || c.provider == "gemini"
 
-		reqBody := chatRequest{
-			Model:    model,
-			Messages: messages,
-			Stream:   true,
+		var body []byte
+		if isGoogle {
+			contents := make([]geminiContent, len(messages))
+			for i, m := range messages {
+				contents[i] = geminiContent{Role: m.Role, Parts: []geminiPart{{Text: m.Content}}}
+			}
+			gemReq := geminiRequest{Contents: contents}
+			body, _ = json.Marshal(gemReq)
+			// Google streaming uses alt=sse
+			if !strings.Contains(endpoint, "?") {
+				endpoint += "?alt=sse"
+			} else {
+				endpoint += "&alt=sse"
+			}
+		} else {
+			reqBody := chatRequest{Model: model, Messages: messages, Stream: true}
+			body, _ = json.Marshal(reqBody)
 		}
 
-		body, err := json.Marshal(reqBody)
-		if err != nil {
-			ch <- StreamChunk{Err: fmt.Errorf("failed to marshal request: %w", err)}
-			return
-		}
 		reqCtx := c.ctx
 		if reqCtx == nil {
 			reqCtx = context.Background()
@@ -233,15 +276,13 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 		}
 
 		req.Header.Set("Content-Type", "application/json")
-		if strings.Contains(endpoint, "generativelanguage") || strings.Contains(endpoint, "google") {
-			// Google AI API uses ?key= parameter, not Bearer token
+		if isGoogle {
 			if c.cfg.APIKey != "" {
+				sep := "?"
 				if strings.Contains(endpoint, "?") {
-					endpoint += "&key=" + c.cfg.APIKey
-				} else {
-					endpoint += "?key=" + c.cfg.APIKey
+					sep = "&"
 				}
-				req.URL, _ = url.Parse(endpoint)
+				req.URL, _ = url.Parse(endpoint + sep + "key=" + c.cfg.APIKey)
 				req.Host = req.URL.Host
 			}
 		} else if c.cfg.APIKey != "" {
@@ -266,7 +307,6 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 		}
 
 		scanner := bufio.NewScanner(resp.Body)
-		// Increase scanner buffer for large SSE chunks
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 1024*1024)
 
@@ -282,23 +322,33 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 				return
 			}
 
-			var sseResp chatResponse
-			if err := json.Unmarshal([]byte(data), &sseResp); err != nil {
-				continue
-			}
-
-			// Track token usage from streaming (often in the final chunk)
-			if sseResp.Usage != nil {
-				c.mu.Lock()
-				c.totalIn += sseResp.Usage.PromptTokens
-				c.totalOut += sseResp.Usage.CompletionTokens
-				c.mu.Unlock()
-			}
-
-			if len(sseResp.Choices) > 0 {
-				content := sseResp.Choices[0].Delta.Content
-				if content != "" {
-					ch <- StreamChunk{Content: content}
+			if isGoogle {
+				var gemResp geminiStreamResponse
+				if err := json.Unmarshal([]byte(data), &gemResp); err != nil {
+					continue
+				}
+				if len(gemResp.Candidates) > 0 && len(gemResp.Candidates[0].Content.Parts) > 0 {
+					content := gemResp.Candidates[0].Content.Parts[0].Text
+					if content != "" {
+						ch <- StreamChunk{Content: content}
+					}
+				}
+			} else {
+				var sseResp chatResponse
+				if err := json.Unmarshal([]byte(data), &sseResp); err != nil {
+					continue
+				}
+				if sseResp.Usage != nil {
+					c.mu.Lock()
+					c.totalIn += sseResp.Usage.PromptTokens
+					c.totalOut += sseResp.Usage.CompletionTokens
+					c.mu.Unlock()
+				}
+				if len(sseResp.Choices) > 0 {
+					content := sseResp.Choices[0].Delta.Content
+					if content != "" {
+						ch <- StreamChunk{Content: content}
+					}
 				}
 			}
 		}
@@ -314,17 +364,29 @@ func (c *Client) doChat(messages []Message) (string, error) {
 	endpoint, model := c.resolveEndpoint()
 	log.Printf("[llm] Request → URL=%s model=%s apiModel=%s cfgLLM=%s cfgAPIBase=%s", endpoint, model, c.apiModel, c.cfg.LLM, c.cfg.APIBase)
 
-	reqBody := chatRequest{
-		Model:    model,
-		Messages: messages,
-		Stream:   false,
+	isGoogle := c.provider == "google" || c.provider == "gemini"
+
+	var body []byte
+	var err error
+	if isGoogle {
+		// Google Gemini uses contents/parts format
+		contents := make([]geminiContent, len(messages))
+		for i, m := range messages {
+			contents[i] = geminiContent{Role: m.Role, Parts: []geminiPart{{Text: m.Content}}}
+		}
+		gemReq := geminiRequest{Contents: contents}
+		body, err = json.Marshal(gemReq)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal Gemini request: %w", err)
+		}
+	} else {
+		reqBody := chatRequest{Model: model, Messages: messages, Stream: false}
+		body, err = json.Marshal(reqBody)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal request: %w", err)
+		}
 	}
 
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
-	}
-	// Use agent context so cancel/stop can interrupt this request
 	reqCtx := c.ctx
 	if reqCtx == nil {
 		reqCtx = context.Background()
@@ -335,15 +397,14 @@ func (c *Client) doChat(messages []Message) (string, error) {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if strings.Contains(endpoint, "generativelanguage") || strings.Contains(endpoint, "google") {
-		// Google AI API uses ?key= parameter, not Bearer token
+	if isGoogle {
+		// Google AI API uses ?key= query parameter, not Bearer token
 		if c.cfg.APIKey != "" {
+			sep := "?"
 			if strings.Contains(endpoint, "?") {
-				endpoint += "&key=" + c.cfg.APIKey
-			} else {
-				endpoint += "?key=" + c.cfg.APIKey
+				sep = "&"
 			}
-			req.URL, _ = url.Parse(endpoint)
+			req.URL, _ = url.Parse(endpoint + sep + "key=" + c.cfg.APIKey)
 			req.Host = req.URL.Host
 		}
 	} else if c.cfg.APIKey != "" {
@@ -364,22 +425,29 @@ func (c *Client) doChat(messages []Message) (string, error) {
 		return "", fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
+	if isGoogle {
+		var gemResp geminiResponse
+		if err := json.Unmarshal(respBody, &gemResp); err != nil {
+			return "", fmt.Errorf("failed to parse Gemini response: %w", err)
+		}
+		if len(gemResp.Candidates) == 0 || len(gemResp.Candidates[0].Content.Parts) == 0 {
+			return "", fmt.Errorf("no content in Gemini response")
+		}
+		return gemResp.Candidates[0].Content.Parts[0].Text, nil
+	}
+
 	var chatResp chatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
 		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
-
 	if len(chatResp.Choices) == 0 {
 		return "", fmt.Errorf("no choices in response")
 	}
-
-	// Track token usage
 	if chatResp.Usage != nil {
 		c.mu.Lock()
 		c.totalIn += chatResp.Usage.PromptTokens
 		c.totalOut += chatResp.Usage.CompletionTokens
 		c.mu.Unlock()
 	}
-
 	return chatResp.Choices[0].Message.Content, nil
 }
