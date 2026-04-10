@@ -2258,8 +2258,14 @@ func (s *Server) findScanByID(scanID string) (string, *ScanRecord) {
 
 // rebuildInstancesFromDisk populates s.instances from all saved scan.json files on disk.
 // This ensures the dashboard shows historical scans immediately after server restart.
+// Skips subdomain scans (those with ParentTarget set) — those are shown under their parent.
+// Running scans from a previous server instance are marked as "stopped" since the agent process is gone.
 func (s *Server) rebuildInstancesFromDisk() {
 	for _, entry := range s.findAllScans() {
+		// Skip subdomain scans — they belong to their parent wildcard scan
+		if entry.rec.ParentTarget != "" {
+			continue
+		}
 		inst := &ScanInstance{
 			ID:           entry.rec.ID,
 			Targets:      entry.rec.Target,
@@ -2272,6 +2278,12 @@ func (s *Server) rebuildInstancesFromDisk() {
 			ToolCalls:    entry.rec.ToolCalls,
 			VulnCount:    len(entry.rec.Vulns),
 			TotalTokens:  entry.rec.TotalTokens,
+		}
+		// If scan was "running" from a previous server instance, it's no longer active
+		if inst.Status == "running" {
+			inst.Status = "stopped"
+			inst.StopReason = "server_restart"
+			inst.FinishedAt = time.Now().Format(time.RFC3339)
 		}
 		s.instances[entry.rec.ID] = inst
 	}
