@@ -2658,24 +2658,29 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dir, rec := s.findScanByID(scanID)
-	if rec == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`null`))
-		return
-	}
-
-	// DELETE /api/scans/{id} — delete scan from disk and memory
+	// DELETE /api/scans/{id} — delete scan from disk and in-memory instances
+	// Handle this BEFORE findScanByID because instance IDs (from runMultiScan)
+	// may differ from scan record IDs (directory slugs). We need to clean up both.
 	if r.Method == http.MethodDelete {
+		// Try to find and delete from disk
+		dir, _ := s.findScanByID(scanID)
 		if dir != "" {
 			os.RemoveAll(dir)
 		}
-		// Remove from in-memory instances map
+		// Always remove from in-memory instances map
 		s.instancesMu.Lock()
 		delete(s.instances, scanID)
 		s.instancesMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"deleted"}`))
+		return
+	}
+
+	dir, rec := s.findScanByID(scanID)
+	_ = dir
+	if rec == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`null`))
 		return
 	}
 
