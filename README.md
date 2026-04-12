@@ -191,7 +191,7 @@ git clone https://github.com/xalgord/xalgorix.git
 cd xalgorix
 make install
 
-# Or install via Go (use explicit version, not @latest)
+# Or install via Go
 GOPROXY=direct go install -v github.com/xalgord/xalgorix/v4/cmd/xalgorix@latest
 ```
 
