@@ -20,7 +20,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/web"
 )
 
-var version = "4.0.22"
+var version = "4.0.23"
 
 func main() {
 	// Top-level crash recovery — catches panics that escape all other handlers.
@@ -137,6 +137,25 @@ func main() {
 			fmt.Fprintf(os.Stderr, "\nManual install:\n")
 			fmt.Fprintf(os.Stderr, "  GOPROXY=direct go install -v github.com/xalgord/xalgorix/v4/cmd/xalgorix@v%s\n", latestVer)
 			os.Exit(1)
+		}
+
+		// go install puts the binary in $GOPATH/bin — copy it to the actual
+		// install path if they differ (e.g. /usr/local/bin vs ~/go/bin).
+		goPath := os.Getenv("GOPATH")
+		if goPath == "" {
+			goPath = filepath.Join(os.Getenv("HOME"), "go")
+		}
+		goBinPath := filepath.Join(goPath, "bin", "xalgorix")
+		if goBinPath != installPath {
+			if _, err := os.Stat(goBinPath); err == nil {
+				// Try direct copy first, fall back to sudo cp
+				cpCmd := exec.Command("cp", goBinPath, installPath)
+				if cpErr := cpCmd.Run(); cpErr != nil {
+					cpCmd = exec.Command("sudo", "cp", goBinPath, installPath)
+					cpCmd.Run()
+				}
+				os.Chmod(installPath, 0755)
+			}
 		}
 
 		fmt.Println("✅ Updated successfully!")
@@ -559,6 +578,23 @@ func autoUpdate() {
 		if err := cmd.Run(); err != nil {
 			fmt.Printf("   ⚠️  Auto-update failed: %v (run 'xalgorix --update' manually)\n", err)
 			return
+		}
+
+		// go install puts the binary in $GOPATH/bin — copy to actual install path
+		goPath := os.Getenv("GOPATH")
+		if goPath == "" {
+			goPath = filepath.Join(os.Getenv("HOME"), "go")
+		}
+		goBinPath := filepath.Join(goPath, "bin", "xalgorix")
+		if goBinPath != installPath {
+			if _, statErr := os.Stat(goBinPath); statErr == nil {
+				cpCmd := exec.Command("cp", goBinPath, installPath)
+				if cpErr := cpCmd.Run(); cpErr != nil {
+					cpCmd = exec.Command("sudo", "cp", goBinPath, installPath)
+					cpCmd.Run()
+				}
+				os.Chmod(installPath, 0755)
+			}
 		}
 	}
 
