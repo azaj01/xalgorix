@@ -20,7 +20,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/web"
 )
 
-var version = "4.1.2"
+var version = "4.1.3"
 
 func main() {
 	// Top-level crash recovery — catches panics that escape all other handlers.
@@ -93,6 +93,9 @@ func main() {
 		latestVer, downloadURL := fetchLatestRelease()
 		if latestVer == "" {
 			fmt.Fprintf(os.Stderr, "❌ Failed to fetch latest version from GitHub\n")
+			fmt.Fprintf(os.Stderr, "   This is usually caused by GitHub API rate limiting (60 req/hour for unauthenticated users).\n")
+			fmt.Fprintf(os.Stderr, "   Try again in a few minutes, or update manually:\n")
+			fmt.Fprintf(os.Stderr, "   wget -O $(which xalgorix) https://github.com/xalgord/xalgorix/releases/latest/download/xalgorix-linux-amd64\n")
 			os.Exit(1)
 		}
 
@@ -648,15 +651,31 @@ func execRestart(path string, argv, env []string) error {
 
 // fetchLatestRelease queries GitHub for the latest release version and binary download URL.
 func fetchLatestRelease() (version string, downloadURL string) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get("https://api.github.com/repos/xalgord/xalgorix/releases/latest")
+	client := &http.Client{Timeout: 15 * time.Second}
+
+	// GitHub API requires User-Agent header; missing it returns 403
+	req, err := http.NewRequest("GET", "https://api.github.com/repos/xalgord/xalgorix/releases/latest", nil)
 	if err != nil {
+		return "", ""
+	}
+	req.Header.Set("User-Agent", "xalgorix/"+version)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Update check failed (network): %v", err)
 		return "", ""
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == 403 || resp.StatusCode == 429 {
+		// Rate limited — fall back to tags API (lighter quota)
+		log.Printf("GitHub API rate limited (HTTP %d), trying tags fallback...", resp.StatusCode)
+		return fetchLatestTag(client)
+	}
+
 	if resp.StatusCode != 200 {
-		return "", ""
+		log.Printf("GitHub releases API returned HTTP %d", resp.StatusCode)
+		return fetchLatestTag(client)
 	}
 
 	var release struct {
@@ -686,6 +705,43 @@ func fetchLatestRelease() (version string, downloadURL string) {
 
 	// No binary asset found — return version only (will use go install fallback)
 	return ver, ""
+}
+
+// fetchLatestTag uses the git tags API as a fallback when releases API is rate-limited.
+// Returns only the version (no download URL); caller will use go install or direct download.
+func fetchLatestTag(client *http.Client) (string, string) {
+	req, err := http.NewRequest("GET", "https://api.github.com/repos/xalgord/xalgorix/tags?per_page=1", nil)
+	if err != nil {
+		return "", ""
+	}
+	req.Header.Set("User-Agent", "xalgorix/"+version)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", ""
+	}
+
+	var tags []struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil || len(tags) == 0 {
+		return "", ""
+	}
+
+	ver := strings.TrimPrefix(tags[0].Name, "v")
+	if ver == "" {
+		return "", ""
+	}
+
+	// Build the direct download URL (known pattern)
+	wantName := fmt.Sprintf("xalgorix-%s-%s", runtime.GOOS, runtime.GOARCH)
+	downloadURL := fmt.Sprintf("https://github.com/xalgord/xalgorix/releases/download/v%s/%s", ver, wantName)
+	return ver, downloadURL
 }
 
 // resolveInstallPath determines where the xalgorix binary should be installed.
