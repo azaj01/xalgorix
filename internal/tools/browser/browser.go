@@ -3,11 +3,13 @@ package browser
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -31,7 +33,30 @@ var (
 	currentTab string
 	// Captured cookies for session persistence
 	savedCookies []*proto.NetworkCookie
+	// Disk-backed session path
+	sessionPath string
 )
+
+// savedCookieEntry is a JSON-serializable cookie for disk persistence.
+type savedCookieEntry struct {
+	Name     string `json:"name"`
+	Value    string `json:"value"`
+	Domain   string `json:"domain"`
+	Path     string `json:"path"`
+	Secure   bool   `json:"secure"`
+	HTTPOnly bool   `json:"httponly"`
+}
+
+// SetSessionPath configures where session.json is saved on disk.
+func SetSessionPath(dir string) {
+	mu.Lock()
+	defer mu.Unlock()
+	if dir != "" {
+		sessionPath = filepath.Join(dir, "session.json")
+	} else {
+		sessionPath = ""
+	}
+}
 
 func init() {
 	pages = make(map[string]*rod.Page)
@@ -475,7 +500,7 @@ func setCookie(name, value, domain string) (tools.Result, error) {
 	}, nil
 }
 
-// saveSession saves all current cookies for later restoration
+// saveSession saves all current cookies for later restoration (memory + disk)
 func saveSession() (tools.Result, error) {
 	if page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
@@ -487,17 +512,71 @@ func saveSession() (tools.Result, error) {
 	}
 
 	savedCookies = cookies
+
+	// Persist to disk
+	if sessionPath != "" {
+		entries := make([]savedCookieEntry, 0, len(cookies))
+		for _, c := range cookies {
+			entries = append(entries, savedCookieEntry{
+				Name:     c.Name,
+				Value:    c.Value,
+				Domain:   c.Domain,
+				Path:     c.Path,
+				Secure:   c.Secure,
+				HTTPOnly: c.HTTPOnly,
+			})
+		}
+		data, err := json.MarshalIndent(entries, "", "  ")
+		if err == nil {
+			if err := os.WriteFile(sessionPath, data, 0644); err != nil {
+				log.Printf("[browser] Warning: failed to save session to %s: %v", sessionPath, err)
+			} else {
+				log.Printf("[browser] Session saved to disk: %s (%d cookies)", sessionPath, len(entries))
+			}
+		}
+	}
+
 	return tools.Result{
-		Output: fmt.Sprintf("✅ Session saved: %d cookies stored. Use load_session to restore.", len(cookies)),
+		Output: fmt.Sprintf("✅ Session saved: %d cookies stored (memory + disk). Use load_session to restore.", len(cookies)),
 		Metadata: map[string]any{"cookies_saved": len(cookies)},
 	}, nil
 }
 
-// loadSession restores previously saved cookies
+// loadSession restores previously saved cookies (memory first, then disk fallback)
 func loadSession() (tools.Result, error) {
 	if page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
+
+	// Try disk fallback if no in-memory cookies
+	if len(savedCookies) == 0 && sessionPath != "" {
+		if data, err := os.ReadFile(sessionPath); err == nil {
+			var entries []savedCookieEntry
+			if err := json.Unmarshal(data, &entries); err == nil && len(entries) > 0 {
+				log.Printf("[browser] Loading %d cookies from disk: %s", len(entries), sessionPath)
+				params := make([]*proto.NetworkCookieParam, 0, len(entries))
+				for _, e := range entries {
+					params = append(params, &proto.NetworkCookieParam{
+						Name:     e.Name,
+						Value:    e.Value,
+						Domain:   e.Domain,
+						Path:     e.Path,
+						Secure:   e.Secure,
+						HTTPOnly: e.HTTPOnly,
+					})
+				}
+				if err := page.SetCookies(params); err != nil {
+					return tools.Result{}, fmt.Errorf("failed to restore cookies from disk: %w", err)
+				}
+				page.Timeout(10 * time.Second).Reload()
+				page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
+				return tools.Result{
+					Output: fmt.Sprintf("✅ Session restored from disk: %d cookies loaded and page refreshed.", len(entries)),
+				}, nil
+			}
+		}
+	}
+
 	if len(savedCookies) == 0 {
 		return tools.Result{Output: "No saved session found. Use save_session first after logging in."}, nil
 	}

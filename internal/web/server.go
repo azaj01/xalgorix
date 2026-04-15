@@ -35,6 +35,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/agent"
 	"github.com/xalgord/xalgorix/v4/internal/config"
 	"github.com/xalgord/xalgorix/v4/internal/tools/agentsgraph"
+	"github.com/xalgord/xalgorix/v4/internal/tools/browser"
 	"github.com/xalgord/xalgorix/v4/internal/tools/notes"
 	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
 	"github.com/xalgord/xalgorix/v4/internal/tools/terminal"
@@ -548,6 +549,7 @@ type ScanInstance struct {
 	scanDir     string
 	events      []WSEvent // buffered events for replay
 	mu          sync.RWMutex
+	lastSessionTokens int // tracks token count from current session for delta calculation
 }
 
 const maxConcurrentInstances = 1
@@ -1164,8 +1166,16 @@ func (s *Server) executeScanSession(sess *scanSession) {
 		}()
 	}
 
+	// 1b. Configure notes disk persistence → saves notes.json in scan directory
+	notes.SetPersistPath(sess.scanDir)
+	if !sess.resetState {
+		// Resume scenario: load previously saved notes from disk
+		notes.LoadFromDisk()
+	}
+
 	// 2. Set working directory
 	terminal.SetWorkDir(sess.scanDir)
+	browser.SetSessionPath(sess.scanDir)
 
 	// 3. Create agent with session's config
 	events := make(chan agent.Event, 512)
@@ -1190,6 +1200,7 @@ func (s *Server) executeScanSession(sess *scanSession) {
 			inst.mu.Lock()
 			inst.agent = agnt
 			inst.scanDir = sess.scanDir
+			inst.lastSessionTokens = 0 // reset token delta for this new session/phase
 			inst.mu.Unlock()
 		}
 		s.instancesMu.RUnlock()
@@ -1388,7 +1399,7 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 		log.Printf("[VULN] Finished: total vulns in final broadcast: %d", len(wsEvt.Vulns))
 	}
 
-	// Track stats
+	// Track stats on per-session record
 	if evt.Type == "thinking" {
 		sess.record.Iterations++
 	}
@@ -1399,15 +1410,27 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 		sess.record.TotalTokens = evt.TotalTokens
 	}
 
-	// Update parent instance stats
+	// Update parent instance stats — ACCUMULATE across sessions (phases/subdomains),
+	// don't overwrite. Each subdomain scan creates a fresh scanSession with zeroed
+	// counters, so we increment the instance counters on each event.
 	if sess.instanceID != "" {
 		s.instancesMu.RLock()
 		if inst, ok := s.instances[sess.instanceID]; ok {
 			inst.mu.Lock()
-			inst.Iterations = sess.record.Iterations
-			inst.ToolCalls = sess.record.ToolCalls
-			inst.TotalTokens = sess.record.TotalTokens
-			inst.VulnCount = len(sess.record.Vulns)
+			if evt.Type == "thinking" {
+				inst.Iterations++
+			}
+			if evt.Type == "tool_call" {
+				inst.ToolCalls++
+			}
+			if evt.TotalTokens > 0 {
+				// Tokens are cumulative within a session but reset between sessions,
+				// so we track the delta
+				inst.TotalTokens += evt.TotalTokens - inst.lastSessionTokens
+				inst.lastSessionTokens = evt.TotalTokens
+			}
+			// Vulns: use global reporting store which accumulates across all sessions
+			inst.VulnCount = len(reporting.GetVulnerabilities())
 			inst.mu.Unlock()
 		}
 		s.instancesMu.RUnlock()

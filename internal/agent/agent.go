@@ -885,8 +885,8 @@ func getToolSuggestion(toolName, errorMsg string) string {
 }
 
 // pruneMessages trims the message history to prevent context window overflow.
-// Strategy: keep system prompt (msg[0]), keep last N messages, truncate large tool
-// outputs in older messages.
+// Strategy: keep system prompt (msg[0]), keep last N messages, and re-inject
+// all saved notes so the agent retains accumulated knowledge.
 func (a *Agent) pruneMessages() {
 	a.msgMu.Lock()
 	defer a.msgMu.Unlock()
@@ -908,18 +908,33 @@ func (a *Agent) pruneMessages() {
 	pruned := make([]llm.Message, 0, keepRecent+2)
 	pruned = append(pruned, a.messages[0]) // system prompt
 
-	// Add a strong continuation instruction so the LLM knows context was pruned
+	// Build continuation message with notes injection
+	notesContext := notes.FormatForContext()
+	var continuationMsg string
+	if notesContext != "" {
+		continuationMsg = fmt.Sprintf(`[CONTEXT PRUNED: %d older messages were trimmed to save context space. You are still in the MIDDLE of your scan. DO NOT call finish — continue testing from where you left off.
+
+Your previously saved notes are preserved below. These contain your reconnaissance findings, discovered endpoints, credentials, and exploit chain state:
+
+%s
+
+Review these notes and continue with the next testing phase.]`, cutoff-1, notesContext)
+	} else {
+		continuationMsg = fmt.Sprintf("[CONTEXT PRUNED: %d older messages were trimmed to save context space. You are still in the MIDDLE of your scan. DO NOT call finish — continue testing from where you left off. Review recon data and proceed with the next testing phase.]", cutoff-1)
+	}
+
 	pruned = append(pruned, llm.Message{
 		Role:    "user",
-		Content: fmt.Sprintf("[CONTEXT PRUNED: %d older messages were trimmed to save context space. You are still in the MIDDLE of your scan. DO NOT call finish — continue testing from where you left off. Review recon data and proceed with the next testing phase.]", cutoff-1),
+		Content: continuationMsg,
 	})
 
 	// Keep recent messages intact
 	pruned = append(pruned, a.messages[cutoff:]...)
 	a.messages = pruned
 
-	log.Printf("[agent] Pruned message history: kept %d messages (was %d)", len(a.messages), cutoff+keepRecent)
+	log.Printf("[agent] Pruned message history: kept %d messages (was %d), notes injected: %v", len(a.messages), cutoff+keepRecent, notesContext != "")
 }
+
 
 func (a *Agent) emit(evt Event) {
 	evt.AgentID = a.ID
