@@ -39,7 +39,7 @@
 | Claim | Reality |
 |-------|---------|
 | **Most Complete** | ✅ Only open-source tool with Web UI + Live Feed + Chat + PDF + Discord |
-| **Most Thorough** | ✅ 3 scan modes: Single → DAST → Wildcard (subdomain enum → scan each) |
+| **Most Thorough** | ✅ 3 scan modes + zero-day discovery: Single → DAST → Wildcard + behavioral fuzzing |
 | **Most Automated** | ✅ Auto-installs tools, auto-generates PDF, auto-sends Discord alerts |
 | **Most Flexible** | ✅ Works with any LLM (OpenAI, Anthropic, DeepSeek, **MiniMax ⭐**, Google, Groq, Ollama) |
 | **Most Production-Ready** | ✅ Rate limiting, circuit breaker, queue system, severity filtering |
@@ -54,6 +54,7 @@
 - **🏠 Self-Hosted** — Your data never leaves your machine.
 - **⚡ Lightning Fast** — Uses maximum threads, comprehensive flags.
 - **🎯 Precision** — Only reports exploitable vulnerabilities, not false positives.
+- **🔬 Zero-Day Hunter** — Behavioral fuzzing, parser differentials, and timing side-channels to find novel vulns.
 - **🛡️ Safe** — Blocks destructive commands, rate limiting protects your IP.
 
 ---
@@ -62,7 +63,7 @@
 
 | Feature | Description |
 |---------|-------------|
-| 🤖 **Autonomous Agent** | LLM-driven pentesting with 20-phase methodology |
+| 🤖 **Autonomous Agent** | LLM-driven pentesting with 22-phase methodology |
 | 🎯 **Single Scan** | Scan a single URL/target with full vulnerability testing |
 | 🔍 **DAST Scan** | Scan specific URLs with deep vulnerability testing |
 | 🌐 **Wildcard Scan** | Enum all subdomains → scan each individually |
@@ -85,6 +86,7 @@
 | ✅ **Tool Pre-Check** | Auto-installs missing tools before running |
 | 📧 **AgentMail** | Built-in email for sign-up verification & OTP |
 | 🛡️ **Python venv** | Auto-creates ~/venv for Python tools |
+| 🔬 **Zero-Day Discovery** | Behavioral fuzzing, parser differentials, timing oracles, type confusion |
 
 ---
 
@@ -114,6 +116,7 @@
 | **Exploit Search** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Web Search** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Requires Source Code** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Zero-Day Discovery** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Bug Bounty Focus** | ✅ | ⚠️ SaaS | ✅ | ✅ | ⚠️ MCP | ⚠️ Docker | ✅ |
 
 ### Feature Details
@@ -376,6 +379,12 @@ Xalgorix supports multiple LLM providers:
 
 # Internal network
 "Scan 10.0.0.0/24. Focus on SMB and database services."
+
+# 🔬 Zero-day hunting
+"Focus on zero-day hunting. Use behavioral fuzzing and parser differentials."
+
+# Targeted anomaly research
+"Hunt for novel vulns on the API. Use mutation fuzzing and timing analysis."
 ```
 
 ---
@@ -399,7 +408,7 @@ xalgorix/
 │   │   ├── server.go      # 🌎 HTTP + WebSocket
 │   │   └── static/        # 🎨 Web UI (HTML/CSS/JS)
 │   └── tui/               # 📟 Terminal UI
-└── internal/tools/skills/  # 📚 Vulnerability knowledge
+└── internal/tools/skills/  # 📚 Vulnerability knowledge (zero-day hunting, response anomaly detection, ...)
 ```
 
 ---
@@ -486,7 +495,7 @@ Xalgorix intelligently auto-resolves, installs, and manages **70+ security tools
 
 ---
 
-## 📋 20-Phase Methodology
+## 📋 22-Phase Methodology
 
 1. 🔍 **Recon** — Subdomains, ports, directories
 2. 🦠 **Vuln Scan** — Nuclei, nmap scripts
@@ -507,7 +516,9 @@ Xalgorix intelligently auto-resolves, installs, and manages **70+ security tools
 17. 🔌 **CMS** — WordPress, Joomla, Drupal
 18. 🔗 **Links** — Broken link hijacking
 19. 📦 **Supply Chain** — JS libs, dependencies
-20. 📝 **Report** — JSON + PDF
+20. ✅ **Exploit Verification** — Confirm and verify all findings
+21. 🔬 **Zero-Day Discovery** — Behavioral fuzzing, parser differentials, type confusion, timing oracles
+22. 📝 **Report** — JSON + PDF
 
 ---
 
