@@ -83,7 +83,12 @@ type savedCookieEntry struct {
 
 // SetSessionPath configures where session.json is saved on disk.
 func SetSessionPath(dir string) {
-	s := getBrowserStore()
+	SetSessionPathForCtx(scanctx.Default().ID, dir)
+}
+
+// SetSessionPathForCtx configures session path for a specific context.
+func SetSessionPathForCtx(ctxID, dir string) {
+	s := getBrowserStoreByID(ctxID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if dir != "" {
@@ -96,7 +101,12 @@ func SetSessionPath(dir string) {
 // GetCurrentPage returns the currently active page, or nil if the browser
 // is not launched.
 func GetCurrentPage() *rod.Page {
-	s := getBrowserStore()
+	return GetCurrentPageForCtx(scanctx.Default().ID)
+}
+
+// GetCurrentPageForCtx returns the page for a specific context.
+func GetCurrentPageForCtx(ctxID string) *rod.Page {
+	s := getBrowserStoreByID(ctxID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.page
@@ -104,17 +114,37 @@ func GetCurrentPage() *rod.Page {
 
 // GetBrowser returns the active browser instance, or nil.
 func GetBrowser() *rod.Browser {
-	s := getBrowserStore()
+	return GetBrowserForCtx(scanctx.Default().ID)
+}
+
+// GetBrowserForCtx returns the browser for a specific context.
+func GetBrowserForCtx(ctxID string) *rod.Browser {
+	s := getBrowserStoreByID(ctxID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.browser
 }
 
-// CleanupContext removes the browser store for a deactivated context.
+// CleanupContext closes the browser and removes the store for a deactivated context.
+// This kills the underlying Chromium process to prevent orphaned processes.
 func CleanupContext(contextID string) {
 	browserStoresMu.Lock()
 	defer browserStoresMu.Unlock()
-	delete(browserStores, contextID)
+	if s, ok := browserStores[contextID]; ok {
+		s.mu.Lock()
+		if s.browser != nil {
+			func() {
+				defer func() { recover() }() // don't panic if browser already dead
+				s.browser.MustClose()
+			}()
+			s.browser = nil
+			s.page = nil
+			s.pages = make(map[string]*rod.Page)
+			s.savedCookies = nil
+		}
+		s.mu.Unlock()
+		delete(browserStores, contextID)
+	}
 }
 
 // Register adds browser tools to the registry.
@@ -273,8 +303,8 @@ func extractExtension() (string, error) {
 	return extDir, nil
 }
 
-func ensureBrowser(proxy string) error {
-	s := getBrowserStore()
+func ensureBrowser(ctxID, proxy string) error {
+	s := getBrowserStoreByID(ctxID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -354,73 +384,70 @@ func setupDialogHandler(p *rod.Page) {
 
 // browserActionForRegistry resolves the correct browser store via the registry's ScanContextID.
 func browserActionForRegistry(reg *tools.Registry, args map[string]string) (tools.Result, error) {
-	// The registry carries the correct ScanContextID. For now, the internal
-	// browser functions still use getBrowserStore() which resolves via
-	// scanctx.Default(). This will be fully context-aware in a future pass.
-	_ = reg.GetScanContextID()
-	return browserAction(args)
+	ctxID := reg.GetScanContextID()
+	return browserActionWithContext(ctxID, args)
 }
 
-func browserAction(args map[string]string) (tools.Result, error) {
+func browserActionWithContext(ctxID string, args map[string]string) (tools.Result, error) {
 	command := args["command"]
 
 	switch command {
 	case "launch":
-		return launchBrowser(args["url"], args["proxy"])
+		return launchBrowser(ctxID, args["url"], args["proxy"])
 	case "goto":
-		return navigateTo(args["url"])
+		return navigateTo(ctxID, args["url"])
 	case "snapshot":
-		return takeSnapshot()
+		return takeSnapshot(ctxID)
 	case "click":
-		return clickElement(args["selector"])
+		return clickElement(ctxID, args["selector"])
 	case "type":
-		return typeText(args["selector"], args["text"])
+		return typeText(ctxID, args["selector"], args["text"])
 	case "submit":
-		return submitForm(args["selector"])
+		return submitForm(ctxID, args["selector"])
 	case "scroll":
-		return scrollPage(args["direction"])
+		return scrollPage(ctxID, args["direction"])
 	case "screenshot":
-		return takeScreenshot()
+		return takeScreenshot(ctxID)
 	case "get_html":
-		return getHTML(args["selector"])
+		return getHTML(ctxID, args["selector"])
 	case "execute_js":
-		return executeJS(args["code"])
+		return executeJS(ctxID, args["code"])
 	case "get_cookies":
-		return getCookies()
+		return getCookies(ctxID)
 	case "set_cookie":
-		return setCookie(args["name"], args["text"], args["domain"])
+		return setCookie(ctxID, args["name"], args["text"], args["domain"])
 	case "save_session":
-		return saveSession()
+		return saveSession(ctxID)
 	case "load_session":
-		return loadSession()
+		return loadSession(ctxID)
 	case "wait":
-		return waitFor(args["selector"], args["text"], args["timeout"])
+		return waitFor(ctxID, args["selector"], args["text"], args["timeout"])
 	case "select":
-		return selectOption(args["selector"], args["text"])
+		return selectOption(ctxID, args["selector"], args["text"])
 	case "fill_form":
-		return fillForm(args["fields"])
+		return fillForm(ctxID, args["fields"])
 	case "get_url":
-		return getURL()
+		return getURL(ctxID)
 	case "iframe":
-		return switchToIframe(args["selector"])
+		return switchToIframe(ctxID, args["selector"])
 	case "main_frame":
-		return switchToMainFrame()
+		return switchToMainFrame(ctxID)
 	case "extract_links":
-		return extractLinks()
+		return extractLinks(ctxID)
 	case "new_tab":
-		return newTab(args["url"])
+		return newTab(ctxID, args["url"])
 	case "switch_tab":
-		return switchTab(args["tab_id"])
+		return switchTab(ctxID, args["tab_id"])
 	case "close":
-		return closeBrowser()
+		return closeBrowser(ctxID)
 	default:
 		return tools.Result{}, fmt.Errorf("unknown browser action: %s. Available: launch, goto, snapshot, click, type, submit, scroll, screenshot, get_html, execute_js, get_cookies, set_cookie, save_session, load_session, wait, select, fill_form, get_url, iframe, main_frame, extract_links, new_tab, switch_tab, close", command)
 	}
 }
 
-func launchBrowser(rawURL, proxy string) (tools.Result, error) {
-	s := getBrowserStore()
-	if err := ensureBrowser(proxy); err != nil {
+func launchBrowser(ctxID, rawURL, proxy string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
+	if err := ensureBrowser(ctxID, proxy); err != nil {
 		return tools.Result{}, err
 	}
 
@@ -447,11 +474,11 @@ func launchBrowser(rawURL, proxy string) (tools.Result, error) {
 		}
 	}
 
-	return pageState("Browser launched", tabID)
+	return pageState(ctxID, "Browser launched", tabID)
 }
 
-func navigateTo(rawURL string) (tools.Result, error) {
-	s := getBrowserStore()
+func navigateTo(ctxID, rawURL string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched — use launch first")
 	}
@@ -461,7 +488,7 @@ func navigateTo(rawURL string) (tools.Result, error) {
 		// Wait for both DOM and network to become stable natively
 		s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
 	}
-	return pageState("Navigated", s.currentTab)
+	return pageState(ctxID, "Navigated", s.currentTab)
 }
 
 func parseSelector(selector string) string {
@@ -471,8 +498,8 @@ func parseSelector(selector string) string {
 	return selector
 }
 
-func clickElement(selector string) (tools.Result, error) {
-	s := getBrowserStore()
+func clickElement(ctxID, selector string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -489,11 +516,11 @@ func clickElement(selector string) (tools.Result, error) {
 	// Wait for any navigation or AJAX that results from the click
 	time.Sleep(500 * time.Millisecond)
 	s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
-	return pageState(fmt.Sprintf("Clicked: %s", selector), s.currentTab)
+	return pageState(ctxID, fmt.Sprintf("Clicked: %s", selector), s.currentTab)
 }
 
-func typeText(selector, text string) (tools.Result, error) {
-	s := getBrowserStore()
+func typeText(ctxID, selector, text string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -507,12 +534,12 @@ func typeText(selector, text string) (tools.Result, error) {
 	// Clear existing content and type new text
 	el.MustScrollIntoView()
 	el.MustSelectAllText().MustInput(text)
-	return pageState(fmt.Sprintf("Typed into: %s", selector), s.currentTab)
+	return pageState(ctxID, fmt.Sprintf("Typed into: %s", selector), s.currentTab)
 }
 
 // submitForm submits a form — either clicks the submit button or presses Enter
-func submitForm(selector string) (tools.Result, error) {
-	s := getBrowserStore()
+func submitForm(ctxID, selector string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -553,12 +580,12 @@ func submitForm(selector string) (tools.Result, error) {
 	// Wait for navigation/AJAX after form submission
 	time.Sleep(1 * time.Second)
 	s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
-	return pageState("Form submitted", s.currentTab)
+	return pageState(ctxID, "Form submitted", s.currentTab)
 }
 
 // getCookies returns all cookies for the current page
-func getCookies() (tools.Result, error) {
-	s := getBrowserStore()
+func getCookies(ctxID string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -599,8 +626,8 @@ func getCookies() (tools.Result, error) {
 }
 
 // setCookie sets a cookie on the current page
-func setCookie(name, value, domain string) (tools.Result, error) {
-	s := getBrowserStore()
+func setCookie(ctxID, name, value, domain string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -637,8 +664,8 @@ func setCookie(name, value, domain string) (tools.Result, error) {
 }
 
 // saveSession saves all current cookies for later restoration (memory + disk)
-func saveSession() (tools.Result, error) {
-	s := getBrowserStore()
+func saveSession(ctxID string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -680,8 +707,8 @@ func saveSession() (tools.Result, error) {
 }
 
 // loadSession restores previously saved cookies (memory first, then disk fallback)
-func loadSession() (tools.Result, error) {
-	s := getBrowserStore()
+func loadSession(ctxID string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -745,8 +772,8 @@ func loadSession() (tools.Result, error) {
 }
 
 // waitFor waits for an element to appear, navigation to complete, or a timeout
-func waitFor(selector, waitType, timeoutStr string) (tools.Result, error) {
-	s := getBrowserStore()
+func waitFor(ctxID, selector, waitType, timeoutStr string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -774,10 +801,10 @@ func waitFor(selector, waitType, timeoutStr string) (tools.Result, error) {
 			info, _ = s.page.Info()
 			if info != nil && info.URL != oldURL {
 				s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
-				return pageState("Navigation detected", s.currentTab)
+				return pageState(ctxID, "Navigation detected", s.currentTab)
 			}
 		}
-		return pageState("Wait completed (no navigation detected)", s.currentTab)
+		return pageState(ctxID, "Wait completed (no navigation detected)", s.currentTab)
 	}
 
 	if selector != "" {
@@ -786,17 +813,17 @@ func waitFor(selector, waitType, timeoutStr string) (tools.Result, error) {
 		if err != nil {
 			return tools.Result{Output: fmt.Sprintf("Element '%s' did not appear within %v", selector, timeout)}, nil
 		}
-		return pageState(fmt.Sprintf("Element found: %s", selector), s.currentTab)
+		return pageState(ctxID, fmt.Sprintf("Element found: %s", selector), s.currentTab)
 	}
 
 	// Default: just wait for page to stabilize
 	s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
-	return pageState("Page stabilized", s.currentTab)
+	return pageState(ctxID, "Page stabilized", s.currentTab)
 }
 
 // selectOption selects an option from a <select> dropdown
-func selectOption(selector, value string) (tools.Result, error) {
-	s := getBrowserStore()
+func selectOption(ctxID, selector, value string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -833,8 +860,8 @@ func selectOption(selector, value string) (tools.Result, error) {
 }
 
 // fillForm auto-fills multiple form fields at once
-func fillForm(fields string) (tools.Result, error) {
-	s := getBrowserStore()
+func fillForm(ctxID, fields string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -890,8 +917,8 @@ func fillForm(fields string) (tools.Result, error) {
 }
 
 // getURL returns the current page URL
-func getURL() (tools.Result, error) {
-	s := getBrowserStore()
+func getURL(ctxID string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -908,8 +935,8 @@ func getURL() (tools.Result, error) {
 }
 
 // switchToIframe switches page context into an iframe
-func switchToIframe(selector string) (tools.Result, error) {
-	s := getBrowserStore()
+func switchToIframe(ctxID, selector string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -949,22 +976,22 @@ func switchToIframe(selector string) (tools.Result, error) {
 }
 
 // switchToMainFrame switches back to the main page from an iframe
-func switchToMainFrame() (tools.Result, error) {
-	s := getBrowserStore()
+func switchToMainFrame(ctxID string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	// Find the first non-iframe tab
 	for id, p := range s.pages {
 		if !strings.HasPrefix(id, "iframe_") {
 			s.page = p
 			s.currentTab = id
-			return pageState("Switched to main frame", s.currentTab)
+			return pageState(ctxID, "Switched to main frame", s.currentTab)
 		}
 	}
 	return tools.Result{Output: "No main frame found"}, nil
 }
 
 // extractLinks extracts all links from the current page
-func extractLinks() (tools.Result, error) {
-	s := getBrowserStore()
+func extractLinks(ctxID string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -1000,8 +1027,8 @@ func extractLinks() (tools.Result, error) {
 	}, nil
 }
 
-func scrollPage(direction string) (tools.Result, error) {
-	s := getBrowserStore()
+func scrollPage(ctxID, direction string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -1016,11 +1043,11 @@ func scrollPage(direction string) (tools.Result, error) {
 	}
 
 	time.Sleep(500 * time.Millisecond)
-	return pageState(fmt.Sprintf("Scrolled %s", direction), s.currentTab)
+	return pageState(ctxID, fmt.Sprintf("Scrolled %s", direction), s.currentTab)
 }
 
-func takeScreenshot() (tools.Result, error) {
-	s := getBrowserStore()
+func takeScreenshot(ctxID string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -1046,8 +1073,8 @@ func takeScreenshot() (tools.Result, error) {
 }
 
 // takeSnapshot returns an enhanced accessibility tree with form-aware element detection
-func takeSnapshot() (tools.Result, error) {
-	s := getBrowserStore()
+func takeSnapshot(ctxID string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -1137,8 +1164,8 @@ func takeSnapshot() (tools.Result, error) {
 	}, nil
 }
 
-func getHTML(selector string) (tools.Result, error) {
-	s := getBrowserStore()
+func getHTML(ctxID, selector string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -1162,8 +1189,8 @@ func getHTML(selector string) (tools.Result, error) {
 	return tools.Result{Output: html}, nil
 }
 
-func executeJS(code string) (tools.Result, error) {
-	s := getBrowserStore()
+func executeJS(ctxID, code string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -1187,8 +1214,8 @@ func executeJS(code string) (tools.Result, error) {
 	return tools.Result{Output: result.Value.String()}, nil
 }
 
-func newTab(rawURL string) (tools.Result, error) {
-	s := getBrowserStore()
+func newTab(ctxID, rawURL string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.browser == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -1210,23 +1237,23 @@ func newTab(rawURL string) (tools.Result, error) {
 		}
 	}
 
-	return pageState("New tab opened", tabID)
+	return pageState(ctxID, "New tab opened", tabID)
 }
 
-func switchTab(tabID string) (tools.Result, error) {
-	s := getBrowserStore()
+func switchTab(ctxID, tabID string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	p, ok := s.pages[tabID]
 	if !ok {
-		return tools.Result{}, fmt.Errorf("tab not found: %s (available: %v)", tabID, tabList())
+		return tools.Result{}, fmt.Errorf("tab not found: %s (available: %v)", tabID, tabListForCtx(ctxID))
 	}
 
 	s.page = p
 	s.currentTab = tabID
-	return pageState("Switched tab", tabID)
+	return pageState(ctxID, "Switched tab", tabID)
 }
 
-func closeBrowser() (tools.Result, error) {
-	s := getBrowserStore()
+func closeBrowser(ctxID string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1265,8 +1292,8 @@ func CleanupBrowser() {
 	}
 }
 
-func pageState(action, tabID string) (tools.Result, error) {
-	s := getBrowserStore()
+func pageState(ctxID, action, tabID string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
 	if s.page == nil {
 		return tools.Result{Output: action}, nil
 	}
@@ -1292,7 +1319,7 @@ func pageState(action, tabID string) (tools.Result, error) {
 	// List all tabs
 	if len(s.pages) > 1 {
 		b.WriteString("  All tabs: ")
-		b.WriteString(strings.Join(tabList(), ", "))
+		b.WriteString(strings.Join(tabListForCtx(ctxID), ", "))
 		b.WriteString("\n")
 	}
 
@@ -1306,8 +1333,8 @@ func pageState(action, tabID string) (tools.Result, error) {
 	}, nil
 }
 
-func tabList() []string {
-	s := getBrowserStore()
+func tabListForCtx(ctxID string) []string {
+	s := getBrowserStoreByID(ctxID)
 	tabs := make([]string, 0, len(s.pages))
 	for id := range s.pages {
 		tabs = append(tabs, id)

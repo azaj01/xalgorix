@@ -104,33 +104,33 @@ func CurrentLevel() (Level, string) {
 	cpuCriticalLoad := float64(stats.CPUCores) * cpuCriticalPct / 100
 
 	if stats.LoadAvg1m >= cpuCriticalLoad {
-		level = max(level, LevelCritical)
+		level = maxLevel(level, LevelCritical)
 		reasons = append(reasons, fmt.Sprintf("CPU critical: load %.1f ≥ %.1f (%d%% of %d cores)",
 			stats.LoadAvg1m, cpuCriticalLoad, int(cpuCriticalPct), stats.CPUCores))
 	} else if stats.LoadAvg1m >= cpuCautionLoad {
-		level = max(level, LevelCaution)
+		level = maxLevel(level, LevelCaution)
 		reasons = append(reasons, fmt.Sprintf("CPU high: load %.1f ≥ %.1f (%d%% of %d cores)",
 			stats.LoadAvg1m, cpuCautionLoad, int(cpuCautionPct), stats.CPUCores))
 	}
 
 	// ── RAM check ──
 	if stats.MemAvailableMB < ramCriticalMB {
-		level = max(level, LevelCritical)
+		level = maxLevel(level, LevelCritical)
 		reasons = append(reasons, fmt.Sprintf("RAM critical: %d MB free < %d MB min",
 			stats.MemAvailableMB, ramCriticalMB))
 	} else if stats.MemAvailableMB < ramCautionMB {
-		level = max(level, LevelCaution)
+		level = maxLevel(level, LevelCaution)
 		reasons = append(reasons, fmt.Sprintf("RAM low: %d MB free < %d MB caution",
 			stats.MemAvailableMB, ramCautionMB))
 	}
 
 	// ── Disk check ──
 	if stats.DiskFreeMB < diskCriticalMB {
-		level = max(level, LevelCritical)
+		level = maxLevel(level, LevelCritical)
 		reasons = append(reasons, fmt.Sprintf("Disk critical: %d MB free < %d MB min",
 			stats.DiskFreeMB, diskCriticalMB))
 	} else if stats.DiskFreeMB < diskCautionMB {
-		level = max(level, LevelCaution)
+		level = maxLevel(level, LevelCaution)
 		reasons = append(reasons, fmt.Sprintf("Disk low: %d MB free < %d MB caution",
 			stats.DiskFreeMB, diskCautionMB))
 	}
@@ -298,7 +298,7 @@ func envInt(key string, defaultVal int) int {
 }
 
 // max returns the larger of two Levels.
-func max(a, b Level) Level {
+func maxLevel(a, b Level) Level {
 	if a > b {
 		return a
 	}

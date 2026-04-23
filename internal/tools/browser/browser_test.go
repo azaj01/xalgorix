@@ -4,11 +4,19 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/xalgord/xalgorix/v4/internal/scanctx"
+	"github.com/xalgord/xalgorix/v4/internal/tools"
 )
+
+// testBrowserAction is a test helper that routes through the default ScanContext.
+func testBrowserAction(args map[string]string) (tools.Result, error) {
+	return browserActionWithContext(scanctx.Default().ID, args)
+}
 
 func TestBrowserSnapshot(t *testing.T) {
 	// 1. Launch browser to example.com
-	res, err := browserAction(map[string]string{
+	res, err := testBrowserAction(map[string]string{
 		"command": "launch",
 		"url":     "https://example.com",
 	})
@@ -18,7 +26,7 @@ func TestBrowserSnapshot(t *testing.T) {
 
 	// 2. Inject interactive elements
 	jsCode := `() => { document.body.innerHTML = '<h1>Test Page</h1><input type="text" placeholder="Username"><button>Click Me</button><a href="#" style="display:none;">Hidden Link</a>'; }`
-	_, err = browserAction(map[string]string{
+	_, err = testBrowserAction(map[string]string{
 		"command": "execute_js",
 		"code":    jsCode,
 	})
@@ -27,13 +35,13 @@ func TestBrowserSnapshot(t *testing.T) {
 	}
 
 	// 3. Take snapshot
-	res, err = browserAction(map[string]string{
+	res, err = testBrowserAction(map[string]string{
 		"command": "snapshot",
 	})
 	if err != nil {
 		t.Fatalf("Snapshot failed: %v", err)
 	}
-	
+
 	output := res.Output
 	fmt.Println("SNAPSHOT OUTPUT:\n", output)
 
@@ -48,7 +56,7 @@ func TestBrowserSnapshot(t *testing.T) {
 	}
 
 	// 4. Test Semantic Type
-	_, err = browserAction(map[string]string{
+	_, err = testBrowserAction(map[string]string{
 		"command":  "type",
 		"selector": "@e1",
 		"text":     "admin_user",
@@ -58,7 +66,7 @@ func TestBrowserSnapshot(t *testing.T) {
 	}
 
 	// 5. Test Semantic Click
-	_, err = browserAction(map[string]string{
+	_, err = testBrowserAction(map[string]string{
 		"command":  "click",
 		"selector": "@e2",
 	})
@@ -67,7 +75,7 @@ func TestBrowserSnapshot(t *testing.T) {
 	}
 
 	// 6. Cleanup
-	browserAction(map[string]string{
+	testBrowserAction(map[string]string{
 		"command": "close",
 	})
 }

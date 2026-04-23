@@ -79,27 +79,29 @@ ELEMENT IDs:
 			{Name: "text", Description: "Text to type (for interact with type action) or select value", Required: false},
 			{Name: "timeout", Description: "Timeout in seconds (for wait_element, default: 10)", Required: false},
 		},
-		Execute: pageAgentAction,
+		Execute: func(args map[string]string) (tools.Result, error) {
+			return pageAgentAction(r.GetScanContextID(), args)
+		},
 	})
 }
 
-func pageAgentAction(args map[string]string) (tools.Result, error) {
+func pageAgentAction(ctxID string, args map[string]string) (tools.Result, error) {
 	command := args["command"]
 	switch command {
 	case "discover_menus":
-		return discoverMenus()
+		return discoverMenus(ctxID)
 	case "discover_ui":
-		return discoverUI()
+		return discoverUI(ctxID)
 	case "interact":
-		return interact(args["id"], args["action"], args["text"])
+		return interact(ctxID, args["id"], args["action"], args["text"])
 	case "get_menu_tree":
-		return getMenuTree()
+		return getMenuTree(ctxID)
 	case "hover_probe":
-		return hoverProbe(args["id"])
+		return hoverProbe(ctxID, args["id"])
 	case "wait_element":
-		return waitElement(args["selector"], args["timeout"])
+		return waitElement(ctxID, args["selector"], args["timeout"])
 	case "get_element_state":
-		return getElementState(args["id"])
+		return getElementState(ctxID, args["id"])
 	default:
 		return tools.Result{}, fmt.Errorf("unknown page_agent command: %s. Available: discover_menus, discover_ui, interact, get_menu_tree, hover_probe, wait_element, get_element_state", command)
 	}
@@ -114,8 +116,8 @@ func parseXPAID(id string) string {
 
 // ensureController injects the controller.js script if not already injected.
 // Queries the page directly rather than relying on package-level state.
-func ensureController() error {
-	page := browser.GetCurrentPage()
+func ensureController(ctxID string) error {
+	page := browser.GetCurrentPageForCtx(ctxID)
 	if page == nil {
 		return fmt.Errorf("browser not launched — use browser_action launch first")
 	}
@@ -146,7 +148,7 @@ func resetControllerState() {
 
 // discoverMenus runs the discovery script and returns structured results.
 // Tries extension bridge first, falls back to CDP Eval.
-func discoverMenus() (tools.Result, error) {
+func discoverMenus(ctxID string) (tools.Result, error) {
 	// Reset controller state since discovery re-tags elements
 	resetControllerState()
 
@@ -164,7 +166,7 @@ func discoverMenus() (tools.Result, error) {
 
 	// CDP fallback
 	if raw == "" {
-		page := browser.GetCurrentPage()
+		page := browser.GetCurrentPageForCtx(ctxID)
 		if page == nil {
 			return tools.Result{}, fmt.Errorf("browser not launched — use browser_action launch first")
 		}
@@ -296,14 +298,14 @@ func formatElement(b *strings.Builder, m map[string]interface{}, indent string) 
 }
 
 // discoverUI is an alias for discoverMenus with tree formatting.
-func discoverUI() (tools.Result, error) {
-	return discoverMenus()
+func discoverUI(ctxID string) (tools.Result, error) {
+	return discoverMenus(ctxID)
 }
 
 // interact executes an action on a specific element.
 // HYBRID APPROACH: Uses Rod's native CDP Input domain for physical interactions
 // (isTrusted:true), falls back to JS synthetic events only when native fails.
-func interact(id, action, text string) (tools.Result, error) {
+func interact(ctxID, id, action, text string) (tools.Result, error) {
 	if id == "" {
 		return tools.Result{}, fmt.Errorf("id parameter is required (e.g., @xpa5)")
 	}
@@ -319,7 +321,7 @@ func interact(id, action, text string) (tools.Result, error) {
 		return tools.Result{}, fmt.Errorf("text parameter is required for %s action", action)
 	}
 
-	page := browser.GetCurrentPage()
+	page := browser.GetCurrentPageForCtx(ctxID)
 	if page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched — use browser_action launch first")
 	}
@@ -388,7 +390,7 @@ func interact(id, action, text string) (tools.Result, error) {
 	}
 
 	// ── CDP Eval fallback (isTrusted:false) ────────────────────────
-	if err := ensureController(); err != nil {
+	if err := ensureController(ctxID); err != nil {
 		return tools.Result{}, err
 	}
 
@@ -519,8 +521,8 @@ func getCurrentURL(page *rod.Page) string {
 }
 
 // getMenuTree returns a hierarchical view of navigation menus.
-func getMenuTree() (tools.Result, error) {
-	page := browser.GetCurrentPage()
+func getMenuTree(ctxID string) (tools.Result, error) {
+	page := browser.GetCurrentPageForCtx(ctxID)
 	if page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -601,7 +603,7 @@ func formatMenuNode(b *strings.Builder, m map[string]interface{}, indent string)
 }
 
 // hoverProbe hovers over an element and reports what new elements appeared.
-func hoverProbe(id string) (tools.Result, error) {
+func hoverProbe(ctxID, id string) (tools.Result, error) {
 	if id == "" {
 		return tools.Result{}, fmt.Errorf("id parameter is required")
 	}
@@ -620,13 +622,13 @@ func hoverProbe(id string) (tools.Result, error) {
 	}
 
 	// CDP fallback — hover then re-discover
-	result, err := interact(id, "hover", "")
+	result, err := interact(ctxID, id, "hover", "")
 	if err != nil {
 		return result, err
 	}
 
 	// After hovering, run a quick discovery to see what's new
-	page := browser.GetCurrentPage()
+	page := browser.GetCurrentPageForCtx(ctxID)
 	if page == nil {
 		return result, nil
 	}
@@ -699,7 +701,7 @@ func hoverProbe(id string) (tools.Result, error) {
 }
 
 // waitElement waits for a CSS selector to appear in the DOM.
-func waitElement(selector, timeoutStr string) (tools.Result, error) {
+func waitElement(ctxID, selector, timeoutStr string) (tools.Result, error) {
 	if selector == "" {
 		return tools.Result{}, fmt.Errorf("selector parameter is required")
 	}
@@ -725,11 +727,11 @@ func waitElement(selector, timeoutStr string) (tools.Result, error) {
 	}
 
 	// CDP fallback
-	if err := ensureController(); err != nil {
+	if err := ensureController(ctxID); err != nil {
 		return tools.Result{}, err
 	}
 
-	page := browser.GetCurrentPage()
+	page := browser.GetCurrentPageForCtx(ctxID)
 	if page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
@@ -745,7 +747,7 @@ func waitElement(selector, timeoutStr string) (tools.Result, error) {
 }
 
 // getElementState returns the current state of an element.
-func getElementState(id string) (tools.Result, error) {
+func getElementState(ctxID, id string) (tools.Result, error) {
 	if id == "" {
 		return tools.Result{}, fmt.Errorf("id parameter is required")
 	}
@@ -778,11 +780,11 @@ func getElementState(id string) (tools.Result, error) {
 	}
 
 	// CDP fallback
-	if err := ensureController(); err != nil {
+	if err := ensureController(ctxID); err != nil {
 		return tools.Result{}, err
 	}
 
-	page := browser.GetCurrentPage()
+	page := browser.GetCurrentPageForCtx(ctxID)
 	if page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}

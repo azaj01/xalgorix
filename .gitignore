@@ -43,3 +43,4 @@ __debug_bin*
 tmp/
 *.log
 nohup.out
+gospider/

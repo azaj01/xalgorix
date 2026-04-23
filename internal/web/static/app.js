@@ -654,12 +654,15 @@
         // Calculate total tool calls
         const totalCalls = Object.values(toolUsage).reduce((sum, count) => sum + count, 0);
         
-        // Update header stat to match
-        const headerToolEl = document.getElementById('stat-tools');
-        if (headerToolEl) headerToolEl.textContent = totalCalls;
+        // Only update header stat when viewing a specific scan instance,
+        // not on dashboard (where refreshInstances handles aggregation)
+        if (currentView === 'scan') {
+            const headerToolEl = document.getElementById('stat-tools');
+            if (headerToolEl) headerToolEl.textContent = totalCalls;
+        }
         
         // Show total in sidebar count
-        countEl.textContent = totalCalls;
+        if (countEl) countEl.textContent = totalCalls;
         
         if (entries.length === 0) {
             list.innerHTML = '<li class="empty-state" style="padding: 20px 0"><div class="empty-title" style="font-size: 13px">No tools used yet</div></li>';
@@ -1545,6 +1548,10 @@
         document.getElementById('scan-view').classList.add('hidden');
         history.replaceState(null, '', '/');
         
+        // Reset local scan counters so they don't leak into dashboard
+        iterCount = 0; toolCount = 0; vulnCount = 0;
+        Object.keys(toolUsage).forEach(k => delete toolUsage[k]);
+        
         // Unsubscribe from instance events
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ unsubscribe: true }));
@@ -1785,7 +1792,37 @@
             const data = await resp.json();
             // API returns { instances: [...], resources: {...} }
             const instances = data.instances || data || [];
-            renderInstanceGrid(Array.isArray(instances) ? instances : []);
+            const list = Array.isArray(instances) ? instances : [];
+            renderInstanceGrid(list);
+
+            // Aggregate stats across all instances and update header
+            if (currentView === 'dashboard') {
+                let totalIter = 0, totalTools = 0, totalVulns = 0, totalTok = 0;
+                list.forEach(inst => {
+                    totalIter += inst.iterations || 0;
+                    totalTools += inst.tool_calls || 0;
+                    totalVulns += inst.vuln_count || 0;
+                    totalTok += inst.total_tokens || 0;
+                });
+                const iterEl = document.getElementById('stat-iter');
+                const toolsEl = document.getElementById('stat-tools');
+                const vulnsEl = document.getElementById('stat-vulns');
+                const tokensEl = document.getElementById('stat-tokens');
+                if (iterEl) iterEl.textContent = String(totalIter);
+                if (toolsEl) toolsEl.textContent = String(totalTools);
+                if (vulnsEl) vulnsEl.textContent = String(totalVulns);
+                if (tokensEl) tokensEl.textContent = formatTokens(totalTok);
+
+                // Update status badge to reflect aggregate state
+                const hasRunning = list.some(inst => inst.status === 'running');
+                if (hasRunning) {
+                    setStatus('running', 'SCANNING');
+                } else if (list.length > 0) {
+                    setStatus('finished', 'IDLE');
+                } else {
+                    setStatus('idle', 'IDLE');
+                }
+            }
         } catch (e) {
             console.error('Failed to fetch instances:', e);
         }

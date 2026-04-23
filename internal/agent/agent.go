@@ -532,7 +532,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 				a.msgMu.Unlock()
 			}
 			if stuckResult.CleanupBrowser {
-				browser.CleanupBrowser()
+				browser.CleanupContext(a.scanCtx.ID)
 			}
 			if stuckResult.ForceSkip {
 				continue // skip executing this tool call
