@@ -696,6 +696,32 @@ func getToolSuggestion(toolName, errorMsg string) string {
 // pruneMessages trims the message history to prevent context window overflow.
 // Strategy: keep system prompt (msg[0]), keep last N messages, and re-inject
 // all saved notes so the agent retains accumulated knowledge.
+// alignPruneCutoff returns an index >= start such that messages[idx:]
+// begins with an "assistant" message (or, if no assistant message remains
+// after start, the last message). pruneMessages inserts a synthetic "user"
+// message right before the kept tail; advancing the cutoff to an assistant
+// boundary preserves user/assistant alternation, which Anthropic enforces
+// strictly. Pure function so it's straightforward to regression-test.
+func alignPruneCutoff(messages []llm.Message, start int) int {
+	if start < 1 {
+		start = 1
+	}
+	cutoff := start
+	for cutoff < len(messages) && messages[cutoff].Role != "assistant" {
+		cutoff++
+	}
+	if cutoff >= len(messages) {
+		// No assistant message remains after `start`. Keep at least the
+		// last message rather than pruning everything below the system
+		// prompt.
+		cutoff = len(messages) - 1
+		if cutoff < 1 {
+			cutoff = 1
+		}
+	}
+	return cutoff
+}
+
 func (a *Agent) pruneMessages() {
 	a.msgMu.Lock()
 	defer a.msgMu.Unlock()
@@ -715,24 +741,7 @@ func (a *Agent) pruneMessages() {
 	originalLen := len(a.messages)
 
 	// Build pruned list: system prompt + continuation marker + recent messages
-	cutoff := len(a.messages) - keepRecent
-
-	// We're about to insert a synthetic "user" message right before
-	// messages[cutoff:]. To preserve user/assistant alternation (Anthropic
-	// rejects two consecutive same-role messages, and OpenAI happily
-	// processes a tool_result with no preceding tool_call into garbage),
-	// advance cutoff until the kept tail begins with an "assistant" message.
-	for cutoff < len(a.messages) && a.messages[cutoff].Role != "assistant" {
-		cutoff++
-	}
-	// Fallback: if no assistant message remains, keep at least the last
-	// message rather than pruning everything below the system prompt.
-	if cutoff >= len(a.messages) {
-		cutoff = len(a.messages) - 1
-		if cutoff < 1 {
-			cutoff = 1
-		}
-	}
+	cutoff := alignPruneCutoff(a.messages, len(a.messages)-keepRecent)
 
 	pruned := make([]llm.Message, 0, len(a.messages)-cutoff+2)
 	pruned = append(pruned, a.messages[0]) // system prompt

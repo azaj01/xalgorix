@@ -21,6 +21,14 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/web"
 )
 
+// version is the build-time version string. CI/release flow should
+// override it with -ldflags so the released binary reports the actual tag:
+//
+//	go build -ldflags "-X main.version=$(git describe --tags --dirty)" ./cmd/xalgorix
+//
+// The hardcoded fallback is only used when developers `go run` the package
+// without ldflags. It is a `var` (not `const`) precisely so ldflags can
+// rewrite it.
 var version = "4.2.2"
 
 func main() {
