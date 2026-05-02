@@ -1281,7 +1281,9 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 	// POST /api/instances/{id}/stop — stop specific instance
 	if len(parts) >= 2 && parts[1] == "stop" && r.Method == http.MethodPost {
 		inst.mu.Lock()
-		if inst.Status == "running" {
+		// BUG FIX: Also handle "pending" instances, not just "running".
+		// Without this, queued scans cannot be stopped from the UI.
+		if inst.Status == "running" || inst.Status == "pending" {
 			inst.Status = "stopped"
 			inst.StopReason = "user_stopped"
 			inst.FinishedAt = time.Now().Format(time.RFC3339)
@@ -1305,6 +1307,21 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 
 	// POST /api/instances/{id}/restart — restart scan with same config
 	if len(parts) >= 2 && parts[1] == "restart" && r.Method == http.MethodPost {
+		// BUG FIX: Validate that the instance is NOT still active before restarting.
+		// Without this guard, restarting a running/pending instance creates a
+		// duplicate scan, doubling resource usage against the same targets.
+		inst.mu.RLock()
+		currentStatus := inst.Status
+		inst.mu.RUnlock()
+		if currentStatus == "running" || currentStatus == "pending" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "cannot restart: instance is still " + currentStatus,
+			})
+			return
+		}
+
 		inst.mu.RLock()
 		targets := strings.Split(inst.Targets, ", ")
 		instruction := inst.Instruction
@@ -1312,6 +1329,10 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 		severityFilter := inst.SeverityFilter
 		discordWebhook := inst.DiscordWebhook
 		inst.mu.RUnlock()
+
+		// Clear global stop flag so the restarted scan isn't immediately aborted
+		// by the queue wait loop checking stopReq.
+		s.stopReq.Store(false)
 
 		// Build a new ScanRequest from stored config
 		req := ScanRequest{
@@ -1445,9 +1466,13 @@ func (sess *scanSession) cleanup() {
 	sess.server.instancesMu.RLock()
 	runningCount := 0
 	for _, inst := range sess.server.instances {
+		// BUG FIX: Must hold inst.mu.RLock() when reading inst.Status
+		// to avoid data race with goroutines mutating it under inst.mu.Lock().
+		inst.mu.RLock()
 		if inst.Status == "running" {
 			runningCount++
 		}
+		inst.mu.RUnlock()
 	}
 	sess.server.instancesMu.RUnlock()
 	if runningCount <= 1 {
@@ -1656,8 +1681,8 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 				allowed := true
 				if len(sess.severityFilter) > 0 {
 					allowed = false
-					for _, s := range sess.severityFilter {
-						if strings.EqualFold(s, vs.Severity) {
+					for _, sev := range sess.severityFilter {
+						if strings.EqualFold(sev, vs.Severity) {
 							allowed = true
 							break
 						}
@@ -1737,8 +1762,8 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 			allowed := true
 			if len(sess.severityFilter) > 0 {
 				allowed = false
-				for _, s := range sess.severityFilter {
-					if strings.EqualFold(s, vs.Severity) {
+				for _, sev := range sess.severityFilter {
+					if strings.EqualFold(sev, vs.Severity) {
 						allowed = true
 						break
 					}
@@ -1876,6 +1901,79 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 	// Broadcast to dashboard
 	s.broadcastDashboard(WSEvent{Type: "instance_started", Content: instanceID})
 
+	// BUG 1 FIX (CRITICAL): The defer cleanup MUST be registered BEFORE the queue
+	// wait loop. Previously, early returns from the loop (stopped-while-pending)
+	// bypassed cleanup entirely, leaking the instance in s.instances forever and
+	// leaving stale state in currentAgents, s.running, etc.
+	//
+	// The `ranScan` flag distinguishes between:
+	//   false → instance was stopped while pending (lightweight cleanup only)
+	//   true  → instance ran and needs full post-scan cleanup
+	ranScan := false
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[CRITICAL] runMultiScan goroutine panicked: %v\n%s", r, debug.Stack())
+			s.broadcastToInstance(instanceID, WSEvent{Type: "error", Content: fmt.Sprintf("⛔ Scan goroutine crashed: %v — cleaning up", r)})
+		}
+
+		// Mark instance as finished (if still running)
+		instance.mu.Lock()
+		if instance.Status == "running" {
+			instance.Status = "finished"
+		}
+		instance.FinishedAt = time.Now().Format(time.RFC3339)
+		instance.mu.Unlock()
+
+		// Full post-scan cleanup only when the scan actually ran.
+		// Pending→stopped instances skip queue/agent teardown since
+		// they never acquired resources.
+		if ranScan {
+			// Only clear queue state if scan finished normally (not from signal).
+			// Signal-stopped scans preserve queue state so auto-resume works on restart.
+			preserveQueue := false
+			instance.mu.RLock()
+			if strings.HasPrefix(instance.StopReason, "signal_") {
+				preserveQueue = true
+			}
+			instance.mu.RUnlock()
+			if !preserveQueue {
+				s.clearQueueState()
+			} else {
+				log.Printf("[SHUTDOWN] Preserving queue state for auto-resume after signal stop")
+			}
+		}
+
+		// Always clean up server references (safe even if never set)
+		s.mu.Lock()
+		if s.currentScanID == instanceID {
+			s.cancelScan = nil
+			delete(s.currentAgents, instanceID)
+		}
+		s.mu.Unlock()
+
+		s.broadcastToInstance(instanceID, WSEvent{Type: "queue_finished", Content: "Scan queue ended"})
+		s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
+		time.Sleep(500 * time.Millisecond)
+
+		// Only set running=false if no other instances are running
+		s.instancesMu.RLock()
+		stillRunning := false
+		for _, inst := range s.instances {
+			inst.mu.RLock()
+			isRunning := inst.Status == "running" && inst.ID != instanceID
+			inst.mu.RUnlock()
+			if isRunning {
+				stillRunning = true
+				break
+			}
+		}
+		s.instancesMu.RUnlock()
+		if !stillRunning {
+			s.running.Store(false)
+		}
+		log.Printf("[INFO] runMultiScan instance %s exited (ranScan=%v)", instanceID, ranScan)
+	}()
+
 	// Wait in queue until slot is available.
 	// CRITICAL: The slot check + status transition MUST be atomic under a single
 	// Lock to prevent a TOCTOU race where two goroutines both see runningCount=0
@@ -1886,7 +1984,7 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		stopped := instance.Status == "stopped"
 		instance.mu.RUnlock()
 		if stopped {
-			s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
+			// Early return — defer is already registered and will clean up
 			return
 		}
 
@@ -1899,7 +1997,7 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 				instance.FinishedAt = time.Now().Format(time.RFC3339)
 			}
 			instance.mu.Unlock()
-			s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
+			// Early return — defer is already registered and will clean up
 			return
 		}
 
@@ -1909,9 +2007,11 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		s.instancesMu.Lock()
 		runningCount := 0
 		for _, inst := range s.instances {
+			inst.mu.RLock()
 			if inst.Status == "running" {
 				runningCount++
 			}
+			inst.mu.RUnlock()
 		}
 		canAdmit, reason := resources.CanAdmitScan(runningCount)
 		if canAdmit && instance.Status == "pending" {
@@ -1928,60 +2028,10 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		time.Sleep(2 * time.Second)
 	}
 
+	// Instance got a slot — mark that the scan ran for full cleanup
+	ranScan = true
+
 	s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
-
-	// Top-level panic recovery
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("[CRITICAL] runMultiScan goroutine panicked: %v\n%s", r, debug.Stack())
-			s.broadcastToInstance(instanceID, WSEvent{Type: "error", Content: fmt.Sprintf("⛔ Scan goroutine crashed: %v — cleaning up", r)})
-		}
-		// Mark instance as finished
-		instance.mu.Lock()
-		if instance.Status == "running" {
-			instance.Status = "finished"
-		}
-		instance.FinishedAt = time.Now().Format(time.RFC3339)
-		instance.mu.Unlock()
-
-		// Only clear queue state if scan finished normally (not from signal).
-		// Signal-stopped scans preserve queue state so auto-resume works on restart.
-		preserveQueue := false
-		instance.mu.RLock()
-		if strings.HasPrefix(instance.StopReason, "signal_") {
-			preserveQueue = true
-		}
-		instance.mu.RUnlock()
-		if !preserveQueue {
-			s.clearQueueState()
-		} else {
-			log.Printf("[SHUTDOWN] Preserving queue state for auto-resume after signal stop")
-		}
-		s.mu.Lock()
-		if s.currentScanID == instanceID {
-			s.cancelScan = nil
-			delete(s.currentAgents, instanceID)
-		}
-		s.mu.Unlock()
-		s.broadcastToInstance(instanceID, WSEvent{Type: "queue_finished", Content: "Scan queue ended"})
-		s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
-		time.Sleep(500 * time.Millisecond)
-
-		// Only set running=false if no other instances are running
-		s.instancesMu.RLock()
-		stillRunning := false
-		for _, inst := range s.instances {
-			if inst.Status == "running" && inst.ID != instanceID {
-				stillRunning = true
-				break
-			}
-		}
-		s.instancesMu.RUnlock()
-		if !stillRunning {
-			s.running.Store(false)
-		}
-		log.Printf("[INFO] runMultiScan instance %s exited", instanceID)
-	}()
 
 	// ── PRE-SESSION CLEANUP ──
 	// IMPORTANT: This runs AFTER the queue wait, so we only clean up global
@@ -2042,6 +2092,11 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		s.mu.Lock()
 		s.cancelScan = cancel
 		s.mu.Unlock()
+
+		// Store cancel on the instance so per-instance stop can cancel the scan context
+		instance.mu.Lock()
+		instance.cancel = cancel
+		instance.mu.Unlock()
 
 		switch req.ScanMode {
 		case "wildcard":
@@ -3278,7 +3333,8 @@ func (s *Server) handleStopNotify(w http.ResponseWriter, r *http.Request) {
 
 // handleChat allows users to send messages to the agent during a scan
 type ChatRequest struct {
-	Message string `json:"message"`
+	Message    string `json:"message"`
+	InstanceID string `json:"instance_id,omitempty"` // BUG FIX: Allow targeting a specific scan instance
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -3300,9 +3356,21 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if there's an active scan
+	// BUG FIX: Use the explicitly provided instance_id to route chat messages
+	// to the correct agent. Previously, `s.currentScanID` (a global) was always
+	// used, so chat messages in multi-scan mode always went to the last-started
+	// scan regardless of which instance the user was viewing.
+	targetID := req.InstanceID
+	if targetID == "" {
+		// Fallback to global for single-instance backwards compatibility
+		s.mu.RLock()
+		targetID = s.currentScanID
+		s.mu.RUnlock()
+	}
+
+	// Check if there's an active agent for the target instance
 	s.mu.RLock()
-	agnt := s.currentAgents[s.currentScanID]
+	agnt := s.currentAgents[targetID]
 	s.mu.RUnlock()
 	if agnt == nil {
 		w.Header().Set("Content-Type", "application/json")
