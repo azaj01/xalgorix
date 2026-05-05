@@ -195,20 +195,62 @@ func CurrentLevel() (Level, string) {
 	return level, strings.Join(reasons, "; ")
 }
 
-// CanAdmitScan decides whether a new scan instance should be started.
-// Layer 1: admission control.
-func CanAdmitScan(runningCount int) (bool, string) {
-	// Hard ceiling check first
-	if runningCount >= maxInstances {
-		return false, fmt.Sprintf("hard limit: %d/%d instances running", runningCount, maxInstances)
-	}
-
+// EffectiveMaxInstances computes the live concurrency ceiling based on
+// current system resources. This dynamically shrinks below maxInstances
+// when CPU or RAM is under pressure.
+//
+// Algorithm:
+//   - Start from the static maxInstances ceiling
+//   - At LevelCaution: halve the ceiling (min 1)
+//   - At LevelCritical: drop to 1
+//   - Also cap by available RAM: each instance gets ~500MB headroom
+func EffectiveMaxInstances() (int, string) {
+	stats := GetStats()
 	level, reason := CurrentLevel()
-	if level >= LevelCaution {
-		return false, reason
+
+	effective := maxInstances
+
+	// ── RAM-based cap ──
+	// Each running scan + its tools needs ~500MB headroom.
+	// Reserve ramCriticalMB for the OS, divide the rest by 500.
+	spare := stats.MemAvailableMB - ramCriticalMB
+	if spare < 0 {
+		spare = 0
+	}
+	ramCap := int(spare / 500)
+	if ramCap < 1 {
+		ramCap = 1
+	}
+	if ramCap < effective {
+		effective = ramCap
 	}
 
-	return true, reason
+	// ── Pressure-based reduction ──
+	switch level {
+	case LevelCritical:
+		effective = 1
+	case LevelCaution:
+		effective = effective / 2
+		if effective < 1 {
+			effective = 1
+		}
+	}
+
+	return effective, reason
+}
+
+// CanAdmitScan decides whether a new scan instance should be started.
+// Layer 1: admission control. Uses EffectiveMaxInstances for a live,
+// resource-aware concurrency ceiling instead of a fixed number.
+func CanAdmitScan(runningCount int) (bool, string) {
+	effMax, reason := EffectiveMaxInstances()
+
+	if runningCount >= effMax {
+		return false, fmt.Sprintf("dynamic limit: %d/%d instances (ceiling=%d, %s)",
+			runningCount, effMax, maxInstances, reason)
+	}
+
+	return true, fmt.Sprintf("%d/%d instances — %s", runningCount, effMax, reason)
 }
 
 // CanExecTool decides whether a tool can be executed right now.
@@ -254,9 +296,15 @@ func WaitForResources(isHeavy bool, maxWait time.Duration, toolName string) bool
 	return false
 }
 
-// MaxInstances returns the configured hard ceiling.
+// MaxInstances returns the configured hard ceiling (static, set at init).
 func MaxInstances() int {
 	return maxInstances
+}
+
+// LiveMaxInstances returns the current effective ceiling (dynamic, based on live resources).
+func LiveMaxInstances() int {
+	n, _ := EffectiveMaxInstances()
+	return n
 }
 
 // ── Linux /proc readers ──

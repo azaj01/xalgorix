@@ -1238,14 +1238,15 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 	response := map[string]any{
 		"instances": instances,
 		"resources": map[string]any{
-			"cpu_cores":        stats.CPUCores,
-			"cpu_load_1m":      stats.LoadAvg1m,
-			"ram_total_mb":     stats.MemTotalMB,
-			"ram_available_mb": stats.MemAvailableMB,
-			"disk_free_mb":     stats.DiskFreeMB,
-			"level":            level.String(),
-			"reason":           reason,
-			"max_instances":    resources.MaxInstances(),
+			"cpu_cores":              stats.CPUCores,
+			"cpu_load_1m":            stats.LoadAvg1m,
+			"ram_total_mb":           stats.MemTotalMB,
+			"ram_available_mb":       stats.MemAvailableMB,
+			"disk_free_mb":           stats.DiskFreeMB,
+			"level":                  level.String(),
+			"reason":                 reason,
+			"max_instances":          resources.MaxInstances(),
+			"effective_max_instances": resources.LiveMaxInstances(),
 		},
 	}
 	json.NewEncoder(w).Encode(response)
