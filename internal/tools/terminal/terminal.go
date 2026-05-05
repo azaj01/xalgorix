@@ -664,9 +664,13 @@ func runShellInternal(contextID string, command string) (string, int) {
 	// ── Layer 2: Pre-exec resource throttle ──
 	// Before launching, check if the system has enough resources.
 	// Heavy tools (nuclei, masscan, etc.) are gated more strictly.
+	// If a heavy tool can't get resources within the timeout, abort it
+	// to prevent the kernel OOM killer from nuking the whole server.
 	heavy := isHeavyTool(command)
 	if heavy {
-		resources.WaitForResources(true, 2*time.Minute, cleanCmd)
+		if !resources.WaitForResources(true, 2*time.Minute, cleanCmd) {
+			return fmt.Sprintf("[THROTTLE] Refused to launch heavy tool %q — system resources exhausted after 2m wait", cleanCmd), -1
+		}
 	} else {
 		resources.WaitForResources(false, 30*time.Second, cleanCmd)
 	}

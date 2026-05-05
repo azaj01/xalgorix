@@ -51,10 +51,13 @@ type SystemStats struct {
 	DiskFreeMB     int64
 }
 
-// ── Thresholds (configurable via env vars) ──
-
-// defaults are calibrated for a 12-core / 24GB workstation.
-// Override with env vars for smaller/larger machines.
+// ── Thresholds (auto-scaled by init, overridable via env vars) ──
+//
+// IMPORTANT: Defaults are computed dynamically at startup based on actual
+// system resources (CPU cores, total RAM). This ensures safe operation on
+// both a 1-core/4GB VPS and a 12-core/24GB workstation without manual tuning.
+//
+// Override any value with its environment variable.
 var (
 	// CPU: percentage of cores that constitutes the threshold.
 	// e.g., on 12 cores, 70% = load 8.4, 90% = load 10.8
@@ -62,20 +65,70 @@ var (
 	cpuCriticalPct = envFloat("XALGORIX_CPU_CRITICAL_PCT", 90)
 
 	// RAM: minimum free RAM in MB.
-	ramCautionMB  = envInt64("XALGORIX_RAM_CAUTION_MB", 4096)  // 4 GB
-	ramCriticalMB = envInt64("XALGORIX_RAM_CRITICAL_MB", 2048) // 2 GB
+	// Auto-scaled in init() based on total system RAM.
+	ramCautionMB  int64
+	ramCriticalMB int64
 
 	// Disk: minimum free disk in MB.
 	diskCautionMB  = envInt64("XALGORIX_DISK_CAUTION_MB", 2048) // 2 GB
 	diskCriticalMB = envInt64("XALGORIX_DISK_CRITICAL_MB", 1024) // 1 GB
 
 	// Hard ceiling on concurrent instances regardless of resources.
-	maxInstances = envInt("XALGORIX_MAX_INSTANCES", 10)
+	// Auto-scaled in init() based on CPU cores.
+	maxInstances int
 
 	// Per-process memory limit for heavy tools (bytes).
-	// Default 4 GB. Set to 0 to disable.
-	HeavyToolMemLimitBytes = envInt64("XALGORIX_HEAVY_TOOL_MEM_LIMIT_MB", 4096) * 1024 * 1024
+	// Auto-scaled in init() based on total RAM. Set to 0 to disable.
+	HeavyToolMemLimitBytes int64
 )
+
+func init() {
+	cores := runtime.NumCPU()
+	totalMB, _ := readMemInfo()
+
+	// ── Max concurrent scan instances ──
+	// Formula: max(1, cores / 2), capped at 10.
+	// 1-core  → 1 instance,  2-core → 1,  4-core → 2,  12-core → 6
+	autoMax := cores / 2
+	if autoMax < 1 {
+		autoMax = 1
+	}
+	if autoMax > 10 {
+		autoMax = 10
+	}
+	maxInstances = envInt("XALGORIX_MAX_INSTANCES", autoMax)
+
+	// ── RAM thresholds ──
+	// Caution: 25% of total RAM (4GB VPS → 1024MB, 24GB → 6144MB)
+	// Critical: 12% of total RAM (4GB VPS → 512MB, 24GB → 2880MB)
+	autoCaution := totalMB / 4
+	if autoCaution < 512 {
+		autoCaution = 512
+	}
+	autoCritical := totalMB * 12 / 100
+	if autoCritical < 256 {
+		autoCritical = 256
+	}
+	ramCautionMB = envInt64("XALGORIX_RAM_CAUTION_MB", autoCaution)
+	ramCriticalMB = envInt64("XALGORIX_RAM_CRITICAL_MB", autoCritical)
+
+	// ── Per-tool memory limit ──
+	// Formula: 25% of total RAM, capped at 4GB.
+	// 4GB VPS → 1024 MB per tool,  24GB → 4096 MB per tool (capped)
+	autoMemLimit := totalMB / 4
+	if autoMemLimit > 4096 {
+		autoMemLimit = 4096
+	}
+	if autoMemLimit < 256 {
+		autoMemLimit = 256
+	}
+	HeavyToolMemLimitBytes = envInt64("XALGORIX_HEAVY_TOOL_MEM_LIMIT_MB", autoMemLimit) * 1024 * 1024
+
+	log.Printf("[RESOURCES] Auto-scaled for %d cores, %d MB RAM: max_instances=%d, "+
+		"ram_caution=%dMB, ram_critical=%dMB, tool_mem_limit=%dMB",
+		cores, totalMB, maxInstances, ramCautionMB, ramCriticalMB,
+		HeavyToolMemLimitBytes/(1024*1024))
+}
 
 // ── Public API ──
 
