@@ -586,6 +586,11 @@ type ScanRequest struct {
 	APIBase        string   `json:"api_base"`        // provider API base URL
 	DiscordWebhook string   `json:"discord_webhook"` // Discord webhook URL
 	SeverityFilter []string `json:"severity_filter"` // e.g. ["critical", "high"]
+	Name           string   `json:"name"`            // user-defined scan name
+	SaveOnly       bool     `json:"save_only"`       // if true, save scan config without starting
+	Phases         []int    `json:"phases"`          // selected methodology phases (empty = all)
+	CompanyName    string   `json:"company_name"`    // report branding: company name
+	LogoPath       string   `json:"logo_path"`       // report branding: logo file path
 	// Internal fields — `json:"-"` makes them un-settable from the wire.
 	// Critical: a client must not be able to set InstanceID to spoof
 	// broadcasts to another scan, or set IsResume to bypass the resume
@@ -649,6 +654,9 @@ type ScanRecord struct {
 	TotalTokens  int           `json:"total_tokens"`
 	Iterations   int           `json:"iterations"`
 	ToolCalls    int           `json:"tool_calls"`
+	CompanyName  string        `json:"company_name,omitempty"` // report branding: company name
+	LogoPath     string        `json:"logo_path,omitempty"`    // report branding: logo path
+	Phases       []int         `json:"phases,omitempty"`       // selected methodology phases
 }
 
 // QueueState persists scan queue state for recovery after restart
@@ -664,9 +672,10 @@ type QueueState struct {
 // ScanInstance represents a running or completed scan instance.
 type ScanInstance struct {
 	ID                string        `json:"id"`
+	Name              string        `json:"name,omitempty"`          // user-defined scan name
 	Targets           string        `json:"targets"`
 	ParentTarget      string        `json:"parent_target,omitempty"` // parent domain for subdomain scans
-	Status            string        `json:"status"`                  // running, finished, stopped
+	Status            string        `json:"status"`                  // saved, running, paused, finished, stopped
 	StartedAt         string        `json:"started_at"`
 	FinishedAt        string        `json:"finished_at,omitempty"`
 	StopReason        string        `json:"stop_reason,omitempty"` // why stopped (user, error, watchdog)
@@ -677,6 +686,9 @@ type ScanInstance struct {
 	ScanMode          string        `json:"scan_mode"`
 	Instruction       string        `json:"instruction,omitempty"`     // custom scan instructions for restart
 	SeverityFilter    []string      `json:"severity_filter,omitempty"` // severity filter for restart
+	Phases            []int         `json:"phases,omitempty"`          // selected methodology phases (empty = all)
+	CompanyName       string        `json:"company_name,omitempty"`    // report branding: company name
+	LogoPath          string        `json:"logo_path,omitempty"`       // report branding: logo path
 	DiscordWebhook    string        `json:"-"`                         // discord webhook (not exposed to API)
 	Vulns             []VulnSummary `json:"vulns,omitempty"`
 	agent             *agent.Agent
@@ -1101,11 +1113,41 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		scanCfg.APIBase = req.APIBase
 	}
 
+	// Save-only mode: create a persistent scan config without starting execution
+	if req.SaveOnly {
+		instanceID := randomSlug()
+		inst := &ScanInstance{
+			ID:             instanceID,
+			Name:           req.Name,
+			Targets:        strings.Join(req.Targets, ", "),
+			Status:         "saved",
+			StartedAt:      time.Now().Format(time.RFC3339Nano),
+			ScanMode:       req.ScanMode,
+			Instruction:    req.Instruction,
+			SeverityFilter: req.SeverityFilter,
+			Phases:         req.Phases,
+			CompanyName:    req.CompanyName,
+			LogoPath:       req.LogoPath,
+			DiscordWebhook: req.DiscordWebhook,
+		}
+		s.instancesMu.Lock()
+		s.instances[instanceID] = inst
+		s.instancesMu.Unlock()
+		s.broadcastDashboard(WSEvent{
+			Type:    "instance_started",
+			Content: instanceID,
+		})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "saved", "instance_id": instanceID})
+		return
+	}
+
 	// Clear global stop flag so the new scan isn't immediately aborted
 	// (fixes starvation bug where scans stay "pending" after Stop All)
 	s.stopReq.Store(false)
 
 	instanceID := randomSlug()
+	req.Name = strings.TrimSpace(req.Name) // propagate name to running scans too
 	go s.runMultiScan(req, &scanCfg, instanceID)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1137,10 +1179,10 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	s.instancesMu.Lock()
 	for _, inst := range s.instances {
 		inst.mu.Lock()
-		if inst.Status == "running" || inst.Status == "pending" {
+		if inst.Status == "running" || inst.Status == "pending" || inst.Status == "paused" {
 			inst.Status = "stopped"
 			inst.StopReason = "user_stopped"
-			inst.FinishedAt = time.Now().Format(time.RFC3339)
+			inst.FinishedAt = time.Now().Format(time.RFC3339Nano)
 			if inst.cancel != nil {
 				inst.cancel()
 			}
@@ -1207,6 +1249,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 		inst.mu.RLock()
 		instances = append(instances, &ScanInstance{
 			ID:          inst.ID,
+			Name:        inst.Name,
 			Targets:     inst.Targets,
 			Status:      inst.Status,
 			StartedAt:   inst.StartedAt,
@@ -1216,6 +1259,9 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			VulnCount:   inst.VulnCount,
 			TotalTokens: inst.TotalTokens,
 			ScanMode:    inst.ScanMode,
+			Phases:      inst.Phases,
+			CompanyName: inst.CompanyName,
+			LogoPath:    inst.LogoPath,
 		})
 		inst.mu.RUnlock()
 	}
@@ -1286,10 +1332,10 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 		inst.mu.Lock()
 		// BUG FIX: Also handle "pending" instances, not just "running".
 		// Without this, queued scans cannot be stopped from the UI.
-		if inst.Status == "running" || inst.Status == "pending" {
+		if inst.Status == "running" || inst.Status == "pending" || inst.Status == "paused" {
 			inst.Status = "stopped"
 			inst.StopReason = "user_stopped"
-			inst.FinishedAt = time.Now().Format(time.RFC3339)
+			inst.FinishedAt = time.Now().Format(time.RFC3339Nano)
 			if inst.cancel != nil {
 				inst.cancel()
 			}
@@ -1331,6 +1377,10 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 		scanMode := inst.ScanMode
 		severityFilter := inst.SeverityFilter
 		discordWebhook := inst.DiscordWebhook
+		phases := inst.Phases
+		companyName := inst.CompanyName
+		logoPath := inst.LogoPath
+		instName := inst.Name
 		inst.mu.RUnlock()
 
 		// Clear global stop flag so the restarted scan isn't immediately aborted
@@ -1344,12 +1394,130 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 			ScanMode:       scanMode,
 			SeverityFilter: severityFilter,
 			DiscordWebhook: discordWebhook,
+			Name:           instName,
+			Phases:         phases,
+			CompanyName:    companyName,
+			LogoPath:       logoPath,
 		}
 
 		scanCfg := *s.cfg // shallow copy
 		go s.runMultiScan(req, &scanCfg)
 
 		json.NewEncoder(w).Encode(map[string]string{"status": "restarted"})
+		return
+	}
+
+	// POST /api/instances/{id}/start — start a saved scan
+	if len(parts) >= 2 && parts[1] == "start" && r.Method == http.MethodPost {
+		inst.mu.RLock()
+		currentStatus := inst.Status
+		inst.mu.RUnlock()
+		if currentStatus != "saved" {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "cannot start: instance is " + currentStatus + ", expected saved",
+			})
+			return
+		}
+
+		inst.mu.RLock()
+		targets := strings.Split(inst.Targets, ", ")
+		req := ScanRequest{
+			Targets:        targets,
+			Instruction:    inst.Instruction,
+			ScanMode:       inst.ScanMode,
+			SeverityFilter: inst.SeverityFilter,
+			DiscordWebhook: inst.DiscordWebhook,
+			Name:           inst.Name,
+			Phases:         inst.Phases,
+			CompanyName:    inst.CompanyName,
+			LogoPath:       inst.LogoPath,
+		}
+		inst.mu.RUnlock()
+
+		// Remove the saved instance — runMultiScan creates a new pending one
+		s.instancesMu.Lock()
+		delete(s.instances, instanceID)
+		s.instancesMu.Unlock()
+
+		s.stopReq.Store(false)
+		scanCfg := *s.cfg
+		newID := randomSlug()
+		go s.runMultiScan(req, &scanCfg, newID)
+
+		json.NewEncoder(w).Encode(map[string]string{"status": "started", "instance_id": newID})
+		return
+	}
+
+	// POST /api/instances/{id}/pause — gracefully pause a running scan
+	if len(parts) >= 2 && parts[1] == "pause" && r.Method == http.MethodPost {
+		inst.mu.Lock()
+		if inst.Status != "running" {
+			inst.mu.Unlock()
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "cannot pause: instance is " + inst.Status,
+			})
+			return
+		}
+		inst.Status = "paused"
+		inst.StopReason = "user_paused"
+		if inst.cancel != nil {
+			inst.cancel()
+		}
+		if inst.agent != nil {
+			inst.agent.Stop()
+		}
+		inst.mu.Unlock()
+
+		s.broadcastToInstance(instanceID, WSEvent{Type: "paused", Content: "Scan paused by user"})
+		s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
+		json.NewEncoder(w).Encode(map[string]string{"status": "paused", "instance_id": instanceID})
+		return
+	}
+
+	// POST /api/instances/{id}/resume — resume a paused scan
+	if len(parts) >= 2 && parts[1] == "resume" && r.Method == http.MethodPost {
+		inst.mu.RLock()
+		currentStatus := inst.Status
+		inst.mu.RUnlock()
+		if currentStatus != "paused" {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "cannot resume: instance is " + currentStatus + ", expected paused",
+			})
+			return
+		}
+
+		inst.mu.RLock()
+		targets := strings.Split(inst.Targets, ", ")
+		req := ScanRequest{
+			Targets:        targets,
+			Instruction:    inst.Instruction,
+			ScanMode:       inst.ScanMode,
+			SeverityFilter: inst.SeverityFilter,
+			DiscordWebhook: inst.DiscordWebhook,
+			Name:           inst.Name,
+			Phases:         inst.Phases,
+			CompanyName:    inst.CompanyName,
+			LogoPath:       inst.LogoPath,
+			IsResume:       true, // preserve existing state (vulns, notes, recon)
+		}
+		inst.mu.RUnlock()
+
+		// Remove the paused instance — a new one will be created by runMultiScan
+		s.instancesMu.Lock()
+		delete(s.instances, instanceID)
+		s.instancesMu.Unlock()
+
+		s.stopReq.Store(false)
+		scanCfg := *s.cfg
+		newID := randomSlug()
+		go s.runMultiScan(req, &scanCfg, newID)
+
+		s.broadcastToInstance(instanceID, WSEvent{Type: "resumed", Content: "Scan resumed"})
+		s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
+		json.NewEncoder(w).Encode(map[string]string{"status": "resumed", "instance_id": newID})
 		return
 	}
 
@@ -1390,6 +1558,9 @@ type scanSession struct {
 	instanceID     string               // parent instance ID for multi-instance tracking
 	scanMode       string               // single, wildcard, dast — persisted so dashboard shows correct mode
 	sctx           *scanctx.ScanContext // per-session isolated state
+	companyName    string               // report branding: company name
+	logoPath       string               // report branding: logo path
+	phases         []int                // selected methodology phases
 
 	// Wildcard lifecycle flags
 	skipNotesCleanup     bool   // when true, don't delete notes store on cleanup (discovery phase)
@@ -1595,6 +1766,9 @@ func (s *Server) executeScanSession(sess *scanSession) {
 		Status:       "running",
 		Events:       []WSEvent{},
 		Vulns:        []VulnSummary{},
+		CompanyName:  sess.companyName,
+		LogoPath:     sess.logoPath,
+		Phases:       sess.phases,
 	}
 	s.saveScanRecordTo(sess.record, sess.scanDir)
 
@@ -1889,12 +2063,16 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 	// Register instance as pending initially
 	instance := &ScanInstance{
 		ID:             instanceID,
+		Name:           req.Name,
 		Targets:        strings.Join(req.Targets, ", "),
 		Status:         "pending",
-		StartedAt:      time.Now().Format(time.RFC3339),
+		StartedAt:      time.Now().Format(time.RFC3339Nano),
 		ScanMode:       req.ScanMode,
 		Instruction:    req.Instruction,
 		SeverityFilter: req.SeverityFilter,
+		Phases:         req.Phases,
+		CompanyName:    req.CompanyName,
+		LogoPath:       req.LogoPath,
 		DiscordWebhook: req.DiscordWebhook,
 	}
 	s.instancesMu.Lock()
@@ -2166,6 +2344,9 @@ func (s *Server) runSingleTarget(_ context.Context, scanCfg *config.Config, req 
 
 	instruction := "This is a SINGLE TARGET scan. Do NOT enumerate subdomains or perform wildcard discovery. Only test the exact target URL provided. Focus on the main domain/IP only. " + req.Instruction
 
+	// Inject phase filter if the user selected specific phases
+	instruction += buildPhaseFilterInstruction(req.Phases)
+
 	s.broadcastToInstance(req.InstanceID, WSEvent{
 		Type:         "target_started",
 		Content:      fmt.Sprintf("Scanning target %d/%d: %s", idx+1, total, target),
@@ -2188,6 +2369,9 @@ func (s *Server) runSingleTarget(_ context.Context, scanCfg *config.Config, req 
 		resetState:     true,
 		instanceID:     req.InstanceID,
 		scanMode:       "single",
+		companyName:    req.CompanyName,
+		logoPath:       req.LogoPath,
+		phases:         req.Phases,
 	}
 	s.executeScanSession(sess)
 
@@ -2208,6 +2392,7 @@ func (s *Server) runDASTTarget(_ context.Context, scanCfg *config.Config, req Sc
 	if req.Instruction != "" {
 		dastInstruction += "\n\n" + req.Instruction
 	}
+	dastInstruction += buildPhaseFilterInstruction(req.Phases)
 
 	s.broadcastToInstance(req.InstanceID, WSEvent{
 		Type:         "target_started",
@@ -2231,6 +2416,9 @@ func (s *Server) runDASTTarget(_ context.Context, scanCfg *config.Config, req Sc
 		resetState:     true,
 		instanceID:     req.InstanceID,
 		scanMode:       "dast",
+		companyName:    req.CompanyName,
+		logoPath:       req.LogoPath,
+		phases:         req.Phases,
 	}
 	s.executeScanSession(sess)
 
@@ -2371,6 +2559,7 @@ func (s *Server) runWildcardTarget(_ context.Context, scanCfg *config.Config, re
 
 			subScanDir := s.makeScanDir(subdomain)
 			scanInstruction := buildSubdomainScanInstruction(subdomain, target, req.Instruction)
+			scanInstruction += buildPhaseFilterInstruction(req.Phases)
 
 			s.broadcastToInstance(req.InstanceID, WSEvent{
 				Type:           "target_started",
@@ -2402,6 +2591,9 @@ func (s *Server) runWildcardTarget(_ context.Context, scanCfg *config.Config, re
 				instanceID:           req.InstanceID,
 				scanMode:             "wildcard",
 				parentReportingCtxID: parentReportingCtxID, // merge vulns into parent on cleanup
+				companyName:          req.CompanyName,
+				logoPath:             req.LogoPath,
+				phases:               req.Phases,
 			}
 			s.executeScanSession(subSess)
 

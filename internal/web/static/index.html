@@ -79,11 +79,14 @@
         <!-- New Scan inline panel (hidden by default) -->
         <div class="new-scan-panel hidden" id="new-scan-panel">
           <div class="input-row">
+            <input type="text" id="dash-scan-name" class="input-field" placeholder="Scan Name (e.g. Q2 External Audit)" style="flex:1;">
             <select id="dash-scan-mode" class="input-field input-select">
               <option value="single">🎯 Single Site Scan</option>
               <option value="dast">🔍 DAST - Scan Specific URLs</option>
               <option value="wildcard">🌐 Wildcard - Scan All Subdomains</option>
             </select>
+          </div>
+          <div class="input-row">
             <input type="text" id="dash-target-input" class="input-field" placeholder="https://target.com — Target URL, domain, or IP">
             <label class="file-btn" title="Upload targets file">
               📂
@@ -122,6 +125,46 @@
               <input type="file" id="dash-instructions-file" accept=".txt,.md,.text" style="display:none" onchange="handleDashInstructionsFile(this)">
             </label>
           </div>
+
+          <details class="settings-toggle">
+            <summary>🧪 Methodology Phases</summary>
+            <div class="settings-panel phase-grid" id="dash-phase-grid">
+              <label class="phase-checkbox"><input type="checkbox" value="1" checked><span>1. Recon</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="2" checked><span>2. OSINT</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="3" checked><span>3. Subdomain Enum</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="4" checked><span>4. DNS Analysis</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="5" checked><span>5. Port Scan</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="6" checked><span>6. Service Fingerprint</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="7" checked><span>7. Vuln Scan</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="8" checked><span>8. Web Tech</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="9" checked><span>9. URL Discovery</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="10" checked><span>10. Content Discovery</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="11" checked><span>11. Auth Testing</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="12" checked><span>12. Injection</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="13" checked><span>13. XSS</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="14" checked><span>14. CSRF/CORS</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="15" checked><span>15. File Upload</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="16" checked><span>16. IDOR/Access</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="17" checked><span>17. SSRF</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="18" checked><span>18. API Testing</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="19" checked><span>19. Business Logic</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="20" checked><span>20. SSL/TLS</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="21" checked><span>21. Cloud/Infra</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="22" checked><span>22. Final Report</span></label>
+              <div style="grid-column: 1 / -1; display:flex; gap:8px; margin-top:4px;">
+                <button class="btn btn-secondary" onclick="document.querySelectorAll('#dash-phase-grid input').forEach(c=>c.checked=true)" style="font-size:10px;padding:3px 10px;">✅ All</button>
+                <button class="btn btn-secondary" onclick="document.querySelectorAll('#dash-phase-grid input').forEach(c=>c.checked=false)" style="font-size:10px;padding:3px 10px;">☐ None</button>
+              </div>
+            </div>
+          </details>
+
+          <details class="settings-toggle">
+            <summary>🏢 Report Branding</summary>
+            <div class="settings-panel">
+              <input type="text" id="dash-company-name" class="input-field" placeholder="Company Name (appears on report cover)">
+              <input type="text" id="dash-logo-path" class="input-field" placeholder="Logo Path (e.g. /path/to/logo.png)">
+            </div>
+          </details>
 
           <details class="settings-toggle">
             <summary>🤖 LLM Provider Settings</summary>
@@ -167,6 +210,7 @@
 
           <div class="btn-group">
             <button class="btn btn-primary" onclick="startDashboardScan()">▶ Start Scan</button>
+            <button class="btn btn-secondary btn-save" onclick="saveDashboardScan()">💾 Save Only</button>
             <button class="btn btn-secondary" onclick="hideNewScanPanel()">✕ Cancel</button>
           </div>
         </div>
@@ -297,6 +341,12 @@
         <div class="btn-group">
           <button class="btn btn-primary" id="start-btn" onclick="startScan()">
             <span>▶</span> Start Scan
+          </button>
+          <button class="btn btn-warning hidden" id="pause-btn" onclick="pauseCurrentScan()">
+            <span>⏸</span> Pause
+          </button>
+          <button class="btn btn-primary hidden" id="resume-btn" onclick="resumeCurrentScan()">
+            <span>▶</span> Resume
           </button>
           <button class="btn btn-danger hidden" id="stop-btn" onclick="stopScan()">
             <span>■</span> Stop

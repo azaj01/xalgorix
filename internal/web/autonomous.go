@@ -1,6 +1,8 @@
 // Package web provides the HTTP server and API handlers.
 package web
 
+import "fmt"
+
 // Build autonomous instruction that gives AI freedom to decide approach
 func buildAutonomousInstruction(target string, customInstruction string) string {
 	baseInstruction := `## AUTONOMOUS PENTESTING MODE — EXPLOIT-FIRST METHODOLOGY
@@ -175,9 +177,60 @@ Be organized. One target fully tested, then next.
 `
 
 	if customInstruction != "" {
-		return baseInstruction + "\n\n## CUSTOM INSTRUCTIONS\n" + customInstruction
+		baseInstruction += "\n\n## CUSTOM INSTRUCTIONS\n" + customInstruction
 	}
+
 	return baseInstruction
+}
+
+// buildPhaseFilterInstruction generates an LLM instruction that restricts
+// the agent to only execute the specified methodology phases.
+// Returns empty string if phases is nil/empty (all phases enabled).
+func buildPhaseFilterInstruction(phases []int) string {
+	if len(phases) == 0 {
+		return ""
+	}
+
+	// Map phase numbers to human-readable names for clarity
+	phaseNames := map[int]string{
+		1: "Deep Reconnaissance & Attack Surface Mapping",
+		2: "Manual Vulnerability Discovery",
+		3: "Directory & File Discovery",
+		4: "CORS & Cookie Analysis",
+		5: "Authentication & Session Testing",
+		6: "Injection Testing",
+		7: "SSRF Testing",
+		8: "IDOR & Broken Access Control",
+		9: "API & GraphQL Testing",
+		10: "File Upload Testing",
+		11: "Deserialization & RCE",
+		12: "Race Conditions & Business Logic",
+		13: "Subdomain Takeover",
+		14: "Open Redirect Testing",
+		15: "Email Security Testing",
+		16: "Cloud & Infrastructure",
+		17: "WebSocket Testing",
+		18: "CMS-Specific Testing",
+		19: "Broken Link Hijacking & Content Spoofing",
+		20: "Exploit Verification",
+		21: "Zero-Day & Novel Vulnerability Discovery",
+		22: "Final Report",
+	}
+
+	instruction := "\n\n## ⚠️ PHASE RESTRICTION (MANDATORY — DO NOT IGNORE)\n"
+	instruction += "You are RESTRICTED to ONLY the following methodology phases. "
+	instruction += "SKIP ALL phases not listed below. Do NOT perform work from excluded phases.\n\n"
+	instruction += "**Allowed phases:**\n"
+	for _, p := range phases {
+		name, ok := phaseNames[p]
+		if !ok {
+			name = "Unknown"
+		}
+		instruction += fmt.Sprintf("- Phase %d: %s\n", p, name)
+	}
+	instruction += "\n**All other phases are OUT OF SCOPE for this scan. Skip them entirely.**\n"
+	instruction += "After completing the allowed phases, proceed directly to the Final Report phase.\n"
+	return instruction
 }
 
 // Build autonomous DAST instruction for URL scanning

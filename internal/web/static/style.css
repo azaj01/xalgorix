@@ -712,6 +712,69 @@ a:hover { color: #00ffaa; text-shadow: 0 0 8px rgba(0, 255, 136, 0.5); }
   letter-spacing: 0.12em;
 }
 
+/* Phase Selection Grid */
+.phase-grid {
+  display: grid !important;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px !important;
+}
+
+.phase-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  transition: all var(--transition);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-family: var(--font-mono);
+  clip-path: polygon(0 3px, 3px 0, calc(100% - 3px) 0, 100% 3px, 100% calc(100% - 3px), calc(100% - 3px) 100%, 3px 100%, 0 calc(100% - 3px));
+}
+
+.phase-checkbox input { position: absolute; opacity: 0; width: 0; height: 0; }
+
+.phase-checkbox:has(input:checked) {
+  color: var(--accent);
+  border-color: rgba(0, 255, 136, 0.4);
+  background: rgba(0, 255, 136, 0.08);
+  box-shadow: 0 0 6px rgba(0, 255, 136, 0.15);
+}
+
+.phase-checkbox:hover {
+  border-color: var(--accent);
+}
+
+/* Warning Button (Pause) */
+.btn-warning {
+  border-color: var(--sev-medium);
+  color: var(--sev-medium);
+  background: rgba(255, 170, 0, 0.1);
+}
+
+.btn-warning:hover {
+  background: rgba(255, 170, 0, 0.25);
+  box-shadow: 0 0 10px rgba(255, 170, 0, 0.4);
+  color: #fff;
+}
+
+/* Save Only Button */
+.btn-save {
+  border-color: var(--accent-tertiary);
+  color: var(--accent-tertiary);
+}
+
+.btn-save:hover {
+  background: rgba(0, 212, 255, 0.1);
+  border-color: var(--accent-tertiary);
+  box-shadow: 0 0 10px rgba(0, 212, 255, 0.3);
+  color: var(--accent-tertiary);
+}
+
 .hidden { display: none !important; }
 
 /* ── Feed Section ──────────────────────────────────────────────────── */
@@ -1537,6 +1600,35 @@ a:hover { color: #00ffaa; text-shadow: 0 0 8px rgba(0, 255, 136, 0.5); }
   border-color: rgba(0, 255, 136, 0.4);
 }
 .instance-card-status.finished .status-dot { background: var(--success, #00ff88); }
+
+.instance-card-status.saved {
+  color: #00d4ff;
+  border-color: rgba(0, 212, 255, 0.4);
+}
+.instance-card-status.saved .status-dot { background: #00d4ff; }
+
+.instance-card-status.paused {
+  color: #ffaa00;
+  border-color: rgba(255, 170, 0, 0.4);
+}
+.instance-card-status.paused .status-dot {
+  background: #ffaa00;
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+.instance-card.saved { border-color: rgba(0, 212, 255, 0.3); }
+.instance-card.paused { border-color: rgba(255, 170, 0, 0.3); }
+
+.btn-warning {
+  background: rgba(255, 170, 0, 0.15);
+  color: #ffaa00;
+  border-color: rgba(255, 170, 0, 0.4);
+}
+.btn-warning:hover {
+  background: rgba(255, 170, 0, 0.25);
+  border-color: #ffaa00;
+  box-shadow: 0 0 12px rgba(255, 170, 0, 0.3);
+}
 
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }

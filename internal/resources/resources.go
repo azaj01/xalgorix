@@ -86,7 +86,7 @@ var (
 
 	// Total RAM budget per running scan instance. This is the admission-control
 	// unit used to decide how many scans can run concurrently.
-	scanMemoryBudgetMB = envInt64("XALGORIX_SCAN_MEMORY_BUDGET_MB", 2048)
+	scanMemoryBudgetMB = envInt64("XALGORIX_SCAN_MEMORY_BUDGET_MB", 1024)
 
 	// Extra RAM budget per running scan for the Go process, browser state,
 	// LLM history, buffers, and small helper tools around one heavy command.

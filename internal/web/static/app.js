@@ -1714,6 +1714,7 @@
             return;
         }
         const mode = document.getElementById('dash-scan-mode').value;
+        const scanName = (document.getElementById('dash-scan-name') || {}).value || '';
         
         // Collect severity filter
         const severities = [];
@@ -1722,8 +1723,24 @@
             if (cb && cb.checked) severities.push(s);
         });
         
+        // Collect selected methodology phases
+        const phases = [];
+        const phaseCheckboxes = document.querySelectorAll('#dash-phase-grid input[type="checkbox"]');
+        let allChecked = true;
+        phaseCheckboxes.forEach(cb => {
+            if (cb.checked) {
+                phases.push(parseInt(cb.value));
+            } else {
+                allChecked = false;
+            }
+        });
+        
         // Collect instruction
         const instruction = (document.getElementById('dash-instruction-input') || {}).value || '';
+        
+        // Collect branding
+        const companyName = (document.getElementById('dash-company-name') || {}).value || '';
+        const logoPath = (document.getElementById('dash-logo-path') || {}).value || '';
         
         // Collect LLM settings
         const payload = {
@@ -1732,6 +1749,11 @@
             instruction: instruction,
             severity_filter: severities,
         };
+        
+        if (scanName) payload.name = scanName;
+        if (!allChecked && phases.length > 0) payload.phases = phases;
+        if (companyName) payload.company_name = companyName;
+        if (logoPath) payload.logo_path = logoPath;
         
         const provider = document.getElementById('dash-llm-provider').value;
         const model = (document.getElementById('dash-llm-model') || {}).value;
@@ -1759,11 +1781,90 @@
             if (data.instance_id) {
                 hideNewScanPanel();
                 document.getElementById('dash-target-input').value = '';
+                if (document.getElementById('dash-scan-name')) document.getElementById('dash-scan-name').value = '';
                 if (document.getElementById('dash-instruction-input')) document.getElementById('dash-instruction-input').value = '';
                 showToast('🚀 Scan started: ' + target, 'success');
                 setTimeout(() => refreshInstances(), 500);
             }
         }).catch(e => showToast('Failed to start scan', 'error'));
+    };
+    
+    // Save scan without starting
+    window.saveDashboardScan = function() {
+        const target = document.getElementById('dash-target-input').value.trim();
+        if (!target) {
+            document.getElementById('dash-target-input').style.borderColor = '#ff3366';
+            setTimeout(() => document.getElementById('dash-target-input').style.borderColor = '', 2000);
+            return;
+        }
+        const mode = document.getElementById('dash-scan-mode').value;
+        const scanName = (document.getElementById('dash-scan-name') || {}).value || '';
+        
+        const severities = [];
+        ['critical', 'high', 'medium', 'low', 'info'].forEach(s => {
+            const cb = document.getElementById('dash-sev-' + s);
+            if (cb && cb.checked) severities.push(s);
+        });
+        
+        const phases = [];
+        const phaseCheckboxes = document.querySelectorAll('#dash-phase-grid input[type="checkbox"]');
+        let allChecked = true;
+        phaseCheckboxes.forEach(cb => {
+            if (cb.checked) {
+                phases.push(parseInt(cb.value));
+            } else {
+                allChecked = false;
+            }
+        });
+        
+        const instruction = (document.getElementById('dash-instruction-input') || {}).value || '';
+        const companyName = (document.getElementById('dash-company-name') || {}).value || '';
+        const logoPath = (document.getElementById('dash-logo-path') || {}).value || '';
+        
+        const payload = {
+            targets: [target],
+            scan_mode: mode,
+            instruction: instruction,
+            severity_filter: severities,
+            save_only: true,
+        };
+        
+        if (scanName) payload.name = scanName;
+        if (!allChecked && phases.length > 0) payload.phases = phases;
+        if (companyName) payload.company_name = companyName;
+        if (logoPath) payload.logo_path = logoPath;
+        
+        const provider = document.getElementById('dash-llm-provider').value;
+        const model = (document.getElementById('dash-llm-model') || {}).value;
+        const apiKey = (document.getElementById('dash-llm-apikey') || {}).value;
+        const apiBase = (document.getElementById('dash-llm-apibase') || {}).value;
+        const discord = (document.getElementById('dash-discord-webhook') || {}).value;
+        const p = LLM_PROVIDERS[provider] || {};
+        
+        if (apiKey) {
+            const effectiveModel = model || p.models?.[0] || '';
+            if (effectiveModel) {
+                payload.model = p.prefix ? `${p.prefix}/${effectiveModel}` : effectiveModel;
+            }
+            payload.api_key = apiKey;
+            if (apiBase) payload.api_base = apiBase;
+        }
+        if (discord) payload.discord_webhook = discord;
+        
+        fetch('/api/scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        }).then(r => r.json()).then(data => {
+            if (data.instance_id) {
+                hideNewScanPanel();
+                document.getElementById('dash-target-input').value = '';
+                if (document.getElementById('dash-scan-name')) document.getElementById('dash-scan-name').value = '';
+                if (document.getElementById('dash-instruction-input')) document.getElementById('dash-instruction-input').value = '';
+                showToast('💾 Scan saved: ' + (scanName || target), 'success');
+                setTimeout(() => refreshInstances(), 500);
+            }
+        }).catch(e => showToast('Failed to save scan', 'error'));
     };
     
     // Dashboard file upload handlers
@@ -1867,14 +1968,33 @@
             const elapsed = inst.started_at ? getElapsed(inst.started_at) : '—';
             const displayTarget = inst.parent_target ? `${inst.targets} (via ${inst.parent_target})` : inst.targets;
             const displayTitle = inst.parent_target ? `Parent: ${inst.parent_target}` : inst.targets;
+            const displayName = inst.name ? escapeHtml(inst.name) : '';
+            const status = inst.status || 'unknown';
+
+            // Determine action buttons based on status
+            let actionButtons = '';
+            if (status === 'saved') {
+                actionButtons = `
+                    <button class="btn btn-primary" onclick="event.stopPropagation(); startSavedInstance('${inst.id}')" style="font-size:11px;padding:4px 12px;">▶ Start</button>`;
+            } else if (status === 'paused') {
+                actionButtons = `
+                    <button class="btn btn-primary" onclick="event.stopPropagation(); resumeInstance('${inst.id}')" style="font-size:11px;padding:4px 12px;">▶ Resume</button>`;
+            } else if (status === 'running' || status === 'pending') {
+                actionButtons = `
+                    <button class="btn btn-warning" onclick="event.stopPropagation(); pauseInstance('${inst.id}')" style="font-size:11px;padding:4px 12px;">⏸ Pause</button>
+                    <button class="btn btn-danger" onclick="event.stopPropagation(); stopInstance('${inst.id}')" style="font-size:11px;padding:4px 12px;">■ Stop</button>`;
+            } else {
+                actionButtons = `
+                    <button class="btn btn-primary" onclick="event.stopPropagation(); restartInstance('${inst.id}')" style="font-size:11px;padding:4px 12px;">🔄 Restart</button>`;
+            }
 
             return `
-            <div class="instance-card ${inst.status}" onclick="navigateToInstance('${inst.id}')" title="Click to view">
+            <div class="instance-card ${status}" onclick="navigateToInstance('${inst.id}')" title="Click to view">
                 <div class="instance-card-header">
-                    <span class="instance-card-target" title="${escapeHtml(displayTitle)}">${escapeHtml(displayTarget)}</span>
-                    <span class="instance-card-status ${inst.status}">
+                    <span class="instance-card-target" title="${escapeHtml(displayTitle)}">${displayName ? `<strong>${displayName}</strong> · ` : ''}${escapeHtml(displayTarget)}</span>
+                    <span class="instance-card-status ${status}">
                         <span class="status-dot"></span>
-                        ${inst.status}
+                        ${status}
                     </span>
                 </div>
                 <div class="instance-card-stats">
@@ -1900,9 +2020,7 @@
                     <span class="instance-card-time">${elapsed}</span>
                 </div>
                 <div class="instance-card-actions" style="display:flex;gap:6px;margin-top:6px;">
-                    ${inst.status === 'running' || inst.status === 'pending' ? `
-                    <button class="btn btn-danger" onclick="event.stopPropagation(); stopInstance('${inst.id}')" style="font-size:11px;padding:4px 12px;">■ Stop</button>` : `
-                    <button class="btn btn-primary" onclick="event.stopPropagation(); restartInstance('${inst.id}')" style="font-size:11px;padding:4px 12px;">🔄 Restart</button>`}
+                    ${actionButtons}
                     <button class="btn btn-secondary" onclick="event.stopPropagation(); deleteInstance('${inst.id}')" style="font-size:11px;padding:4px 12px;">🗑 Delete</button>
                 </div>
             </div>`;
@@ -1952,6 +2070,58 @@
         } catch (e) {
             showToast('Failed to stop instance', 'error');
         }
+    };
+
+    // Start a saved (queued) instance
+    window.startSavedInstance = async function(instanceId) {
+        try {
+            await fetch('/api/instances/' + instanceId + '/start', { method: 'POST' });
+            showToast('▶ Starting saved scan...', 'success');
+            setTimeout(refreshInstances, 500);
+        } catch (e) {
+            showToast('Failed to start instance', 'error');
+        }
+    };
+    
+    // Pause a running instance
+    window.pauseInstance = async function(instanceId) {
+        try {
+            await fetch('/api/instances/' + instanceId + '/pause', { method: 'POST' });
+            showToast('⏸ Pausing scan...', 'warning');
+            setTimeout(refreshInstances, 500);
+        } catch (e) {
+            showToast('Failed to pause instance', 'error');
+        }
+    };
+    
+    // Resume a paused instance
+    window.resumeInstance = async function(instanceId) {
+        try {
+            await fetch('/api/instances/' + instanceId + '/resume', { method: 'POST' });
+            showToast('▶ Resuming scan...', 'success');
+            setTimeout(refreshInstances, 500);
+        } catch (e) {
+            showToast('Failed to resume instance', 'error');
+        }
+    };
+    
+    // Pause/Resume from scan detail view
+    window.pauseCurrentScan = async function() {
+        if (!currentInstanceId) return;
+        await window.pauseInstance(currentInstanceId);
+        const pauseBtn = document.getElementById('pause-btn');
+        const resumeBtn = document.getElementById('resume-btn');
+        if (pauseBtn) pauseBtn.classList.add('hidden');
+        if (resumeBtn) resumeBtn.classList.remove('hidden');
+    };
+    
+    window.resumeCurrentScan = async function() {
+        if (!currentInstanceId) return;
+        await window.resumeInstance(currentInstanceId);
+        const pauseBtn = document.getElementById('pause-btn');
+        const resumeBtn = document.getElementById('resume-btn');
+        if (resumeBtn) resumeBtn.classList.add('hidden');
+        if (pauseBtn) pauseBtn.classList.remove('hidden');
     };
 
     window.deleteInstance = async function(instanceId) {

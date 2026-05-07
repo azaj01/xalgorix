@@ -236,9 +236,9 @@ func detectCaidoPort() int {
 var extensionFS embed.FS
 
 // getChromiumPath returns the path to a Chromium binary.
-// Priority: 1) XALGORIX_BROWSER_PATH env  2) Rod auto-download (~170MB first run)
+// Priority: 1) XALGORIX_BROWSER_PATH env  2) System-installed browser  3) Rod auto-download (~170MB first run)
 func getChromiumPath() (string, error) {
-	// User override via config
+	// 1. User override via config
 	if p := config.Get().BrowserPath; p != "" {
 		if _, err := os.Stat(p); err == nil {
 			log.Printf("[browser] Using custom browser path: %s", p)
@@ -247,18 +247,41 @@ func getChromiumPath() (string, error) {
 		return "", fmt.Errorf("XALGORIX_BROWSER_PATH set to %q but file not found", p)
 	}
 
-	// Auto-download via Rod's built-in browser manager
+	// 2. System-installed browser (chromium, google-chrome, etc.)
+	// This is the most reliable method — avoids Rod's auto-download which
+	// frequently breaks when Chromium snapshot URLs change or are unreachable.
+	if sysPath, found := launcher.LookPath(); found {
+		log.Printf("[browser] Using system-installed browser: %s", sysPath)
+		return sysPath, nil
+	}
+
+	// 3. Well-known browser paths (fallback for systems where LookPath misses)
+	knownPaths := []string{
+		"/usr/bin/chromium",
+		"/usr/bin/chromium-browser",
+		"/usr/bin/google-chrome-stable",
+		"/usr/bin/google-chrome",
+		"/snap/bin/chromium",
+	}
+	for _, p := range knownPaths {
+		if _, err := os.Stat(p); err == nil {
+			log.Printf("[browser] Using browser found at well-known path: %s", p)
+			return p, nil
+		}
+	}
+
+	// 4. Auto-download via Rod's built-in browser manager (last resort)
 	cacheDir := filepath.Join(config.Get().HomeDir, "browser")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", fmt.Errorf("failed to create browser cache dir: %w", err)
 	}
 
-	log.Printf("[browser] Ensuring Chromium binary in %s (auto-download on first run)", cacheDir)
+	log.Printf("[browser] No system browser found, downloading Chromium to %s (first run)", cacheDir)
 	b := launcher.NewBrowser()
 	b.RootDir = cacheDir
 	path, err := b.Get()
 	if err != nil {
-		return "", fmt.Errorf("failed to get/download Chromium: %w", err)
+		return "", fmt.Errorf("failed to get/download Chromium: %w\n\nFix: install a browser on your system:\n  Debian/Ubuntu: sudo apt install chromium-browser\n  Alpine:        apk add chromium\n  Or set XALGORIX_BROWSER_PATH=/path/to/chrome", err)
 	}
 
 	log.Printf("[browser] Chromium ready at: %s", path)
