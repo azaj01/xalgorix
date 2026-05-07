@@ -43,6 +43,7 @@
 | **Most Automated** | ✅ Auto-installs tools, auto-generates PDF, auto-sends Discord alerts |
 | **Most Flexible** | ✅ Works with any LLM (OpenAI, Anthropic, DeepSeek, **MiniMax ⭐**, Google, Groq, Ollama) |
 | **Most Production-Ready** | ✅ Rate limiting, circuit breaker, queue system, severity filtering |
+| **Most Customizable** | ✅ Named scans, per-phase methodology selection, branded PDF reports with logo upload |
 
 > **TL;DR:** Give it a target URL, and Xalgorix will find vulnerabilities, generate a professional PDF report, and send Discord alerts — all automatically.
 
@@ -67,16 +68,21 @@
 | 🎯 **Single Scan** | Scan a single URL/target with full vulnerability testing |
 | 🔍 **DAST Scan** | Scan specific URLs with deep vulnerability testing |
 | 🌐 **Wildcard Scan** | Enum all subdomains → scan each individually |
+| 📝 **Named Scans** | Give each scan a custom name for easy identification |
+| 💾 **Save & Launch Later** | Prepare scans without starting — launch when ready |
+| 🔬 **Phase Selection** | Choose specific methodology phases per scan (e.g., recon only) |
 | 🎯 **Severity Filter** | Filter by Critical/High/Medium/Low/Info |
 | 🚫 **Out of Scope** | Define targets to exclude from testing |
 | 🔒 **Safety First** | Blocks destructive commands, encoding bypass detection |
+| 🛡️ **Self-Scan Prevention** | Automatically blocks local/private IPs (127.0.0.1, 10.x, 192.168.x, etc.) |
 | 🔌 **Circuit Breaker** | Auto-blocks failing tools after 5 attempts |
 | 🌐 **Web UI** | Dark mode dashboard with live feed & token tracking |
 | 💬 **Chat During Scan** | Send messages to agent while scan is running |
 | 📱 **Mobile Ready** | Works on phones & tablets |
 | 💾 **Scan Persistence** | Resume interrupted scans after restart |
-| 📊 **PDF Reports** | Professional pentest reports auto-generated |
-| 🔔 **Discord Alerts** | Get notified on scan start/vuln/completion |
+| 📊 **PDF Reports** | Professional branded pentest reports with custom logo |
+| 🏷️ **Report Branding** | Upload company logo and set company name for white-label reports |
+| 🔔 **Discord Alerts** | Severity-filtered notifications on scan start/vuln/completion |
 | 🔧 **Auto-Install** | 70+ tool→package mappings |
 | 🧠 **Multi-LLM** | OpenAI, Anthropic, DeepSeek, MiniMax, Groq, Ollama, Google |
 | 🔐 **Authentication** | Optional login protection for dashboard |
@@ -315,6 +321,7 @@ xalgorix --target https://example.com
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `XALGORIX_DISCORD_WEBHOOK` | Discord webhook for alerts | `https://discord.com/api/webhooks/...` |
+| `XALGORIX_DISCORD_MIN_SEVERITY` | Min severity for Discord alerts (skip noise) | `low`, `medium`, `high`, `critical` |
 | `XALGORIX_USERNAME` | Dashboard username (enables auth) | `admin` |
 | `XALGORIX_PASSWORD` | Dashboard password | `secret123` |
 
@@ -357,11 +364,15 @@ Xalgorix supports multiple LLM providers. These are examples, not a hard allowli
 | 🔍 **DAST Scan** | Select "DAST" mode for URL vulnerability testing |
 | 🌐 **Wildcard Scan** | Select "Wildcard" mode for subdomain enum → each subdomain gets full scan |
 | 📂 **Multi-Target** | Upload a `.txt` file with one target per line |
+| 📝 **Named Scans** | Give each scan a descriptive name for tracking |
+| 💾 **Save Without Start** | Click "Save" to prepare a scan, launch it later from the scan details page |
+| 🔬 **Phase Selection** | Tick only the methodology phases you want (e.g., Recon + Injection only) |
 | 🎯 **Severity Filter** | Check only Critical/High to skip Low/Info |
 | 🚫 **Out of Scope** | Exclude targets from testing |
 | 💬 **Custom Instructions** | Tell Xalgorix what to focus on |
+| 🏷️ **Report Branding** | Upload a company logo and enter company name for white-label PDF reports |
 | ⚙️ **LLM Provider** | Switch providers in settings |
-| 🔔 **Discord** | Add webhook for alerts |
+| 🔔 **Discord** | Add webhook for alerts (with configurable severity threshold) |
 
 ### Example Instructions
 
@@ -419,6 +430,19 @@ xalgorix/
 
 ## 🛡️ Safety Features
 
+### Self-Scan Prevention
+
+Xalgorix automatically blocks scans targeting local or internal IP addresses. This prevents the agent from accidentally scanning its own server and reporting false vulnerabilities.
+
+**Blocked address ranges:**
+- `127.0.0.0/8` (loopback)
+- `10.0.0.0/8` (private)
+- `172.16.0.0/12` (private)
+- `192.168.0.0/16` (private)
+- `169.254.0.0/16` (link-local)
+- `::1`, `fe80::` (IPv6 loopback/link-local)
+- `localhost`, `0.0.0.0`
+
 ### Blocked Commands
 
 ```
@@ -450,12 +474,19 @@ After **5 consecutive failures**, a tool is temporarily blocked for **60 seconds
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/scan` | Start scan |
+| `POST` | `/api/scan` | Start or save scan (supports `name`, `phases`, `company_name`, `logo_path`) |
 | `POST` | `/api/stop` | Stop scan |
 | `GET` | `/api/status` | Get status |
 | `GET` | `/api/scans` | List scans |
 | `GET` | `/api/scans/:id` | Get scan details |
 | `GET` | `/api/report/:id` | Download PDF |
+
+### Uploads
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/upload-logo` | Upload company logo for report branding (png/jpg/svg/gif/webp, 5MB max) |
+| `POST` | `/api/upload-targets` | Upload target list file (.txt) |
 
 ### Queue
 
@@ -501,28 +532,30 @@ Xalgorix intelligently auto-resolves, installs, and manages **70+ security tools
 
 ## 📋 22-Phase Methodology
 
-1. 🔍 **Recon** — Subdomains, ports, directories
-2. 🦠 **Vuln Scan** — Nuclei, nmap scripts
-3. 📂 **Content** — Fuzzing, backups, admin panels
-4. 🔐 **SSL/TLS** — Cipher, certificates, headers
-5. 🔑 **Auth** — SQLi login, brute-force, OAuth
-6. 💉 **Injection** — XSS, SQLi, Command, XXE, SSTI
-7. 🔄 **SSRF** — Param fuzzing, cloud metadata
-8. 🚪 **IDOR** — Access control, privilege escalation
-9. 🌐 **API** — GraphQL, REST, rate limiting
-10. 📤 **Upload** — Extension bypass, webshells
-11. ⚙️ **RCE** — Deserialization, Log4j
-12. ⏱️ **Race** — TOCTOU, business logic
-13. 🌟 **Takeover** — Subdomain, CNAME
-14. 📧 **Email** — SPF, DKIM, DMARC
-15. ☁️ **Cloud** — S3, Azure, GCP, K8s
-16. 🔌 **WebSocket** — Origin, injection
-17. 🔌 **CMS** — WordPress, Joomla, Drupal
-18. 🔗 **Links** — Broken link hijacking
-19. 📦 **Supply Chain** — JS libs, dependencies
-20. ✅ **Exploit Verification** — Confirm and verify all findings
-21. 🔬 **Zero-Day Discovery** — Behavioral fuzzing, parser differentials, type confusion, timing oracles
-22. 📝 **Report** — JSON + PDF
+> **💡 Tip:** You can select which phases to run per scan via the dashboard's phase checkboxes.
+
+1. 🔍 **Deep Reconnaissance & Attack Surface Mapping** — Subdomains, ports, tech stack fingerprinting
+2. 🦠 **Manual Vulnerability Discovery** — Nuclei, nmap scripts, manual probing
+3. 📂 **Directory & File Discovery** — Fuzzing, backups, admin panels, hidden paths
+4. 🔐 **CORS & Cookie Analysis** — Cross-origin policy, cookie flags, SameSite
+5. 🔑 **Authentication & Session Testing** — Login bypass, brute-force, session fixation, OAuth flaws
+6. 💉 **Injection Testing** — XSS, SQLi, Command injection, XXE, SSTI
+7. 🔄 **SSRF Testing** — Parameter fuzzing, cloud metadata, internal service access
+8. 🚪 **IDOR & Broken Access Control** — Privilege escalation, object reference manipulation
+9. 🌐 **API & GraphQL Testing** — REST/GraphQL introspection, rate limiting, auth bypass
+10. 📤 **File Upload Testing** — Extension bypass, webshells, content-type abuse
+11. ⚙️ **Deserialization & RCE** — Unsafe deserialization, Log4Shell, command chaining
+12. ⏱️ **Race Conditions & Business Logic** — TOCTOU, double-spend, workflow bypass
+13. 🌟 **Subdomain Takeover** — Dangling CNAMEs, unclaimed services
+14. 🔀 **Open Redirect Testing** — Parameter-based redirects, header injection
+15. 📧 **Email Security Testing** — SPF, DKIM, DMARC misconfigurations
+16. ☁️ **Cloud & Infrastructure** — S3 buckets, Azure blobs, GCP, K8s misconfigs
+17. 🔌 **WebSocket Testing** — Origin validation, injection, protocol abuse
+18. 🔌 **CMS-Specific Testing** — WordPress, Joomla, Drupal plugin/theme vulns
+19. 🔗 **Broken Link Hijacking & Content Spoofing** — Expired domains, unclaimed resources
+20. ✅ **Exploit Verification** — Confirm and verify all findings with PoC
+21. 🔬 **Zero-Day & Novel Vulnerability Discovery** — Behavioral fuzzing, parser differentials, type confusion, timing oracles
+22. 📝 **Final Report** — JSON + branded PDF with executive summary
 
 ---
 
@@ -530,11 +563,13 @@ Xalgorix intelligently auto-resolves, installs, and manages **70+ security tools
 
 The auto-generated report includes:
 
-- ✅ Cover page with target & date
+- ✅ Cover page with target, date & company branding
+- 🏷️ Custom logo and company name (uploaded via dashboard)
 - 📊 Executive summary with vuln counts
 - 🐛 Vulnerability details (CVSS, PoC, remediation)
 - 🔗 Tested endpoints
-- 📋 Methodology applied
+- 📋 Methodology phases applied
+- ⏱️ Timestamps for blue team log correlation
 - ⚠️ Legal disclaimer
 
 ---
@@ -543,12 +578,14 @@ The auto-generated report includes:
 
 ```
 ~/xalgorix-data/
-└── target.com/
-    └── 2026-01-15/
-        └── example.com_abc123/
-            └── scan.json
-        └── target.io_def456/
-            └── scan.json
+├── logos/                      # Uploaded company logos for report branding
+│   └── 1736000000_logo.png
+├── target.com/
+│   └── 2026-01-15/
+│       └── example.com_abc123/
+│           └── scan.json
+│       └── target.io_def456/
+│           └── scan.json
 └── queue_state.json
 ```
 

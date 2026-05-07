@@ -1892,6 +1892,58 @@
         };
         reader.readAsText(file);
     };
+
+    // Logo upload handler
+    window.handleLogoUpload = function(input) {
+        const file = input.files[0];
+        if (!file) return;
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const label = document.getElementById('dash-logo-upload-label');
+        const origText = label.textContent;
+        label.textContent = '⏳ Uploading...';
+
+        fetch('/api/upload-logo', {
+            method: 'POST',
+            body: formData,
+        })
+        .then(r => {
+            if (!r.ok) return r.text().then(t => { throw new Error(t); });
+            return r.json();
+        })
+        .then(data => {
+            // Set the hidden path field
+            document.getElementById('dash-logo-path').value = data.path;
+
+            // Show preview
+            const previewContainer = document.getElementById('dash-logo-preview-container');
+            const previewImg = document.getElementById('dash-logo-preview');
+            const filenameLbl = document.getElementById('dash-logo-filename');
+            previewImg.src = data.path;
+            filenameLbl.textContent = data.filename;
+            previewContainer.style.display = 'flex';
+            label.textContent = '📷 Change Logo';
+
+            showToast('✅ Logo uploaded: ' + data.filename, 'success');
+        })
+        .catch(err => {
+            showToast('❌ Logo upload failed: ' + err.message, 'error');
+            label.textContent = origText;
+        });
+
+        input.value = ''; // reset file input
+    };
+
+    window.removeLogoUpload = function() {
+        document.getElementById('dash-logo-path').value = '';
+        document.getElementById('dash-logo-preview-container').style.display = 'none';
+        document.getElementById('dash-logo-preview').src = '';
+        document.getElementById('dash-logo-filename').textContent = '';
+        document.getElementById('dash-logo-upload-label').textContent = '📷 Upload Logo';
+        showToast('🗑️ Logo removed', 'info');
+    };
     
     // Instance polling
     function startInstancePolling() {

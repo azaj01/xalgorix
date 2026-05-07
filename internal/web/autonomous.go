@@ -19,6 +19,13 @@ Your primary target is ` + "`" + `` + target + `` + "`" + `. However, the follow
 
 **Out of scope:** Completely different domains, third-party services (Google, AWS, CDNs), unless they are explicitly part of the target's infrastructure.
 
+**⛔ STRICTLY FORBIDDEN — NEVER scan these (they are the local server, NOT the target):**
+- 127.0.0.1, localhost, 0.0.0.0, ::1 (loopback addresses)
+- 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 (private/internal IPs)
+- 169.254.0.0/16 (link-local addresses)
+- Any IP that resolves to the machine you are running on
+If a tool discovers a local/internal IP, SKIP IT and move to the next target. Do NOT run any scans, port scans, or vulnerability tests against local addresses.
+
 **Why:** Many applications split auth (login.example.com), API (api.example.com), and web (www.example.com) across subdomains. Testing only www would miss critical attack surface.
 
 ## CORE RULE: DETECT → EXPLOIT → REPORT
@@ -240,6 +247,8 @@ func buildDASTInstruction(target string) string {
 YOUR TARGET: ` + target + `
 
 **SCOPE:** Primary target + all sibling subdomains of the same root domain (e.g., www.example.com → login.example.com, api.example.com are in scope). Follow redirects to auth/SSO subdomains.
+
+**⛔ NEVER scan:** 127.0.0.1, localhost, 0.0.0.0, ::1, 10.x.x.x, 172.16-31.x.x, 192.168.x.x, 169.254.x.x — these are local/internal and NOT the target.
 
 ## ORGANIZE YOUR WORK
 Create folder: mkdir -p ./TARGET && cd ./TARGET

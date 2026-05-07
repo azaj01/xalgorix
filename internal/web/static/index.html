@@ -129,27 +129,27 @@
           <details class="settings-toggle">
             <summary>🧪 Methodology Phases</summary>
             <div class="settings-panel phase-grid" id="dash-phase-grid">
-              <label class="phase-checkbox"><input type="checkbox" value="1" checked><span>1. Recon</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="2" checked><span>2. OSINT</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="3" checked><span>3. Subdomain Enum</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="4" checked><span>4. DNS Analysis</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="5" checked><span>5. Port Scan</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="6" checked><span>6. Service Fingerprint</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="7" checked><span>7. Vuln Scan</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="8" checked><span>8. Web Tech</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="9" checked><span>9. URL Discovery</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="10" checked><span>10. Content Discovery</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="11" checked><span>11. Auth Testing</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="12" checked><span>12. Injection</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="13" checked><span>13. XSS</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="14" checked><span>14. CSRF/CORS</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="15" checked><span>15. File Upload</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="16" checked><span>16. IDOR/Access</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="17" checked><span>17. SSRF</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="18" checked><span>18. API Testing</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="19" checked><span>19. Business Logic</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="20" checked><span>20. SSL/TLS</span></label>
-              <label class="phase-checkbox"><input type="checkbox" value="21" checked><span>21. Cloud/Infra</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="1" checked><span>1. Recon & Attack Surface</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="2" checked><span>2. Manual Vuln Discovery</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="3" checked><span>3. Dir & File Discovery</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="4" checked><span>4. CORS & Cookie Analysis</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="5" checked><span>5. Auth & Session Testing</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="6" checked><span>6. Injection Testing</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="7" checked><span>7. SSRF Testing</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="8" checked><span>8. IDOR & Broken Access</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="9" checked><span>9. API & GraphQL</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="10" checked><span>10. File Upload Testing</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="11" checked><span>11. Deserialization & RCE</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="12" checked><span>12. Race Conditions & Logic</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="13" checked><span>13. Subdomain Takeover</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="14" checked><span>14. Open Redirect</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="15" checked><span>15. Email Security</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="16" checked><span>16. Cloud & Infra</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="17" checked><span>17. WebSocket Testing</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="18" checked><span>18. CMS-Specific</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="19" checked><span>19. Link Hijack & Spoofing</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="20" checked><span>20. Exploit Verification</span></label>
+              <label class="phase-checkbox"><input type="checkbox" value="21" checked><span>21. Zero-Day Discovery</span></label>
               <label class="phase-checkbox"><input type="checkbox" value="22" checked><span>22. Final Report</span></label>
               <div style="grid-column: 1 / -1; display:flex; gap:8px; margin-top:4px;">
                 <button class="btn btn-secondary" onclick="document.querySelectorAll('#dash-phase-grid input').forEach(c=>c.checked=true)" style="font-size:10px;padding:3px 10px;">✅ All</button>
@@ -162,7 +162,18 @@
             <summary>🏢 Report Branding</summary>
             <div class="settings-panel">
               <input type="text" id="dash-company-name" class="input-field" placeholder="Company Name (appears on report cover)">
-              <input type="text" id="dash-logo-path" class="input-field" placeholder="Logo Path (e.g. /path/to/logo.png)">
+              <div class="logo-upload-row">
+                <input type="hidden" id="dash-logo-path">
+                <label class="btn btn-secondary logo-upload-btn" id="dash-logo-upload-label">
+                  📷 Upload Logo
+                  <input type="file" id="dash-logo-upload" accept="image/png,image/jpeg,image/svg+xml,image/gif,image/webp" style="display:none" onchange="handleLogoUpload(this)">
+                </label>
+                <div class="logo-preview-container" id="dash-logo-preview-container" style="display:none;">
+                  <img id="dash-logo-preview" class="logo-preview-img" alt="Logo preview">
+                  <span class="logo-filename" id="dash-logo-filename"></span>
+                  <button class="logo-remove-btn" onclick="removeLogoUpload()" title="Remove logo">✕</button>
+                </div>
+              </div>
             </div>
           </details>
 

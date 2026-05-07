@@ -549,6 +549,62 @@ a:hover { color: #00ffaa; text-shadow: 0 0 8px rgba(0, 255, 136, 0.5); }
   box-shadow: var(--glow-green);
 }
 
+/* Logo Upload */
+.logo-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.logo-upload-btn {
+  cursor: pointer;
+  font-size: 12px !important;
+  padding: 8px 14px !important;
+  white-space: nowrap;
+}
+
+.logo-preview-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  clip-path: polygon(0 3px, 3px 0, calc(100% - 3px) 0, 100% 3px, 100% calc(100% - 3px), calc(100% - 3px) 100%, 3px 100%, 0 calc(100% - 3px));
+}
+
+.logo-preview-img {
+  height: 28px;
+  width: 28px;
+  object-fit: contain;
+  border-radius: 2px;
+}
+
+.logo-filename {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--accent);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.logo-remove-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+  transition: color 0.2s;
+}
+
+.logo-remove-btn:hover {
+  color: var(--danger);
+}
+
 /* Severity Filter Row */
 .severity-row {
   align-items: center;

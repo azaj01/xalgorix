@@ -308,7 +308,8 @@ func authMiddleware(cfg *config.Config) func(http.Handler) http.Handler {
 
 			// Public routes that don't need auth
 			if path == "/api/auth/login" || path == "/api/auth/status" ||
-				strings.HasPrefix(path, "/static/") || strings.HasPrefix(path, "/assets/") {
+				strings.HasPrefix(path, "/static/") || strings.HasPrefix(path, "/assets/") ||
+				strings.HasPrefix(path, "/uploads/") {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -792,21 +793,22 @@ func (s *Server) clearQueueState() {
 
 // Server is the web UI server.
 type Server struct {
-	cfg            *config.Config
-	port           int
-	clients        map[*wsClient]bool
-	mu             sync.RWMutex
-	currentAgents  map[string]*agent.Agent // scanID → agent (replaces singleton currentAgent)
-	cancelScan     context.CancelFunc      // cancels the current scan session context
-	running        atomic.Bool
-	stopReq        atomic.Bool
-	dataDir        string
-	currentScanDir string
-	currentScanID  string
-	discordWebhook string
-	rateLimiter    *RateLimiter
-	instances      map[string]*ScanInstance // concurrent scan instances
-	instancesMu    sync.RWMutex
+	cfg                *config.Config
+	port               int
+	clients            map[*wsClient]bool
+	mu                 sync.RWMutex
+	currentAgents      map[string]*agent.Agent // scanID → agent (replaces singleton currentAgent)
+	cancelScan         context.CancelFunc      // cancels the current scan session context
+	running            atomic.Bool
+	stopReq            atomic.Bool
+	dataDir            string
+	currentScanDir     string
+	currentScanID      string
+	discordWebhook     string
+	discordMinSeverity string // minimum severity to send to Discord ("info", "low", "medium", "high", "critical")
+	rateLimiter        *RateLimiter
+	instances          map[string]*ScanInstance // concurrent scan instances
+	instancesMu        sync.RWMutex
 }
 
 // NewServer creates a new web server.
@@ -821,14 +823,15 @@ func NewServer(cfg *config.Config, port int) *Server {
 	rl := NewRateLimiter(cfg.RateLimitRequests, time.Duration(cfg.RateLimitWindow)*time.Second)
 
 	srv := &Server{
-		cfg:            cfg,
-		port:           port,
-		clients:        make(map[*wsClient]bool),
-		currentAgents:  make(map[string]*agent.Agent),
-		dataDir:        dataDir,
-		discordWebhook: os.Getenv("XALGORIX_DISCORD_WEBHOOK"),
-		rateLimiter:    rl,
-		instances:      make(map[string]*ScanInstance),
+		cfg:                cfg,
+		port:               port,
+		clients:            make(map[*wsClient]bool),
+		currentAgents:      make(map[string]*agent.Agent),
+		dataDir:            dataDir,
+		discordWebhook:     os.Getenv("XALGORIX_DISCORD_WEBHOOK"),
+		discordMinSeverity: strings.ToLower(strings.TrimSpace(os.Getenv("XALGORIX_DISCORD_MIN_SEVERITY"))),
+		rateLimiter:        rl,
+		instances:          make(map[string]*ScanInstance),
 	}
 
 	// Rebuild instances map from disk so dashboard shows historical scans on startup
@@ -890,6 +893,11 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/scans/", s.handleGetScan)
 	mux.HandleFunc("/api/upload-targets", s.handleUploadTargets)
 	mux.HandleFunc("/api/upload-instructions", s.handleUploadInstructions)
+	mux.HandleFunc("/api/upload-logo", s.handleUploadLogo)
+	// Serve uploaded logos
+	logosDir := filepath.Join(s.dataDir, "logos")
+	os.MkdirAll(logosDir, 0755)
+	mux.Handle("/uploads/logos/", http.StripPrefix("/uploads/logos/", http.FileServer(http.Dir(logosDir))))
 	mux.HandleFunc("/api/report/", s.handleDownloadReport)
 	mux.HandleFunc("/api/settings/rate-limit", s.handleRateLimit)
 	mux.HandleFunc("/api/settings/agentmail", s.handleAgentMailSettings)
@@ -1872,7 +1880,7 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 					sess.record.Vulns = append(sess.record.Vulns, vs)
 					log.Printf("[VULN] Vuln broadcast real-time: %s %s", vs.Severity, vs.Title)
 
-					// Discord: vulnerability found
+					// Discord: vulnerability found (respects XALGORIX_DISCORD_MIN_SEVERITY)
 					sevColor := 0xef4444 // red for critical/high
 					switch vs.Severity {
 					case "medium":
@@ -1914,7 +1922,12 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 					if vs.Remediation != "" {
 						details.WriteString(fmt.Sprintf("🛡️ **Remediation:**\n%s", vs.Remediation))
 					}
-					s.sendDiscord(sevColor, fmt.Sprintf("🐛 %s Vulnerability Found", strings.ToUpper(vs.Severity)), details.String())
+					// Apply Discord minimum severity filter
+					if severityMeetsThreshold(vs.Severity, s.discordMinSeverity) {
+						s.sendDiscord(sevColor, fmt.Sprintf("🐛 %s Vulnerability Found", strings.ToUpper(vs.Severity)), details.String())
+					} else {
+						log.Printf("[DISCORD] Skipping %s vuln notification (min severity: %s)", vs.Severity, s.discordMinSeverity)
+					}
 				} else {
 					log.Printf("[VULN] Vuln filtered out by severity: %s (filter: %v)", vs.Severity, sess.severityFilter)
 				}
@@ -2050,7 +2063,20 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 			}
 		}
 	}
-	req.Targets = cleanTargets
+
+	// Filter out local/internal targets to prevent self-scanning
+	var safeTargets []string
+	for _, t := range cleanTargets {
+		if isBlockedTarget(t) {
+			log.Printf("[BLOCKLIST] Skipping blocked target: %s (local/internal IP)", t)
+		} else {
+			safeTargets = append(safeTargets, t)
+		}
+	}
+	if len(safeTargets) < len(cleanTargets) {
+		log.Printf("[BLOCKLIST] Filtered %d blocked targets, %d remaining", len(cleanTargets)-len(safeTargets), len(safeTargets))
+	}
+	req.Targets = safeTargets
 
 	// Create instance ID immediately
 	var instanceID string
@@ -3098,6 +3124,70 @@ func (s *Server) handleUploadInstructions(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// handleUploadLogo accepts an image file upload and saves it to the logos directory.
+func (s *Server) handleUploadLogo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseMultipartForm(5 << 20); err != nil { // 5MB max
+		http.Error(w, "failed to parse multipart form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "file required", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Validate file extension
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	allowedExts := map[string]bool{".png": true, ".jpg": true, ".jpeg": true, ".svg": true, ".gif": true, ".webp": true}
+	if !allowedExts[ext] {
+		http.Error(w, "unsupported image format: "+ext+" (allowed: png, jpg, jpeg, svg, gif, webp)", http.StatusBadRequest)
+		return
+	}
+
+	// Create logos directory
+	logosDir := filepath.Join(s.dataDir, "logos")
+	if err := os.MkdirAll(logosDir, 0755); err != nil {
+		log.Printf("[ERROR] Failed to create logos directory: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Generate unique filename: timestamp_originalname
+	sanitized := strings.ReplaceAll(header.Filename, " ", "_")
+	fileName := fmt.Sprintf("%d_%s", time.Now().UnixMilli(), sanitized)
+	dstPath := filepath.Join(logosDir, fileName)
+
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		log.Printf("[ERROR] Failed to create logo file: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, file); err != nil {
+		log.Printf("[ERROR] Failed to write logo file: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Return the serving path
+	servingPath := "/uploads/logos/" + fileName
+	log.Printf("Logo uploaded: %s → %s", header.Filename, servingPath)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"path":     servingPath,
+		"filename": header.Filename,
+	})
+}
+
 // randomSlug generates a short random hex string for scan IDs.
 func randomSlug() string {
 	b := make([]byte, 4)
@@ -3938,6 +4028,89 @@ func (s *Server) sendSimpleEmbed(color int, title, description string) {
 		}
 		resp.Body.Close()
 	}()
+}
+
+// isBlockedTarget checks whether a target resolves to a local, loopback, or internal
+// IP address. This prevents the agent from inadvertently scanning the host machine.
+func isBlockedTarget(target string) bool {
+	// Strip scheme if present (http://127.0.0.1 → 127.0.0.1)
+	host := target
+	if u, err := url.Parse(target); err == nil && u.Host != "" {
+		host = u.Hostname()
+	}
+	// Also handle host:port without scheme
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+
+	// Explicit textual matches (fast path)
+	lower := strings.ToLower(host)
+	if lower == "localhost" || lower == "0.0.0.0" || lower == "[::1]" || lower == "::1" {
+		return true
+	}
+
+	// Parse as IP
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Try DNS resolution for hostnames that might resolve to local IPs
+		addrs, err := net.LookupHost(host)
+		if err != nil || len(addrs) == 0 {
+			return false // can't resolve — let it through, will fail naturally
+		}
+		ip = net.ParseIP(addrs[0])
+		if ip == nil {
+			return false
+		}
+	}
+
+	// Check blocked ranges
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return true
+	}
+
+	// RFC 1918 private ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+	privateCIDRs := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"169.254.0.0/16", // link-local
+		"::1/128",
+		"fc00::/7", // IPv6 unique local
+		"fe80::/10", // IPv6 link-local
+	}
+	for _, cidr := range privateCIDRs {
+		_, subnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		if subnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// severityMeetsThreshold returns true if the vuln severity is at or above the minimum
+// threshold. Empty threshold means "send everything".
+// Severity hierarchy: info < low < medium < high < critical
+func severityMeetsThreshold(severity, minSeverity string) bool {
+	if minSeverity == "" {
+		return true // no threshold = send all
+	}
+	order := map[string]int{
+		"info":     0,
+		"low":      1,
+		"medium":   2,
+		"high":     3,
+		"critical": 4,
+	}
+	vulnLevel, ok1 := order[strings.ToLower(severity)]
+	minLevel, ok2 := order[strings.ToLower(minSeverity)]
+	if !ok1 || !ok2 {
+		return true // unknown severity = send it
+	}
+	return vulnLevel >= minLevel
 }
 
 // startCaidoProxy launches Caido proxy in background if it's installed and not already running.
