@@ -31,7 +31,7 @@ import (
 // The hardcoded fallback is only used when developers `go run` the package
 // without ldflags. It is a `var` (not `const`) precisely so ldflags can
 // rewrite it.
-var version = "4.3.11"
+var version = "4.3.12"
 
 func main() {
 	// Top-level crash recovery — catches panics that escape all other handlers.
