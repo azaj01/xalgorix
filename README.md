@@ -1,29 +1,4 @@
-### Notes on long-running scan stability
 
-For complex targets and long-running workflows, scan continuity may depend heavily on the selected model, context window size, and memory-compression behavior.
-
-If a scan appears to jump phases unexpectedly, stop earlier than expected, or become harder to continue after post-processing, review these settings first:
-
-- `XALGORIX_REASONING_EFFORT`
-- `XALGORIX_LLM_MAX_RETRIES`
-- `XALGORIX_MEMORY_COMPRESSOR_TIMEOUT`
-- `XALGORIX_MAX_ITERATIONS`
-
-#### Practical guidance
-
-- Prefer models with stronger long-context performance for large targets and multi-step scans.
-- Increase `XALGORIX_MEMORY_COMPRESSOR_TIMEOUT` if context compression is interrupting long reasoning chains.
-- Avoid overly aggressive iteration limits when testing complex targets.
-- If behavior differs between terminal and Web UI workflows, compare the same target with the same model and configuration before drawing conclusions.
-
-#### Troubleshooting checklist
-
-If scan progression looks inconsistent:
-
-1. Re-run the same target with the same model and prompt settings.
-2. Compare behavior across different context-window sizes.
-3. Review whether phase progression remains stable during longer sessions.
-4. Check whether scan completion happened because of iteration limits, retries, or context/memory handling.
 
 <div align="center">
 
