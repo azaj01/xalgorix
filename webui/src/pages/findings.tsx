@@ -91,8 +91,8 @@ export default function FindingsPage() {
   }, [findings]);
 
   return (
-    <div className="space-y-6 p-6">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+    <div className="space-y-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Findings</h1>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -100,18 +100,33 @@ export default function FindingsPage() {
             severity.
           </p>
         </div>
-        <div className="flex gap-2">
-          {(["critical", "high", "medium", "low", "info"] as const).map((s) => (
-            <div
-              key={s}
-              className="rounded-md border border-border bg-card px-3 py-1.5 text-center"
-            >
-              <p className="mono text-base font-medium">{counts[s] ?? 0}</p>
-              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                {s}
-              </p>
-            </div>
-          ))}
+        <div className="grid grid-cols-5 gap-1.5 sm:flex sm:gap-2">
+          {(["critical", "high", "medium", "low", "info"] as const).map((s) => {
+            const dot =
+              s === "critical"
+                ? "bg-red-500"
+                : s === "high"
+                  ? "bg-orange-500"
+                  : s === "medium"
+                    ? "bg-amber-400"
+                    : s === "low"
+                      ? "bg-blue-400"
+                      : "bg-neutral-500"
+            return (
+              <div
+                key={s}
+                className="rounded-md border border-border bg-card px-3 py-2 text-center min-w-[64px]"
+              >
+                <p className="mono text-lg font-semibold leading-none tabular-nums">
+                  {counts[s] ?? 0}
+                </p>
+                <p className="mt-1 flex items-center justify-center gap-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                  <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+                  {s}
+                </p>
+              </div>
+            )
+          })}
         </div>
       </div>
 

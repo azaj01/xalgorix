@@ -31,22 +31,33 @@ export function MetricCard({
   const body = (
     <div
       className={cn(
-        "group rounded-md border border-border bg-card p-5 transition-colors card-hover",
+        // h-full + flex column keeps every card in a row the same height,
+        // even when some have a hint and others don't, and prevents the
+        // 6-col grid from looking ragged when labels truncate differently.
+        "group flex h-full flex-col rounded-md border border-border bg-card p-4 transition-colors card-hover",
         to && "cursor-pointer",
         className,
       )}
     >
       <div className="flex items-start justify-between gap-2">
-        <p className="text-xs uppercase tracking-wide text-muted-foreground">
+        <p className="truncate text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
           {label}
         </p>
-        {icon && <span className="text-muted-foreground">{icon}</span>}
+        {icon && <span className="shrink-0 text-muted-foreground">{icon}</span>}
       </div>
-      <div className={cn("mt-3 text-3xl font-semibold tabular-nums", accentClass)}>
+      <div
+        className={cn(
+          "mt-3 truncate text-3xl font-semibold leading-none tabular-nums",
+          accentClass,
+        )}
+        title={typeof value === "string" || typeof value === "number" ? String(value) : undefined}
+      >
         {value}
       </div>
       {hint != null && (
-        <div className="mt-2 text-xs text-muted-foreground">{hint}</div>
+        <div className="mt-auto pt-2 text-xs text-muted-foreground truncate">
+          {hint}
+        </div>
       )}
     </div>
   );

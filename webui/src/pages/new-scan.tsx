@@ -100,7 +100,7 @@ export default function NewScanPage() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6 p-6">
+    <div className="mx-auto max-w-3xl space-y-6">
       <div>
         <Button
           variant="ghost"

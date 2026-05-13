@@ -29,7 +29,6 @@ import {
   useStatus,
 } from "@/api/queries";
 import {
-  formatTime,
   normalizeSeverity,
   severityRank,
   shortId,
@@ -115,9 +114,9 @@ export default function OverviewPage() {
         </Button>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <MetricCard
-          label="Active Scan"
+          label="Active"
           value={runningInstances.length}
           hint={
             activeInstance
@@ -129,27 +128,29 @@ export default function OverviewPage() {
           accent={runningInstances.length > 0 ? "success" : "default"}
         />
         <MetricCard
-          label="Total Findings"
+          label="Findings"
           value={totalFindings}
           hint={`${scanList?.length || 0} scans on disk`}
           to="/findings"
           icon={<ShieldAlert className="h-3.5 w-3.5" />}
         />
         <MetricCard
-          label="Critical / High"
+          label="Crit / High"
           value={criticalHigh}
+          hint={criticalHigh > 0 ? "Needs review" : "All clear"}
           to="/findings"
           icon={<AlertOctagon className="h-3.5 w-3.5" />}
           accent={criticalHigh > 0 ? "critical" : "default"}
         />
         <MetricCard
-          label="Targets Scanned"
+          label="Targets"
           value={targetsScanned}
+          hint={targetsScanned === 1 ? "1 host" : `${targetsScanned} hosts`}
           to="/scans"
           icon={<Target className="h-3.5 w-3.5" />}
         />
         <MetricCard
-          label="Active Phase"
+          label="Phase"
           value={status?.current_phase ?? "—"}
           hint={
             status?.current_phase
