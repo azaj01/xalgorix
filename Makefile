@@ -5,15 +5,18 @@ BUILD_DIR=./build
 VERSION=4.2.9
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION)"
 
-webui-install:
+webui/node_modules: webui/package.json
 	@echo "Installing webui dependencies..."
 	cd webui && npm install --no-audit --no-fund
+	@touch webui/node_modules
 
-webui:
+webui-install: webui/node_modules
+
+webui: webui/node_modules
 	@echo "Building webui (React) → internal/web/static..."
 	cd webui && npm run build
 
-webui-dev:
+webui-dev: webui/node_modules
 	cd webui && npm run dev
 
 build: webui
