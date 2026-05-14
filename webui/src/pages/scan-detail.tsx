@@ -276,7 +276,7 @@ export default function ScanDetailPage() {
           <FindingsTab vulns={scan.vulns ?? []} />
         </TabsContent>
         <TabsContent value="events">
-          <EventsTab events={mergedEvents} />
+          <EventsTab events={mergedEvents} scanId={scan.id} target={scan.target} />
         </TabsContent>
         {!!scan.sub_scan_total && (
           <TabsContent value="subdomains">
@@ -624,13 +624,23 @@ function DetailSection({
   )
 }
 
-function EventsTab({ events }: { events: FeedEvent[] }) {
+function EventsTab({
+  events,
+  scanId,
+  target,
+}: {
+  events: FeedEvent[]
+  scanId: string
+  target: string
+}) {
   const [filter, setFilter] = useState<FeedFilter>("all")
   return (
     <LiveFeed
       events={events}
       filter={filter}
       onFilterChange={setFilter}
+      exportFilePrefix={`xalgorix-${target || scanId}-events`}
+      exportScope={scanId}
       emptyTitle="No events yet"
       emptyDescription="Once the scan starts producing output it will stream here."
     />

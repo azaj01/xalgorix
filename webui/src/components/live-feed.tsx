@@ -1,8 +1,10 @@
 import { useMemo, useRef, useState, useEffect } from "react";
-import { ChevronRight, Pause, Play, Trash2 } from "lucide-react";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { ChevronRight, Download, FileText, Pause, Play, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useWSStore, type FeedEvent } from "@/store/ws";
+import { exportFeedEvents, type FeedExportFormat } from "@/lib/feed-export";
 import { EmptyState } from "./states";
 
 export type FeedFilter =
@@ -178,6 +180,8 @@ export function LiveFeed({
   showControls = true,
   className,
   onClearEvents,
+  exportFilePrefix,
+  exportScope,
 }: {
   events: FeedEvent[];
   filter: FeedFilter;
@@ -188,6 +192,8 @@ export function LiveFeed({
   showControls?: boolean;
   className?: string;
   onClearEvents?: () => void;
+  exportFilePrefix?: string;
+  exportScope?: string;
 }) {
   const paused = useWSStore((s) => s.paused);
   const setPaused = useWSStore((s) => s.setPaused);
@@ -198,6 +204,20 @@ export function LiveFeed({
     () => events.filter((e) => matchFilter(e, filter)),
     [events, filter],
   );
+
+  function handleExport(format: FeedExportFormat) {
+    exportFeedEvents({
+      events: visible,
+      format,
+      filenamePrefix: exportFilePrefix,
+      metadata: {
+        filter,
+        scope: exportScope,
+        total_events: events.length,
+        visible_events: visible.length,
+      },
+    });
+  }
 
   useEffect(() => {
     if (autoScroll && !paused && scrollRef.current) {
@@ -225,6 +245,11 @@ export function LiveFeed({
             </button>
           ))}
           <div className="ml-auto flex items-center gap-1">
+            <FeedExportMenu
+              disabled={visible.length === 0}
+              visibleCount={visible.length}
+              onExport={handleExport}
+            />
             <Button
               size="sm"
               variant="ghost"
@@ -267,5 +292,65 @@ export function LiveFeed({
         )}
       </div>
     </div>
+  );
+}
+
+const menuContentClass =
+  "z-50 min-w-44 rounded-md border border-border bg-popover p-1 text-sm text-popover-foreground shadow-md";
+const menuItemClass =
+  "flex w-full cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm outline-none transition-colors hover:bg-accent focus:bg-accent data-[disabled]:pointer-events-none data-[disabled]:opacity-50";
+
+function FeedExportMenu({
+  disabled,
+  visibleCount,
+  onExport,
+}: {
+  disabled: boolean;
+  visibleCount: number;
+  onExport: (format: FeedExportFormat) => void;
+}) {
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={disabled}
+          className="h-7 px-2"
+          aria-label={`Export ${visibleCount} live feed events`}
+        >
+          <Download className="h-3.5 w-3.5" /> Export
+        </Button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content align="end" className={menuContentClass}>
+          <DropdownMenu.Label className="px-2 py-1.5 text-xs text-muted-foreground">
+            {visibleCount} visible events
+          </DropdownMenu.Label>
+          <DropdownMenu.Separator className="-mx-1 my-1 h-px bg-border" />
+          <DropdownMenu.Item
+            className={menuItemClass}
+            onSelect={() => onExport("json")}
+          >
+            <Download className="h-3.5 w-3.5" />
+            JSON
+          </DropdownMenu.Item>
+          <DropdownMenu.Item
+            className={menuItemClass}
+            onSelect={() => onExport("jsonl")}
+          >
+            <Download className="h-3.5 w-3.5" />
+            JSONL
+          </DropdownMenu.Item>
+          <DropdownMenu.Item
+            className={menuItemClass}
+            onSelect={() => onExport("txt")}
+          >
+            <FileText className="h-3.5 w-3.5" />
+            Transcript
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }
