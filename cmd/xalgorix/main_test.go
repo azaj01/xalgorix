@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/xalgord/xalgorix/v4/internal/config"
 )
 
 // TestIsNewer covers the semver comparison used by the auto-update path.
@@ -62,5 +64,49 @@ func TestServiceUnitUsesDedicatedWorkspaceAndContinuesAfterChildOOM(t *testing.T
 		if !strings.Contains(unit, want) {
 			t.Fatalf("service unit missing %q:\n%s", want, unit)
 		}
+	}
+}
+
+func TestServiceAccessLinesLoopbackExplainExternalSetup(t *testing.T) {
+	lines := strings.Join(serviceAccessLines(&config.Config{BindAddr: "127.0.0.1"}, defaultWebPort), "\n")
+
+	for _, want := range []string{
+		"Web UI: http://localhost:9137 (loopback only)",
+		"XALGORIX_BIND=0.0.0.0",
+		"XALGORIX_USERNAME",
+		"restart",
+	} {
+		if !strings.Contains(lines, want) {
+			t.Fatalf("service access lines missing %q:\n%s", want, lines)
+		}
+	}
+}
+
+func TestServiceAccessLinesNetworkExposed(t *testing.T) {
+	lines := strings.Join(serviceAccessLines(&config.Config{
+		BindAddr:     "0.0.0.0",
+		Username:     "admin",
+		PasswordHash: "$2a$10$example",
+	}, defaultWebPort), "\n")
+
+	for _, want := range []string{
+		"Web UI: http://<server-ip>:9137 (network-exposed)",
+		"open TCP port 9137",
+	} {
+		if !strings.Contains(lines, want) {
+			t.Fatalf("service access lines missing %q:\n%s", want, lines)
+		}
+	}
+	if strings.Contains(lines, "will refuse to start") {
+		t.Fatalf("authenticated external bind should not warn that startup will be refused:\n%s", lines)
+	}
+}
+
+func TestServiceAccessLinesExternalWithoutAuthWarns(t *testing.T) {
+	lines := strings.Join(serviceAccessLines(&config.Config{BindAddr: "0.0.0.0"}, defaultWebPort), "\n")
+
+	if !strings.Contains(lines, "external bind requires XALGORIX_USERNAME") ||
+		!strings.Contains(lines, "will refuse to start without auth") {
+		t.Fatalf("missing external bind auth warning:\n%s", lines)
 	}
 }

@@ -234,7 +234,8 @@ func main() {
 		fmt.Print(tui.Banner)
 		fmt.Println()
 		fmt.Printf("\n  Xalgorix Web UI starting on port %d...\n", port)
-		fmt.Printf("  Open http://localhost:%d in your browser\n\n", port)
+		printServiceAccessInfo(cfg, port)
+		fmt.Println()
 
 		srv := web.NewServer(cfg, port)
 		if err := srv.Start(); err != nil {
@@ -474,7 +475,7 @@ func handleStart() {
 	}
 
 	fmt.Println("✅ Xalgorix installed and started as systemd service!")
-	fmt.Printf("   Web UI: http://localhost:%d\n", defaultWebPort)
+	printServiceAccessInfo(config.Get(), defaultWebPort)
 	fmt.Println("   Logs:   journalctl -u xalgorix -f")
 	fmt.Println("   Status: systemctl status xalgorix")
 }
@@ -535,7 +536,7 @@ func startBackground() {
 	}
 
 	fmt.Println("✅ Xalgorix started in background!")
-	fmt.Printf("   Web UI: http://localhost:%d\n", defaultWebPort)
+	printServiceAccessInfo(config.Get(), defaultWebPort)
 	fmt.Println("   Logs:   tail -f /tmp/xalgorix.log")
 	fmt.Printf("   PID:    %d\n", startCmd.Process.Pid)
 }
@@ -580,7 +581,56 @@ func handleRestart() {
 	}
 
 	fmt.Println("✅ Xalgorix restarted!")
-	fmt.Printf("   Web UI: http://localhost:%d\n", defaultWebPort)
+	printServiceAccessInfo(config.Get(), defaultWebPort)
+}
+
+func printServiceAccessInfo(cfg *config.Config, port int) {
+	for _, line := range serviceAccessLines(cfg, port) {
+		fmt.Println(line)
+	}
+}
+
+func serviceAccessLines(cfg *config.Config, port int) []string {
+	bindAddr := "127.0.0.1"
+	if cfg != nil && strings.TrimSpace(cfg.BindAddr) != "" {
+		bindAddr = strings.TrimSpace(cfg.BindAddr)
+	}
+
+	if isLoopbackBind(bindAddr) {
+		return []string{
+			fmt.Sprintf("   Web UI: http://localhost:%d (loopback only)", port),
+			"   External access: set XALGORIX_BIND=0.0.0.0 plus XALGORIX_USERNAME and XALGORIX_PASSWORD in ~/.xalgorix.env, then restart.",
+		}
+	}
+
+	host := bindAddr
+	if bindAddr == "0.0.0.0" || bindAddr == "::" || bindAddr == "[::]" {
+		host = "<server-ip>"
+	} else if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]"
+	}
+
+	lines := []string{
+		fmt.Sprintf("   Web UI: http://%s:%d (network-exposed)", host, port),
+	}
+	if !dashboardAuthConfigured(cfg) {
+		lines = append(lines, "   Warning: external bind requires XALGORIX_USERNAME and XALGORIX_PASSWORD or XALGORIX_PASSWORD_HASH; the server will refuse to start without auth.")
+	}
+	lines = append(lines, fmt.Sprintf("   If remote clients still cannot connect, open TCP port %d in the host firewall or cloud security group.", port))
+	return lines
+}
+
+func isLoopbackBind(bindAddr string) bool {
+	switch strings.ToLower(strings.TrimSpace(bindAddr)) {
+	case "", "127.0.0.1", "localhost", "::1", "[::1]":
+		return true
+	default:
+		return false
+	}
+}
+
+func dashboardAuthConfigured(cfg *config.Config) bool {
+	return cfg != nil && cfg.Username != "" && (cfg.Password != "" || cfg.PasswordHash != "")
 }
 
 // handleUninstall removes xalgorix from the system

@@ -203,6 +203,19 @@ sudo xalgorix --stop
 sudo xalgorix --uninstall
 ```
 
+Expose the service to remote browsers only after enabling dashboard auth:
+
+```bash
+sudo tee -a /root/.xalgorix.env >/dev/null <<'EOF'
+XALGORIX_BIND=0.0.0.0
+XALGORIX_USERNAME=admin
+XALGORIX_PASSWORD=change-this
+EOF
+sudo xalgorix --restart
+```
+
+Then open `http://<server-ip>:9137`. If the process is listening but the page still does not load remotely, allow TCP port `9137` in the server firewall or cloud security group.
+
 View logs:
 
 ```bash
