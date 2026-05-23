@@ -6,6 +6,7 @@
 package resources
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -132,6 +133,11 @@ var (
 	nextLeaseID           uint64
 	activeToolLeases      int
 	activeHeavyToolLeases int
+)
+
+const (
+	toolLeasePollInterval = 5 * time.Second
+	toolLeaseLogInterval  = 30 * time.Second
 )
 
 func init() {
@@ -509,12 +515,35 @@ func CanExecTool(isHeavy bool) (bool, string) {
 // AcquireToolLease reserves live CPU/RAM headroom for one subprocess. The
 // caller must release the lease after the process exits.
 func AcquireToolLease(isHeavy bool, maxWait time.Duration, toolName string) (*ToolLease, bool) {
-	if maxWait <= 0 {
-		maxWait = time.Second
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if maxWait > 0 {
+		ctx, cancel = context.WithTimeout(ctx, maxWait)
+		defer cancel()
+	}
+	lease, err := acquireToolLeaseWithContext(ctx, isHeavy, toolName, toolLeasePollInterval)
+	return lease, err == nil
+}
+
+// AcquireToolLeaseContext reserves live CPU/RAM headroom for one subprocess.
+// Unlike the legacy maxWait API, this never refuses purely because the system
+// stayed busy for a fixed number of seconds. It blocks until capacity is
+// available or until the caller's context is cancelled.
+func AcquireToolLeaseContext(ctx context.Context, isHeavy bool, toolName string) (*ToolLease, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return acquireToolLeaseWithContext(ctx, isHeavy, toolName, toolLeasePollInterval)
+}
+
+func acquireToolLeaseWithContext(ctx context.Context, isHeavy bool, toolName string, pollInterval time.Duration) (*ToolLease, error) {
+	if pollInterval <= 0 {
+		pollInterval = time.Second
 	}
 	toolLabel := ToolLogLabel(toolName)
-	deadline := time.Now().Add(maxWait)
 	waited := false
+	startedWaiting := time.Now()
+	lastLog := startedWaiting
 	var lastReason string
 
 	for {
@@ -523,20 +552,26 @@ func AcquireToolLease(isHeavy bool, maxWait time.Duration, toolName string) (*To
 			if waited {
 				log.Printf("[RESOURCES] Resources recovered; proceeding with %s", toolLabel)
 			}
-			return lease, true
+			return lease, nil
 		}
 		lastReason = reason
 
 		if !waited {
-			log.Printf("[THROTTLE] Waiting to exec %s — %s (max wait: %s)", toolLabel, reason, maxWait)
+			log.Printf("[THROTTLE] Queueing %s until resources recover — %s", toolLabel, reason)
 			waited = true
+			lastLog = time.Now()
+		} else if time.Since(lastLog) >= toolLeaseLogInterval {
+			log.Printf("[THROTTLE] Still waiting to exec %s after %s — %s",
+				toolLabel, time.Since(startedWaiting).Round(time.Second), lastReason)
+			lastLog = time.Now()
 		}
 
-		if time.Now().After(deadline) {
-			log.Printf("[THROTTLE] Timeout waiting for resources; refusing %s — %s", toolLabel, lastReason)
-			return nil, false
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("cancelled while waiting to launch %s after %s: %w (last resource state: %s)",
+				toolLabel, time.Since(startedWaiting).Round(time.Second), ctx.Err(), lastReason)
+		case <-time.After(pollInterval):
 		}
-		time.Sleep(5 * time.Second)
 	}
 }
 
@@ -704,7 +739,13 @@ type toolCapacity struct {
 
 func toolCapacityForStats(stats SystemStats, level Level, reason string, activeTotal, activeHeavy int) toolCapacity {
 	spareMB := stats.MemAvailableMB - ramCriticalMB
-	if spareMB <= 0 || level >= LevelCritical {
+	if level >= LevelCritical {
+		lightSlots := criticalLightToolSlots(stats)
+		detail := fmt.Sprintf("%s; pressure_mode=true, tool_slots: heavy=%d/%d light=%d/%d, active_tools=%d, active_heavy=%d",
+			reason, activeHeavy, 0, activeTotal, lightSlots, activeTotal, activeHeavy)
+		return toolCapacity{HeavyToolSlots: 0, LightToolSlots: lightSlots, Reason: detail}
+	}
+	if spareMB <= 0 {
 		return toolCapacity{Reason: reason}
 	}
 
@@ -742,6 +783,16 @@ func toolCapacityForStats(stats SystemStats, level Level, reason string, activeT
 	detail := fmt.Sprintf("%s; tool_slots: heavy=%d/%d light=%d/%d, active_tools=%d, active_heavy=%d, mem_unit=%dMB, cpu_budget=%.2f",
 		reason, activeHeavy, heavySlots, activeTotal, lightSlots, activeTotal, activeHeavy, memUnitMB, heavyToolCPULoad)
 	return toolCapacity{HeavyToolSlots: heavySlots, LightToolSlots: lightSlots, Reason: detail}
+}
+
+func criticalLightToolSlots(stats SystemStats) int {
+	if stats.MemAvailableMB < 128 {
+		return 0
+	}
+	// Keep one low-footprint command moving under pressure so quality does not
+	// collapse just because loadavg lags behind a finished tool. Heavy commands
+	// remain blocked until normal headroom returns.
+	return 1
 }
 
 func toolMemoryLimitMBForStats(stats SystemStats, isHeavy bool, projectedTotal, projectedHeavy int, level Level) int64 {

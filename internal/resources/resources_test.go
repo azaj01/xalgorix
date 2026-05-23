@@ -1,8 +1,10 @@
 package resources
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLevelStringAndMaxLevel(t *testing.T) {
@@ -180,14 +182,98 @@ func TestToolCapacityHonorsCPUAndMemoryHeadroom(t *testing.T) {
 
 	stats.LoadAvg1m = 0.95
 	capacity = toolCapacityForStats(stats, LevelCritical, "CPU critical", 0, 0)
-	if capacity.HeavyToolSlots != 0 || capacity.LightToolSlots != 0 {
-		t.Fatalf("critical CPU slots = heavy %d light %d, want 0/0", capacity.HeavyToolSlots, capacity.LightToolSlots)
+	if capacity.HeavyToolSlots != 0 || capacity.LightToolSlots != 1 {
+		t.Fatalf("critical CPU slots = heavy %d light %d, want 0/1", capacity.HeavyToolSlots, capacity.LightToolSlots)
 	}
 
 	stats = SystemStats{CPUCores: 4, LoadAvg1m: 0.1, MemTotalMB: 8192, MemAvailableMB: 1800}
 	capacity = toolCapacityForStats(stats, LevelOK, "OK", 0, 0)
 	if capacity.HeavyToolSlots != 1 {
 		t.Fatalf("memory-limited heavy slots = %d, want 1", capacity.HeavyToolSlots)
+	}
+}
+
+func TestCriticalPressureKeepsLightToolPressureSlot(t *testing.T) {
+	oldCriticalRAM := ramCriticalMB
+	t.Cleanup(func() {
+		ramCriticalMB = oldCriticalRAM
+	})
+
+	ramCriticalMB = 1985
+	stats := SystemStats{CPUCores: 4, LoadAvg1m: 4.6, MemTotalMB: 7938, MemAvailableMB: 1946}
+	capacity := toolCapacityForStats(stats, LevelCritical, "critical", 0, 0)
+	if capacity.HeavyToolSlots != 0 {
+		t.Fatalf("critical heavy slots = %d, want 0", capacity.HeavyToolSlots)
+	}
+	if capacity.LightToolSlots != 1 {
+		t.Fatalf("critical light slots = %d, want one pressure slot", capacity.LightToolSlots)
+	}
+	if ok, reason := toolSlotAdmission(false, capacity, 0, 0); !ok {
+		t.Fatalf("light tool should be admitted in pressure mode: %s", reason)
+	}
+	if ok, reason := toolSlotAdmission(true, capacity, 0, 0); ok {
+		t.Fatalf("heavy tool should wait in critical pressure mode: %s", reason)
+	}
+}
+
+func TestAcquireToolLeaseContextAllowsLightToolUnderCriticalPressure(t *testing.T) {
+	oldCPUCritical := cpuCriticalPct
+	oldTotal := activeToolLeases
+	oldHeavy := activeHeavyToolLeases
+	t.Cleanup(func() {
+		cpuCriticalPct = oldCPUCritical
+		resourceMu.Lock()
+		activeToolLeases = oldTotal
+		activeHeavyToolLeases = oldHeavy
+		resourceMu.Unlock()
+	})
+
+	cpuCriticalPct = 0
+	resourceMu.Lock()
+	activeToolLeases = 0
+	activeHeavyToolLeases = 0
+	resourceMu.Unlock()
+
+	lease, err := acquireToolLeaseWithContext(context.Background(), false, "curl", time.Millisecond)
+	if err != nil {
+		t.Fatalf("light pressure-slot acquisition failed: %v", err)
+	}
+	if lease == nil {
+		t.Fatal("expected lease")
+	}
+	lease.Release()
+}
+
+func TestAcquireToolLeaseContextCancelsInsteadOfRefusing(t *testing.T) {
+	oldCPUCritical := cpuCriticalPct
+	oldTotal := activeToolLeases
+	oldHeavy := activeHeavyToolLeases
+	t.Cleanup(func() {
+		cpuCriticalPct = oldCPUCritical
+		resourceMu.Lock()
+		activeToolLeases = oldTotal
+		activeHeavyToolLeases = oldHeavy
+		resourceMu.Unlock()
+	})
+
+	cpuCriticalPct = 0
+	resourceMu.Lock()
+	activeToolLeases = 0
+	activeHeavyToolLeases = 0
+	resourceMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	lease, err := acquireToolLeaseWithContext(ctx, true, "nuclei", time.Millisecond)
+	if lease != nil {
+		lease.Release()
+		t.Fatal("unexpected heavy-tool lease under critical pressure")
+	}
+	if err == nil {
+		t.Fatal("expected context cancellation while waiting for heavy-tool capacity")
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "refus") {
+		t.Fatalf("resource wait should cancel, not refuse: %v", err)
 	}
 }
 

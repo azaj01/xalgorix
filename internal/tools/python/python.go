@@ -73,7 +73,14 @@ func executePythonForContext(contextID string, args map[string]string) (tools.Re
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	waitCtx := pythonWaitContext(contextID)
+	lease, err := resources.AcquireToolLeaseContext(waitCtx, false, "python_action")
+	if err != nil {
+		return tools.Result{Output: fmt.Sprintf("[CANCELLED] python_action launch cancelled before starting: %v", err)}, nil
+	}
+	defer lease.Release()
+
+	ctx, cancel := context.WithTimeout(waitCtx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, pythonBin, "-c", code)
@@ -92,12 +99,6 @@ func executePythonForContext(contextID string, args map[string]string) (tools.Re
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	lease, ok := resources.AcquireToolLease(false, 30*time.Second, "python_action")
-	if !ok {
-		return tools.Result{Error: "Refused to launch python_action: system CPU/RAM resources exhausted after 30s wait"}, nil
-	}
-	defer lease.Release()
-
 	if err := cmd.Start(); err != nil {
 		return tools.Result{Error: fmt.Sprintf("Failed to start python process: %v", err)}, nil
 	}
@@ -111,7 +112,7 @@ func executePythonForContext(contextID string, args map[string]string) (tools.Re
 	terminal.TrackProcessForContext(contextID, cmd, cancel, "python: "+strings.ReplaceAll(cleanCode, "\n", " "))
 	defer terminal.UntrackProcessForContext(contextID, cmd)
 
-	err := cmd.Wait()
+	waitErr := cmd.Wait()
 
 	var b strings.Builder
 	if stdout.Len() > 0 {
@@ -140,10 +141,10 @@ func executePythonForContext(contextID string, args map[string]string) (tools.Re
 		}
 	}
 
-	if err != nil {
+	if waitErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			b.WriteString(fmt.Sprintf("\n[TIMEOUT: exceeded %ds]", timeoutSec))
-		} else if exitErr, ok := err.(*exec.ExitError); ok {
+		} else if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			b.WriteString(fmt.Sprintf("\n[exit code: %d]", exitErr.ExitCode()))
 		}
 	}
@@ -153,6 +154,13 @@ func executePythonForContext(contextID string, args map[string]string) (tools.Re
 	}
 
 	return tools.Result{Output: b.String()}, nil
+}
+
+func pythonWaitContext(contextID string) context.Context {
+	if sc := scanctx.Get(contextID); sc != nil && sc.Ctx != nil {
+		return sc.Ctx
+	}
+	return context.Background()
 }
 
 func preparePythonWorkspace(workDir string) {

@@ -635,6 +635,13 @@ func runShell(command string) (string, int) {
 	return runShellInternal(scanctx.Default().ID, command)
 }
 
+func commandWaitContext(contextID string) context.Context {
+	if sc := scanctx.Get(contextID); sc != nil && sc.Ctx != nil {
+		return sc.Ctx
+	}
+	return context.Background()
+}
+
 func effectiveWorkDirForContext(contextID string, cfg *config.Config) string {
 	workDir := strings.TrimSpace(GetWorkDirForContext(contextID))
 	if workDir == "" {
@@ -785,9 +792,6 @@ func runShellInternal(contextID string, command string) (string, int) {
 		timeout = hardMaxTimeout
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
 	cfg := config.Get()
 	workDir := effectiveWorkDirForContext(contextID, cfg)
 	if err := prepareCommandWorkspace(workDir); err != nil {
@@ -802,25 +806,22 @@ func runShellInternal(contextID string, command string) (string, int) {
 	// ── Layer 2: Pre-exec resource throttle ──
 	// Before launching, check if the system has enough resources.
 	// Heavy tools (nuclei, masscan, etc.) are gated more strictly.
-	// If a heavy tool can't get resources within the timeout, abort it
-	// to prevent the kernel OOM killer from nuking the whole server.
+	// Under pressure, commands wait here instead of returning a fake failure
+	// to the agent. The command runtime timeout starts only after launch.
 	heavy := isHeavyTool(cleanCmd)
-	wait := 30 * time.Second
-	if heavy {
-		wait = 2 * time.Minute
-	}
 	toolLabel := resources.ToolLogLabel(cleanCmd)
-	lease, ok := resources.AcquireToolLease(heavy, wait, toolLabel)
-	if !ok {
-		if heavy {
-			return fmt.Sprintf("[THROTTLE] Refused to launch heavy tool %q — system resources exhausted after 2m wait", toolLabel), -1
-		}
-		return fmt.Sprintf("[THROTTLE] Refused to launch tool %q — system resources exhausted after 30s wait", toolLabel), -1
+	waitCtx := commandWaitContext(contextID)
+	lease, err := resources.AcquireToolLeaseContext(waitCtx, heavy, toolLabel)
+	if err != nil {
+		return fmt.Sprintf("[CANCELLED] Tool launch cancelled before starting %q: %v", toolLabel, err), -1
 	}
 	defer lease.Release()
 	memLimitBytes := lease.MemoryLimitBytes()
 
 	command = shellPrelude(homeDir, workDir, memLimitBytes) + cleanCmd
+
+	ctx, cancel := context.WithTimeout(waitCtx, timeout)
+	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	cmd.Dir = workDir

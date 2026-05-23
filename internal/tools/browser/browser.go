@@ -2,6 +2,7 @@
 package browser
 
 import (
+	"context"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
@@ -399,9 +400,9 @@ func ensureBrowser(ctxID, proxy string) error {
 			Set("ignore-certificate-errors", "true")
 	}
 
-	lease, ok := resources.AcquireToolLease(true, 2*time.Minute, "browser_action launch")
-	if !ok {
-		return fmt.Errorf("resource throttle: refused to launch browser because heavy tool capacity is exhausted")
+	lease, err := resources.AcquireToolLeaseContext(browserWaitContext(ctxID), true, "browser_action launch")
+	if err != nil {
+		return fmt.Errorf("browser launch cancelled while waiting for resource capacity: %w", err)
 	}
 	leaseAttached := false
 	defer func() {
@@ -427,6 +428,13 @@ func ensureBrowser(ctxID, proxy string) error {
 	leaseAttached = true
 	log.Printf("[browser] Standalone browser launched (extension=%v)", extDir != "")
 	return nil
+}
+
+func browserWaitContext(ctxID string) context.Context {
+	if sc := scanctx.Get(ctxID); sc != nil && sc.Ctx != nil {
+		return sc.Ctx
+	}
+	return context.Background()
 }
 
 // setupDialogHandler sets up auto-dismiss for JavaScript dialogs (alert/confirm/prompt)

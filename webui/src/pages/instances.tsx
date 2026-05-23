@@ -36,7 +36,7 @@ export default function InstancesPage() {
       <header className="flex flex-col gap-1">
         <h1 className="font-sans text-2xl font-semibold tracking-tight">Instances</h1>
         <p className="text-sm text-muted-foreground">
-          Active scan instances and the host resources they consume.
+          Active scan instances and global host pressure. Completed scans are historical records.
         </p>
       </header>
 
@@ -83,6 +83,8 @@ function ResourcesBar({ resources }: { resources: NonNullable<ReturnType<typeof 
   const heavySlots = resources.heavy_tool_slots ?? 0
   const toolMem = resources.tool_mem_limit_mb ?? 0
   const scanMem = resources.scan_memory_budget_mb ?? 0
+  const rss = resources.process_rss_mb ?? 0
+  const heap = resources.go_heap_alloc_mb ?? 0
   const level = (resources.level || "").toLowerCase()
   const levelColor =
     level === "critical"
@@ -96,27 +98,27 @@ function ResourcesBar({ resources }: { resources: NonNullable<ReturnType<typeof 
       <CardContent className="grid gap-3 p-4 md:grid-cols-4">
         <ResourceStat
           icon={<Cpu className="h-3 w-3" />}
-          label="CPU LOAD"
+          label="HOST CPU LOAD"
           value={`${cpu}%`}
           sub={`${resources.cpu_load_1m.toFixed(2)} / ${resources.cpu_cores} cores · heavy ${heavyActive}/${heavySlots}`}
         />
         <ResourceStat
           icon={<MemoryStick className="h-3 w-3" />}
-          label="MEMORY"
+          label="HOST MEMORY"
           value={`${ramPct}%`}
-          sub={toolMem > 0 ? `${Math.round(ramUsed)}MB used · tool ${toolMem}MB` : `${Math.round(ramUsed)}MB used`}
+          sub={rss > 0 ? `${Math.round(ramUsed)}MB used · xalgorix ${rss}MB RSS` : `${Math.round(ramUsed)}MB used`}
         />
         <ResourceStat
           icon={<HardDrive className="h-3 w-3" />}
           label="DISK FREE"
           value={`${diskFreeGb}GB`}
-          sub={scanMem > 0 ? `Max ${resources.effective_max_instances} · scan ${scanMem}MB` : `Max ${resources.effective_max_instances} instances`}
+          sub={scanMem > 0 ? `Max ${resources.effective_max_instances} · scan ${scanMem}MB · tool ${toolMem}MB` : `Max ${resources.effective_max_instances} instances`}
         />
         <div className={`rounded-md border px-3 py-2 text-xs ${levelColor}`}>
-          <div className="uppercase tracking-wide opacity-70">Resource level</div>
+          <div className="uppercase tracking-wide opacity-70">Host resource level</div>
           <div className="mt-0.5 font-medium capitalize">{resources.level || "ok"}</div>
           {shouldShowResourceReason(resources) && (
-            <div className="mt-0.5 opacity-70 line-clamp-2">{resources.reason}</div>
+            <div className="mt-0.5 opacity-70 line-clamp-2">{heap > 0 ? `Go heap ${heap}MB. ` : ""}{resources.reason}</div>
           )}
         </div>
       </CardContent>
