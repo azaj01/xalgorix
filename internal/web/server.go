@@ -3703,8 +3703,8 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 	// Filter out local/internal targets to prevent self-scanning
 	var safeTargets []string
 	for _, t := range cleanTargets {
-		if isBlockedTarget(t) {
-			log.Printf("[BLOCKLIST] Skipping blocked target: %s (local/internal IP)", t)
+		if s.isBlockedTarget(t) {
+			log.Printf("[BLOCKLIST] Skipping blocked target: %s (local/internal IP or self-listener)", t)
 		} else {
 			safeTargets = append(safeTargets, t)
 		}
@@ -7264,16 +7264,48 @@ func (s *Server) sendSimpleEmbed(color int, title, description string) {
 }
 
 // isBlockedTarget checks whether a target resolves to a local, loopback, or internal
-// IP address. This prevents the agent from inadvertently scanning the host machine.
-func isBlockedTarget(target string) bool {
+// IP address — OR matches the running Xalgorix instance's bind address + port.
+// This prevents the agent from inadvertently scanning the host machine OR the
+// dashboard's own listener (which is reachable on a public IP when
+// XALGORIX_BIND=0.0.0.0). Both forms are blocked.
+func (s *Server) isBlockedTarget(target string) bool {
 	// Strip scheme if present (http://127.0.0.1 → 127.0.0.1)
 	host := target
+	hostPort := ""
 	if u, err := url.Parse(target); err == nil && u.Host != "" {
 		host = u.Hostname()
+		hostPort = u.Port()
 	}
 	// Also handle host:port without scheme
-	if h, _, err := net.SplitHostPort(host); err == nil {
+	if h, p, err := net.SplitHostPort(host); err == nil {
 		host = h
+		if hostPort == "" {
+			hostPort = p
+		}
+	}
+
+	// Self-listener guard. Block if the target's port matches our own
+	// listening port AND the host either matches our bind address, is
+	// any local address, or resolves to one. This catches the case where
+	// XALGORIX_BIND=0.0.0.0 and the operator types the public IP back
+	// in — the previous loopback-only check missed it.
+	if s != nil && hostPort != "" {
+		if portNum, err := strconv.Atoi(hostPort); err == nil && portNum == s.port {
+			bind := strings.ToLower(strings.TrimSpace(s.cfg.BindAddr))
+			if bind == "" {
+				bind = "127.0.0.1"
+			}
+			lowerHost := strings.ToLower(strings.TrimSpace(host))
+			if lowerHost == bind || lowerHost == "0.0.0.0" || lowerHost == "::" {
+				return true
+			}
+			// Compare against every interface address — covers
+			// the case where bind=0.0.0.0 and the operator reaches
+			// the dashboard via a LAN IP (192.168.x.y) or public IP.
+			if hostMatchesLocalInterface(host) {
+				return true
+			}
+		}
 	}
 
 	// Explicit textual matches (fast path)
@@ -7318,6 +7350,59 @@ func isBlockedTarget(target string) bool {
 			continue
 		}
 		if subnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostMatchesLocalInterface returns true when the supplied host string
+// resolves (or directly equals) one of this machine's interface addresses.
+// Used by isBlockedTarget to catch the "bind=0.0.0.0, operator types
+// public IP" self-scan loophole.
+func hostMatchesLocalInterface(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	candidate := net.ParseIP(host)
+	if candidate == nil {
+		// Resolve hostname — best-effort. A DNS failure means we treat
+		// the host as not-local; the broader isBlockedTarget loopback
+		// check will still catch obvious cases.
+		addrs, err := net.LookupHost(host)
+		if err != nil {
+			return false
+		}
+		for _, a := range addrs {
+			if ip := net.ParseIP(a); ip != nil && ipMatchesLocalInterface(ip) {
+				return true
+			}
+		}
+		return false
+	}
+	return ipMatchesLocalInterface(candidate)
+}
+
+// ipMatchesLocalInterface walks every configured interface address and
+// returns true if any of them equals the supplied IP.
+func ipMatchesLocalInterface(ip net.IP) bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		var aIP net.IP
+		switch v := a.(type) {
+		case *net.IPNet:
+			aIP = v.IP
+		case *net.IPAddr:
+			aIP = v.IP
+		}
+		if aIP == nil {
+			continue
+		}
+		if aIP.Equal(ip) {
 			return true
 		}
 	}

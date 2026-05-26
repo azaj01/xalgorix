@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"os/exec"
 	"regexp"
@@ -779,6 +780,253 @@ func (a *Agent) shouldBlockForActivityPolicy(toolName string, toolArgs map[strin
 	return false, ""
 }
 
+// shouldBlockForOutOfScope rejects probe-style tool calls and
+// report_vulnerability invocations whose target host is NOT derived
+// from the configured scan target. Runs unconditionally — even in
+// active mode — so the agent cannot pivot to a third-party host it
+// discovered through DNS, nmap, related-infrastructure heuristics,
+// etc.
+//
+// Hosts considered in-scope:
+//
+//   - any host in a.activityHosts (which includes the configured
+//     targets, their www. variants, and registrable parents).
+//   - subdomains of any activityHosts entry.
+//
+// Tools subject to this gate:
+//
+//   - terminal_execute, python_action, browser_action, page_agent,
+//     pageagent — anything that can hit a network target.
+//   - report_vulnerability — files findings against the wrong host.
+//
+// All other tools (notes, finish, web_search, agentmail, list_skills,
+// read_skill, etc.) are exempt because they don't probe targets.
+//
+// Returns (false, "") when:
+//
+//   - activityHosts is empty (no scope configured — disable the gate
+//     rather than block everything),
+//   - the tool is not in the gated list,
+//   - the args don't reference any host (e.g. local artifact analysis),
+//   - the only hosts referenced are in-scope.
+func (a *Agent) shouldBlockForOutOfScope(toolName string, toolArgs map[string]string) (bool, string) {
+	if len(a.activityHosts) == 0 {
+		return false, ""
+	}
+
+	lowerTool := strings.ToLower(toolName)
+	switch lowerTool {
+	case "terminal_execute", "python_action", "browser_action", "page_agent", "pageagent",
+		"report_vulnerability":
+		// gated
+	default:
+		return false, ""
+	}
+
+	// Pull every host-looking token from the args.
+	hosts := extractHostsFromArgs(toolArgs)
+	if len(hosts) == 0 {
+		// No host token detected — let it through. Local artifact
+		// analysis (grep/awk/jq over recon files) shouldn't be
+		// blocked just because no host is named.
+		return false, ""
+	}
+
+	for _, h := range hosts {
+		if !hostInScope(h, a.activityHosts) {
+			return true, fmt.Sprintf(
+				"%q is not in scope. Configured target hosts: %s. Stay on the configured target — do NOT pivot to discovered third-party hosts, related infrastructure, or sibling services. If the agent thinks the host is part of the engagement, it must be added to the scan request, not probed implicitly.",
+				h, strings.Join(a.activityHosts, ", "),
+			)
+		}
+	}
+
+	// Extra check for report_vulnerability: validate the explicit
+	// `target` and `endpoint` arguments too. The reported finding
+	// should clearly belong to a configured target host even if the
+	// agent didn't put a URL in the description body.
+	if lowerTool == "report_vulnerability" {
+		rawTarget := strings.ToLower(strings.TrimSpace(toolArgs["target"]))
+		rawEndpoint := strings.ToLower(strings.TrimSpace(toolArgs["endpoint"]))
+		for _, raw := range []string{rawTarget, rawEndpoint} {
+			if raw == "" {
+				continue
+			}
+			h := extractHostFromTokenForScope(raw)
+			if h == "" {
+				continue
+			}
+			if !hostInScope(h, a.activityHosts) {
+				return true, fmt.Sprintf(
+					"report_vulnerability target %q is out of scope. Configured target hosts: %s. Refusing to file a finding against a host the operator did not authorize. Re-target the report to one of the configured hosts, or drop the finding.",
+					h, strings.Join(a.activityHosts, ", "),
+				)
+			}
+		}
+	}
+
+	return false, ""
+}
+
+// extractHostsFromArgs scans every value in toolArgs for URL/host
+// tokens and returns the lowercased hostnames found. Tokens with no
+// host are dropped. Used by shouldBlockForOutOfScope.
+func extractHostsFromArgs(toolArgs map[string]string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, raw := range toolArgs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		for _, tok := range scopeHostTokenSplit(raw) {
+			h := extractHostFromTokenForScope(tok)
+			if h == "" || seen[h] {
+				continue
+			}
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// scopeHostTokenSplit splits a free-form string into tokens that are
+// candidates for host extraction. Splits on whitespace and common
+// shell metacharacters so URLs inside curl/python invocations are
+// still found.
+func scopeHostTokenSplit(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		switch r {
+		case ' ', '\t', '\n', '\r',
+			'"', '\'', '`',
+			'(', ')', '{', '}', '[', ']',
+			',', ';', '|', '&', '<', '>':
+			return true
+		}
+		return false
+	})
+}
+
+// extractHostFromTokenForScope pulls a hostname out of a token, or
+// returns "" if the token is not host-shaped. Accepts:
+//
+//   - http(s)://host[:port]/path
+//   - host:port
+//   - bare host (must contain a dot or be a literal IP)
+//   - [ipv6]
+func extractHostFromTokenForScope(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	// Strip trailing punctuation, but NOT brackets — `[ipv6]:port`
+	// needs them preserved for net.SplitHostPort to recognize the
+	// shape.
+	token = strings.Trim(token, ".,;:?!(){}\"'`<>")
+
+	if strings.Contains(token, "://") {
+		if u, err := url.Parse(token); err == nil && u.Hostname() != "" {
+			return strings.ToLower(u.Hostname())
+		}
+	}
+
+	if h, _, err := net.SplitHostPort(token); err == nil && h != "" {
+		// SplitHostPort keeps brackets around the host for [ipv6]:port,
+		// so peel them and accept the inner IP literal.
+		h = strings.TrimPrefix(h, "[")
+		h = strings.TrimSuffix(h, "]")
+		return strings.ToLower(h)
+	}
+
+	if ip := net.ParseIP(token); ip != nil {
+		return strings.ToLower(token)
+	}
+	if strings.HasPrefix(token, "[") && strings.HasSuffix(token, "]") {
+		inner := token[1 : len(token)-1]
+		if net.ParseIP(inner) != nil {
+			return strings.ToLower(inner)
+		}
+	}
+	if strings.Contains(token, ".") && !strings.ContainsAny(token, " /\\") {
+		if strings.HasPrefix(token, "./") || strings.HasPrefix(token, "../") || strings.HasPrefix(token, "/") {
+			return ""
+		}
+		if isVersionLike(token) {
+			return ""
+		}
+		// Filter file-name shaped tokens (notes.json, scan.txt,
+		// recon.csv) so local artifact analysis isn't blocked.
+		if looksLikeFilename(token) {
+			return ""
+		}
+		return strings.ToLower(token)
+	}
+	return ""
+}
+
+// looksLikeFilename returns true when token has the shape <name>.<ext>
+// with a recognized extension. Used by extractHostFromTokenForScope to
+// avoid treating filenames as hostnames. The extension list is short
+// — TLDs that overlap with extensions (e.g. ".sh" for Saint Helena)
+// are uncommon and real URLs usually have at least one label before
+// the TLD anyway.
+func looksLikeFilename(token string) bool {
+	idx := strings.LastIndex(token, ".")
+	if idx <= 0 || idx == len(token)-1 {
+		return false
+	}
+	ext := strings.ToLower(token[idx+1:])
+	switch ext {
+	case "txt", "json", "csv", "log", "yaml", "yml", "xml", "html", "htm",
+		"md", "sh", "py", "js", "ts", "tsx", "jsx", "go", "rs", "rb",
+		"php", "java", "cpp", "tar", "gz", "zip", "tgz",
+		"pdf", "png", "jpg", "jpeg", "gif", "svg", "webp", "ico",
+		"sql", "db", "sqlite", "pem", "key", "crt", "pcap", "har":
+		return true
+	}
+	return false
+}
+
+// isVersionLike returns true for strings that are entirely digits +
+// dots ("1.2.3", "10.0", "v1.0.0"). Used by
+// extractHostFromTokenForScope to skip CLI version arguments.
+func isVersionLike(s string) bool {
+	s = strings.TrimPrefix(s, "v")
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !(r == '.' || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return strings.Contains(s, ".")
+}
+
+// hostInScope returns true when host equals (or is a subdomain of)
+// any entry in scopeHosts. Both sides are compared lowercased;
+// trailing dots are stripped.
+func hostInScope(host string, scopeHosts []string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if host == "" {
+		return true
+	}
+	for _, s := range scopeHosts {
+		s = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s), "."))
+		if s == "" {
+			continue
+		}
+		if host == s {
+			return true
+		}
+		if strings.HasSuffix(host, "."+s) {
+			return true
+		}
+	}
+	return false
+}
+
 func passivePolicyBlockReason(passiveScan bool) string {
 	if passiveScan {
 		return "Passive scanning is enabled, so direct target access and active probes are blocked. Use web_search, public passive datasets, existing notes, or already collected artifacts instead."
@@ -1149,6 +1397,22 @@ func (a *Agent) Run(targets []string, instruction string) {
 
 			if blocked, reason := a.shouldBlockForPhaseRestriction(tc.Name, tc.Args); blocked {
 				blockMsg := "⛔ PHASE RESTRICTION BLOCKED TOOL — " + reason
+				a.emit(Event{Type: "tool_call", ToolName: tc.Name, ToolArgs: tc.Args})
+				a.emit(Event{Type: "tool_result", ToolName: tc.Name, ToolResult: tools.Result{Output: blockMsg}, TotalTokens: tokenCount()})
+				a.msgMu.Lock()
+				a.messages = append(a.messages, llm.Message{Role: "user", Content: blockMsg})
+				a.msgMu.Unlock()
+				continue
+			}
+
+			// ── In-scope guard ──
+			// Runs UNCONDITIONALLY (active and passive). Probes and
+			// finding reports for hosts not derived from the configured
+			// scan target are rejected — prevents the agent from
+			// pivoting to third-party hosts discovered via DNS, port
+			// scans, related infrastructure, etc.
+			if blocked, reason := a.shouldBlockForOutOfScope(tc.Name, tc.Args); blocked {
+				blockMsg := "⛔ OUT-OF-SCOPE TARGET BLOCKED — " + reason
 				a.emit(Event{Type: "tool_call", ToolName: tc.Name, ToolArgs: tc.Args})
 				a.emit(Event{Type: "tool_result", ToolName: tc.Name, ToolResult: tools.Result{Output: blockMsg}, TotalTokens: tokenCount()})
 				a.msgMu.Lock()
@@ -1786,6 +2050,17 @@ func (a *Agent) buildSystemPrompt(targets []string, instruction string, ratePoli
 	}
 
 	return fmt.Sprintf(`You are an elite autonomous AI penetration tester and bug bounty hunter with the mindset of a top-10 HackerOne researcher. You don't just run tools — you THINK like an attacker. You analyze application logic, understand business flows, find edge cases that automated scanners miss, and chain low-severity findings into critical exploits.
+
+## TARGET SCOPE — HARD RULE
+
+You may ONLY probe and report on the configured target host(s) and their subdomains. The runtime enforces this: any tool call that names an out-of-scope host (a third-party Grafana you discovered, an unrelated SaaS the target integrates with, an IP found via portscan that isn't a target subdomain, the local Xalgorix dashboard itself, etc.) is REJECTED with an OUT-OF-SCOPE error.
+
+When you stumble onto a related-but-not-authorized host while doing recon:
+
+- DO NOT fire payloads at it.
+- DO NOT call report_vulnerability against it — the report will be refused.
+- DO note its existence ("found <host> on the target's infrastructure") via add_note for the operator's review.
+- THEN continue working on the configured target.
 
 ## YOUR HACKER MINDSET
 

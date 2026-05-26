@@ -2,7 +2,7 @@
 
 BINARY=xalgorix
 BUILD_DIR=./build
-VERSION=4.4.17
+VERSION=4.4.18
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION)"
 
 webui/node_modules: webui/package.json
