@@ -21,6 +21,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/llm"
 	"github.com/xalgord/xalgorix/v4/internal/safe"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
+	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 	"github.com/xalgord/xalgorix/v4/internal/tools/agentmail"
 	"github.com/xalgord/xalgorix/v4/internal/tools/agentsgraph"
@@ -108,19 +109,87 @@ type Agent struct {
 	passiveReconSourceKeys     map[string]bool
 	hooks                      *HookRegistry // extensible lifecycle hooks
 	state                      *ScanState    // shared mutable scan state for hooks
+	localGuard                 scopeguard.Config // operator's listener identity, consulted by shouldBlockForOutOfScope to detect Local_Or_Listener_Host references in Gated_Tool args
+}
+
+// AgentOption configures optional behavior on a *Agent. The
+// pattern lets callers (chiefly the per-scan code path in
+// internal/web/server.go's runScanInstance) inject a pre-built
+// llm.Client carrying a per-scan endpoint resolver, without
+// reshuffling NewAgent's required-parameter signature.
+//
+// Validates: B1 (per-scan provider_profile resolver wiring).
+type AgentOption func(*Agent)
+
+// WithLLMClient swaps the default llm.NewClient(cfg) construction
+// for a caller-supplied client. The web layer uses this to inject
+// a client wrapped with llm.WithResolver(NewFixedResolver(ep)) so
+// the operator's resolved provider_profile actually steers the
+// scan's outbound traffic. nil resets to default behavior.
+//
+// Validates: B1 (per-scan provider_profile resolver wiring).
+func WithLLMClient(c *llm.Client) AgentOption {
+	return func(a *Agent) {
+		if c != nil {
+			a.client = c
+		}
+	}
 }
 
 // NewAgent creates a new agent.
 // If sc is nil, a default ScanContext is used (CLI mode backward compatibility).
-func NewAgent(cfg *config.Config, name string, events chan Event, sc ...*scanctx.ScanContext) *Agent {
+//
+// localGuard carries the operator's listener identity (bind address +
+// listener port) and is consulted by shouldBlockForOutOfScope to
+// classify a Gated_Tool argument's host portion as a
+// Local_Or_Listener_Host. Pass scopeguard.Config{BindAddr: "127.0.0.1",
+// Port: 0} for callers that don't have a real listener (CLI / tests);
+// the listener-port rule only fires when the test feeds a matching
+// bind:port, so the default is safe.
+//
+// scOrOpts is a polymorphic tail used to keep the existing call
+// sites compiling unchanged. Callers may pass:
+//   - nothing (CLI default ScanContext, no options),
+//   - a single *scanctx.ScanContext (existing web-server call site),
+//   - one or more AgentOption (new B1 path), or
+//   - a *scanctx.ScanContext followed by one or more AgentOption.
+// Mixing both flavors keeps every old call site working while
+// letting the per-scan resolver injection skip building a separate
+// constructor.
+func NewAgent(cfg *config.Config, name string, events chan Event, localGuard scopeguard.Config, scOrOpts ...any) *Agent {
 	// Fix Python httpx interfering with ProjectDiscovery httpx
 	fixHttpxConflict()
 
-	// Resolve ScanContext — use provided or fall back to default
+	// Resolve ScanContext — use provided or fall back to default.
+	// Also collect any AgentOption values from the polymorphic
+	// tail so callers can mix the legacy ScanContext-only call
+	// shape with the new B1 option-bearing call shape without
+	// either side knowing about the other.
 	var sctx *scanctx.ScanContext
-	if len(sc) > 0 && sc[0] != nil {
-		sctx = sc[0]
-	} else {
+	var opts []AgentOption
+	for _, v := range scOrOpts {
+		switch t := v.(type) {
+		case *scanctx.ScanContext:
+			if t != nil {
+				sctx = t
+			}
+		case AgentOption:
+			if t != nil {
+				opts = append(opts, t)
+			}
+		case nil:
+			// tolerate explicit nils so callers passing a
+			// (*scanctx.ScanContext)(nil) don't surprise
+			// themselves
+		default:
+			// Unknown type — log once and skip rather than
+			// panic. This branch is unreachable under
+			// vet-clean callers, but keeps the function
+			// robust against future drift.
+			log.Printf("[agent] NewAgent: ignoring unsupported scOrOpts argument %T", v)
+		}
+	}
+	if sctx == nil {
 		sctx = scanctx.Default()
 	}
 
@@ -158,6 +227,15 @@ func NewAgent(cfg *config.Config, name string, events chan Event, sc ...*scanctx
 		lastActivity: time.Now(),
 		hooks:        hookReg,
 		state:        NewScanState(),
+		localGuard:   localGuard,
+	}
+
+	// Apply per-call AgentOption values (e.g. WithLLMClient). Options
+	// run after the default client is constructed so a nil option
+	// leaves the default in place; WithLLMClient overwrites it with
+	// a caller-supplied client carrying a per-scan resolver.
+	for _, opt := range opts {
+		opt(a)
 	}
 
 	// Create cancellable context
@@ -167,7 +245,12 @@ func NewAgent(cfg *config.Config, name string, events chan Event, sc ...*scanctx
 
 	agentsgraph.Register(reg, func(subName string, targets []string, task string) (string, error) {
 		subEvents := make(chan Event, 256)
-		subAgent := NewAgent(cfg, subName, subEvents, sctx)
+		// Sub-agents inherit the parent's localGuard rather than re-deriving
+		// it. The listener identity is a per-process invariant — every
+		// agent in the graph consults the same bind:port — so propagating
+		// the parent's Config keeps the Local_Or_Listener_Host rule
+		// uniform across the agent tree (Requirement 3.4).
+		subAgent := NewAgent(cfg, subName, subEvents, a.localGuard, sctx)
 		subAgent.SetPhaseRestrictions(a.allowedPhases)
 		subAgent.SetActivityPolicy(a.reconMode, a.scanIntensity, a.activityHosts)
 		if a.discoveryMode {
@@ -781,40 +864,37 @@ func (a *Agent) shouldBlockForActivityPolicy(toolName string, toolArgs map[strin
 	return false, ""
 }
 
-// shouldBlockForOutOfScope rejects probe-style tool calls and
-// report_vulnerability invocations whose target host is NOT derived
-// from the configured scan target. Runs unconditionally — even in
-// active mode — so the agent cannot pivot to a third-party host it
-// discovered through DNS, nmap, related-infrastructure heuristics,
-// etc.
+// shouldBlockForOutOfScope rejects Gated_Tool calls whose arguments
+// reference the operator's own machine or local network — loopback,
+// RFC1918, link-local, ULA, unspecified, hostnames that resolve to
+// any of those, or the dashboard's own bind:port listener. Runs
+// unconditionally — even in active mode — so the agent cannot pivot
+// into the operator's box from a Gated_Tool.
 //
-// Hosts considered in-scope:
-//
-//   - any host in a.activityHosts (which includes the configured
-//     targets, their www. variants, and registrable parents).
-//   - subdomains of any activityHosts entry.
-//
-// Tools subject to this gate:
+// Tools subject to this gate (Gated_Tools):
 //
 //   - terminal_execute, python_action, browser_action, page_agent,
 //     pageagent — anything that can hit a network target.
-//   - report_vulnerability — files findings against the wrong host.
+//   - report_vulnerability — files findings; the explicit
+//     target/endpoint arguments are checked too.
 //
 // All other tools (notes, finish, web_search, agentmail, list_skills,
-// read_skill, etc.) are exempt because they don't probe targets.
+// read_skill, etc.) bypass this gate entirely — they are exempt
+// because they don't probe targets.
+//
+// Activity_Hosts (a.activityHosts) is intentionally NOT consulted
+// here. Engagement-scope policing is no longer the agent guard's
+// job; this function only protects the operator's machine and
+// listener (per design.md → "Open Question: Requirement 3.7"). The
+// Local_Or_Listener_Host check fires regardless of whether scope is
+// populated.
 //
 // Returns (false, "") when:
 //
-//   - activityHosts is empty (no scope configured — disable the gate
-//     rather than block everything),
 //   - the tool is not in the gated list,
-//   - the args don't reference any host (e.g. local artifact analysis),
-//   - the only hosts referenced are in-scope.
+//   - the args don't reference any host-shaped token,
+//   - none of the referenced hosts are Local_Or_Listener_Hosts.
 func (a *Agent) shouldBlockForOutOfScope(toolName string, toolArgs map[string]string) (bool, string) {
-	if len(a.activityHosts) == 0 {
-		return false, ""
-	}
-
 	lowerTool := strings.ToLower(toolName)
 	switch lowerTool {
 	case "terminal_execute", "python_action", "browser_action", "page_agent", "pageagent",
@@ -824,43 +904,39 @@ func (a *Agent) shouldBlockForOutOfScope(toolName string, toolArgs map[string]st
 		return false, ""
 	}
 
-	// Pull every host-looking token from the args.
+	// Pull every host-looking token from the args. An empty result
+	// just means no host was named (e.g. hostless local-artifact
+	// commands like grep/awk/jq) — let those flow through.
 	hosts := extractHostsFromArgs(toolArgs)
-	if len(hosts) == 0 {
-		// No host token detected — let it through. Local artifact
-		// analysis (grep/awk/jq over recon files) shouldn't be
-		// blocked just because no host is named.
-		return false, ""
-	}
-
 	for _, h := range hosts {
-		if !hostInScope(h, a.activityHosts) {
+		if scopeguard.IsLocalOrListener(a.localGuard, h) {
 			return true, fmt.Sprintf(
-				"%q is not in scope. Configured target hosts: %s. Stay on the configured target — do NOT pivot to discovered third-party hosts, related infrastructure, or sibling services. If the agent thinks the host is part of the engagement, it must be added to the scan request, not probed implicitly.",
-				h, strings.Join(a.activityHosts, ", "),
+				"%q points at the operator's machine or local network. "+
+					"Refusing to probe localhost / RFC1918 / the dashboard's "+
+					"listener from a Gated_Tool.", h,
 			)
 		}
 	}
 
-	// Extra check for report_vulnerability: validate the explicit
-	// `target` and `endpoint` arguments too. The reported finding
-	// should clearly belong to a configured target host even if the
-	// agent didn't put a URL in the description body.
+	// Belt-and-braces leg for report_vulnerability: validate the
+	// explicit `target` and `endpoint` arguments directly against
+	// the Local_Or_Listener_Host classifier. The findings handler
+	// must not file a report against the operator's own machine
+	// even if extractHostsFromArgs missed the token shape.
+	// Activity_Hosts is NOT consulted here — engagement-scope
+	// policing is no longer this guard's job.
 	if lowerTool == "report_vulnerability" {
-		rawTarget := strings.ToLower(strings.TrimSpace(toolArgs["target"]))
-		rawEndpoint := strings.ToLower(strings.TrimSpace(toolArgs["endpoint"]))
+		rawTarget := strings.TrimSpace(toolArgs["target"])
+		rawEndpoint := strings.TrimSpace(toolArgs["endpoint"])
 		for _, raw := range []string{rawTarget, rawEndpoint} {
 			if raw == "" {
 				continue
 			}
-			h := extractHostFromTokenForScope(raw)
-			if h == "" {
-				continue
-			}
-			if !hostInScope(h, a.activityHosts) {
+			if scopeguard.IsLocalOrListener(a.localGuard, raw) {
 				return true, fmt.Sprintf(
-					"report_vulnerability target %q is out of scope. Configured target hosts: %s. Refusing to file a finding against a host the operator did not authorize. Re-target the report to one of the configured hosts, or drop the finding.",
-					h, strings.Join(a.activityHosts, ", "),
+					"report_vulnerability target/endpoint %q points at the operator's machine or local network. "+
+						"Refusing to probe localhost / RFC1918 / the dashboard's "+
+						"listener from a Gated_Tool.", raw,
 				)
 			}
 		}
@@ -880,7 +956,9 @@ func extractHostsFromArgs(toolArgs map[string]string) []string {
 		if raw == "" {
 			continue
 		}
-		raw = truncateForScopeScan(raw)
+		// LLM tool arguments are already capped at 32 KB upstream
+		// before reaching this guard, so no per-value truncation is
+		// performed here. The tokenizer runs over the raw value.
 		for _, span := range extractEmbeddedURLs(raw) {
 			h := extractHostFromTokenForScope(span)
 			if h == "" || seen[h] {
@@ -905,8 +983,7 @@ func extractHostsFromArgs(toolArgs map[string]string) []string {
 // candidates for host extraction. Splits on whitespace and common
 // shell metacharacters so URLs inside curl/python invocations are
 // still found. The separator set is owned by scopeTokenSeparator so
-// extractEmbeddedURLs and redactOutOfScopeHosts agree on token
-// edges.
+// extractEmbeddedURLs and the tokenizer pass agree on token edges.
 func scopeHostTokenSplit(s string) []string {
 	return strings.FieldsFunc(s, scopeTokenSeparator)
 }
@@ -1007,52 +1084,6 @@ func isVersionLike(s string) bool {
 	return strings.Contains(s, ".")
 }
 
-// hostInScope returns true when host equals (or is a subdomain of)
-// any entry in scopeHosts. Both sides are compared lowercased;
-// trailing dots are stripped.
-func hostInScope(host string, scopeHosts []string) bool {
-	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
-	if host == "" {
-		return true
-	}
-	for _, s := range scopeHosts {
-		s = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s), "."))
-		if s == "" {
-			continue
-		}
-		if host == s {
-			return true
-		}
-		if strings.HasSuffix(host, "."+s) {
-			return true
-		}
-	}
-	return false
-}
-
-// argScanLimitBytes caps how many bytes of any single tool-argument
-// value the Agent_Scope_Guard will tokenize when extracting OOS host
-// references. Values larger than this cap are tokenized only over
-// their first argScanLimitBytes bytes; the cap silently bounds CPU
-// and never short-circuits to a reject.
-const argScanLimitBytes = 8192
-
-// truncateForScopeScan returns v truncated to at most
-// argScanLimitBytes bytes, trimmed back to the largest UTF-8 rune
-// boundary at or below the cap so downstream tokenizers never see a
-// partial rune. Values whose byte length is already at or below the
-// cap are returned unchanged.
-func truncateForScopeScan(v string) string {
-	if len(v) <= argScanLimitBytes {
-		return v
-	}
-	end := argScanLimitBytes
-	for end > 0 && !utf8.RuneStart(v[end]) {
-		end--
-	}
-	return v[:end]
-}
-
 // extractEmbeddedURLs scans s for case-insensitive "http://" and
 // "https://" substrings and returns each contiguous URL span. Each
 // span starts at a scheme-prefix occurrence and ends at the first
@@ -1101,8 +1132,8 @@ func extractEmbeddedURLs(s string) []string {
 
 // scopeTokenSeparator reports whether r is one of the runes
 // scopeHostTokenSplit treats as a token boundary. Kept in lockstep
-// with that function's switch so the URL sweep, the separator-pass
-// tokenizer, and the redaction tokenizer agree on token edges.
+// with that function's switch so the URL sweep and the separator-pass
+// tokenizer agree on token edges.
 func scopeTokenSeparator(r rune) bool {
 	switch r {
 	case ' ', '\t', '\n', '\r',
@@ -1113,124 +1144,6 @@ func scopeTokenSeparator(r rune) bool {
 		return true
 	}
 	return false
-}
-
-// redactOutOfScopeHosts returns s rewritten with every out-of-scope
-// host span replaced by the literal marker
-// "[redacted: out-of-scope host]", along with the number of
-// substitutions performed. Tokenization mirrors extractHostsFromArgs:
-// the value is first capped at argScanLimitBytes via
-// truncateForScopeScan, embedded http(s):// spans are swept first,
-// and the remainder is split through the same separator set as
-// scopeHostTokenSplit. Each candidate span is classified through
-// extractHostFromTokenForScope and a.activityHosts via hostInScope;
-// only OOS spans are redacted. Bytes beyond the cap (the unredacted
-// tail) are appended to the result unchanged, per Requirement 4.7,
-// so the caller never silently loses data. When a.activityHosts is
-// empty or s is empty, s is returned unchanged with a zero count.
-func (a *Agent) redactOutOfScopeHosts(s string) (string, int) {
-	if s == "" || len(a.activityHosts) == 0 {
-		return s, 0
-	}
-	const marker = "[redacted: out-of-scope host]"
-
-	head := truncateForScopeScan(s)
-	tail := s[len(head):]
-	if head == "" {
-		return s, 0
-	}
-
-	// mask[i]=true marks byte i of head as part of an OOS span.
-	mask := make([]bool, len(head))
-	markIfOOS := func(start, end int) {
-		if start < 0 || end > len(head) || start >= end {
-			return
-		}
-		h := extractHostFromTokenForScope(head[start:end])
-		if h == "" {
-			return
-		}
-		if hostInScope(h, a.activityHosts) {
-			return
-		}
-		for i := start; i < end; i++ {
-			mask[i] = true
-		}
-	}
-
-	n := len(head)
-
-	// URL sweep: find every http(s):// span with positions, mirror
-	// of extractEmbeddedURLs.
-	for i := 0; i < n; {
-		prefixLen := 0
-		switch {
-		case i+7 <= n && strings.EqualFold(head[i:i+7], "http://"):
-			prefixLen = 7
-		case i+8 <= n && strings.EqualFold(head[i:i+8], "https://"):
-			prefixLen = 8
-		}
-		if prefixLen == 0 {
-			i++
-			continue
-		}
-		end := i + prefixLen
-		for end < n {
-			r, size := utf8.DecodeRuneInString(head[end:])
-			if size == 0 {
-				size = 1
-			}
-			if scopeTokenSeparator(r) {
-				break
-			}
-			end += size
-		}
-		markIfOOS(i, end)
-		i = end
-	}
-
-	// Separator-pass tokenizer: same boundary set as
-	// scopeHostTokenSplit, but tracked with positions so OOS tokens
-	// can be redacted in place.
-	start := -1
-	for i := 0; i < n; {
-		r, size := utf8.DecodeRuneInString(head[i:])
-		if size == 0 {
-			size = 1
-		}
-		if scopeTokenSeparator(r) {
-			if start >= 0 {
-				markIfOOS(start, i)
-				start = -1
-			}
-		} else if start < 0 {
-			start = i
-		}
-		i += size
-	}
-	if start >= 0 {
-		markIfOOS(start, n)
-	}
-
-	// Emit head with each contiguous masked region collapsed to a
-	// single marker, then append the unredacted tail unchanged.
-	var b strings.Builder
-	b.Grow(len(head) + len(tail))
-	count := 0
-	for i := 0; i < n; {
-		if mask[i] {
-			b.WriteString(marker)
-			count++
-			for i < n && mask[i] {
-				i++
-			}
-			continue
-		}
-		b.WriteByte(head[i])
-		i++
-	}
-	b.WriteString(tail)
-	return b.String(), count
 }
 
 func passivePolicyBlockReason(passiveScan bool) string {
@@ -1609,23 +1522,6 @@ func (a *Agent) Run(targets []string, instruction string) {
 				a.messages = append(a.messages, llm.Message{Role: "user", Content: blockMsg})
 				a.msgMu.Unlock()
 				continue
-			}
-
-			// ── add_note redaction (pre-gate) ──
-			// add_note is not a gated tool, but its arguments persist
-			// into read_notes on later iterations. Scrub OOS host
-			// references in place so an LLM cannot launder an OOS
-			// hostname through the notes store. Empty activityHosts
-			// short-circuits the path (matches shouldBlockForOutOfScope).
-			if tc.Name == "add_note" && len(a.activityHosts) > 0 {
-				for _, k := range []string{"key", "value"} {
-					if v, ok := tc.Args[k]; ok {
-						if r, n := a.redactOutOfScopeHosts(v); n > 0 {
-							tc.Args[k] = r
-							log.Printf("[scope] redacted %d out-of-scope host(s) from add_note", n)
-						}
-					}
-				}
 			}
 
 			// ── In-scope guard ──

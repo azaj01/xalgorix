@@ -53,6 +53,13 @@ type Client struct {
 	// (or ctx is cancelled), so the limiter cannot drop requests
 	// (R3.5). nil when the configured RPS is non-positive.
 	rateLimiter *rate.Limiter
+	// resolver, when non-nil, is consulted by Wave D to obtain the
+	// outbound Endpoint instead of resolveEndpoint(). Task 1.3 only
+	// stores the resolver; doChat / ChatStream still go through the
+	// existing path until Wave D (task 4.2) swaps the dispatch.
+	//
+	// Validates: Requirement 11.2.
+	resolver Resolver
 }
 
 // TokenUsage holds cumulative token counts.
@@ -69,8 +76,11 @@ func (c *Client) GetTokens() (promptTokens, completionTokens, totalTokens int) {
 	return c.totalIn, c.totalOut, c.totalIn + c.totalOut
 }
 
-// NewClient creates a new LLM client.
-func NewClient(cfg *config.Config) *Client {
+// NewClient creates a new LLM client. Optional opts (such as
+// WithResolver) tune the client for catalog-aware resolution; the
+// no-option form preserves the existing legacy resolveEndpoint
+// behavior so existing callers compile unchanged.
+func NewClient(cfg *config.Config, opts ...Option) *Client {
 	apiModel := cfg.ResolveModel()
 	provider := ""
 	if idx := strings.Index(apiModel, "/"); idx >= 0 {
@@ -94,6 +104,11 @@ func NewClient(cfg *config.Config) *Client {
 			burst = 1
 		}
 		c.rateLimiter = rate.NewLimiter(rate.Limit(cfg.RateLimitRPS), burst)
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(c)
+		}
 	}
 	return c
 }
@@ -222,10 +237,134 @@ type anthropicResponse struct {
 	} `json:"usage,omitempty"`
 }
 
+// resolveRequestEndpoint returns the Endpoint to use for one
+// outbound chat / stream request. When c.resolver is wired
+// (Wave D / task 4.1) we delegate to it so the catalog +
+// profile stack drives URL, model, headerStyle, and
+// credentials. Otherwise we synthesize an Endpoint from the
+// existing resolveEndpoint() + cfg path so callers that haven't
+// adopted the resolver yet still produce byte-identical
+// outbound requests.
+//
+// Validates: Requirements 2.2, 2.3, 11.2.
+func (c *Client) resolveRequestEndpoint(ctx context.Context) (Endpoint, error) {
+	if c.resolver != nil {
+		return c.resolver.Resolve(ctx)
+	}
+	url, model := c.resolveEndpoint()
+	hs := "openai"
+	switch {
+	case c.usesGeminiAPI(url):
+		hs = "gemini"
+	case c.usesAnthropicAPI(url):
+		hs = "anthropic"
+	}
+	return Endpoint{
+		URL:         url,
+		Model:       model,
+		HeaderStyle: hs,
+		Auth:        AuthAPIKey,
+		APIKey:      c.cfg.APIKey,
+	}, nil
+}
+
+// unknownHeaderStyleOnce guards a single log line per process so a
+// catalog file edited out-of-band with a corrupt headerStyle
+// produces exactly one breadcrumb instead of spamming the log on
+// every outbound request. M10.
+var unknownHeaderStyleOnce sync.Once
+
+// applyAuthHeaders writes the outbound auth headers for the
+// resolved endpoint. The matrix is HeaderStyle × AuthMethod:
+//
+//   - anthropic: x-api-key (api_key) | Authorization: Bearer
+//     (oauth_bearer); always emit anthropic-version: 2023-06-01.
+//   - gemini:    x-goog-api-key (api_key) | Authorization:
+//     Bearer (oauth_bearer).
+//   - openai:    Authorization: Bearer for both auth modes
+//     (the access token replaces the api key).
+//
+// Empty credentials skip the header entirely so downstream
+// transports don't see "Authorization: Bearer ".
+//
+// Validates: Requirements 2.2, 2.3, 11.2.
+func applyAuthHeaders(req *http.Request, ep Endpoint) {
+	switch ep.HeaderStyle {
+	case "anthropic":
+		req.Header.Set("anthropic-version", "2023-06-01")
+		switch ep.Auth {
+		case AuthAPIKey:
+			if ep.APIKey != "" {
+				req.Header.Set("x-api-key", ep.APIKey)
+			}
+		case AuthOAuthBearer:
+			if ep.AccessToken != "" {
+				req.Header.Set("Authorization", "Bearer "+ep.AccessToken)
+			}
+		}
+	case "gemini":
+		switch ep.Auth {
+		case AuthAPIKey:
+			if ep.APIKey != "" {
+				req.Header.Set("x-goog-api-key", ep.APIKey)
+			}
+		case AuthOAuthBearer:
+			if ep.AccessToken != "" {
+				req.Header.Set("Authorization", "Bearer "+ep.AccessToken)
+			}
+		}
+	case "openai", "":
+		// "openai" or unspecified — apply the OpenAI-compatible
+		// Bearer header for both auth modes.
+		switch ep.Auth {
+		case AuthAPIKey:
+			if ep.APIKey != "" {
+				req.Header.Set("Authorization", "Bearer "+ep.APIKey)
+			}
+		case AuthOAuthBearer:
+			if ep.AccessToken != "" {
+				req.Header.Set("Authorization", "Bearer "+ep.AccessToken)
+			}
+		}
+	default:
+		// Unknown HeaderStyle — validateEntry rejects this on
+		// catalog write, so reaching this branch means the
+		// providers.json file was edited out-of-band. Log
+		// exactly once via sync.Once so a triage reader sees
+		// the breadcrumb without the log being spammed on
+		// every outbound request, then fall through to the
+		// OpenAI-compatible Bearer header so the request still
+		// has a chance of succeeding (a catalog entry pointing
+		// at an OpenAI-compatible base URL with a corrupt
+		// headerStyle is the most common shape of this bug).
+		// M10.
+		unknownHeaderStyleOnce.Do(func() {
+			log.Printf("[llm] applyAuthHeaders: unknown HeaderStyle %q (catalog corruption?); falling back to openai-style Bearer auth", ep.HeaderStyle)
+		})
+		switch ep.Auth {
+		case AuthAPIKey:
+			if ep.APIKey != "" {
+				req.Header.Set("Authorization", "Bearer "+ep.APIKey)
+			}
+		case AuthOAuthBearer:
+			if ep.AccessToken != "" {
+				req.Header.Set("Authorization", "Bearer "+ep.AccessToken)
+			}
+		}
+	}
+	if ep.VendorOverride != nil {
+		ep.VendorOverride(req)
+	}
+}
+
 // resolveEndpoint returns the full chat completions URL and clean model name.
 // Handles provider prefixes like "minimax/", "openai/", "anthropic/", etc.
 // Auto-appends /v1/chat/completions if the base doesn't already contain /v1.
 // Also supports custom providers - just set XALGORIX_API_BASE to your endpoint.
+//
+// This is the legacy single-call resolver kept on the Client so
+// the no-resolver fallback path in resolveRequestEndpoint can
+// reuse it (Requirement 2.3 — preserved endpoint shape).
 func (c *Client) resolveEndpoint() (string, string) {
 	apiBase := c.cfg.APIBase
 	model := c.apiModel
@@ -464,9 +603,14 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 		}
 		defer release()
 
-		endpoint, model := c.resolveEndpoint()
-		isGoogle := c.usesGeminiAPI(endpoint)
-		isAnthropic := c.usesAnthropicAPI(endpoint)
+		ep, err := c.resolveRequestEndpoint(streamCtx)
+		if err != nil {
+			ch <- StreamChunk{Err: err}
+			return
+		}
+		endpoint, model := ep.URL, ep.Model
+		isGoogle := ep.HeaderStyle == "gemini"
+		isAnthropic := ep.HeaderStyle == "anthropic"
 
 		var body []byte
 		if isGoogle {
@@ -525,16 +669,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 		}
 
 		req.Header.Set("Content-Type", "application/json")
-		if isGoogle {
-			if c.cfg.APIKey != "" {
-				req.Header.Set("x-goog-api-key", c.cfg.APIKey)
-			}
-		} else if isAnthropic && c.cfg.APIKey != "" {
-			req.Header.Set("x-api-key", c.cfg.APIKey)
-			req.Header.Set("anthropic-version", "2023-06-01")
-		} else if c.cfg.APIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
-		}
+		applyAuthHeaders(req, ep)
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -685,11 +820,15 @@ func (c *Client) doChat(messages []Message) (out string, err error) {
 	}
 	defer release()
 
-	endpoint, model := c.resolveEndpoint()
+	ep, err := c.resolveRequestEndpoint(reqCtx)
+	if err != nil {
+		return "", err
+	}
+	endpoint, model := ep.URL, ep.Model
 	log.Printf("[llm] Request → URL=%s model=%s apiModel=%s cfgLLM=%s cfgAPIBase=%s", endpoint, model, c.apiModel, c.cfg.LLM, c.cfg.APIBase)
 
-	isGoogle := c.usesGeminiAPI(endpoint)
-	isAnthropic := c.usesAnthropicAPI(endpoint)
+	isGoogle := ep.HeaderStyle == "gemini"
+	isAnthropic := ep.HeaderStyle == "anthropic"
 
 	var body []byte
 	if isGoogle {
@@ -753,16 +892,7 @@ func (c *Client) doChat(messages []Message) (out string, err error) {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if isGoogle {
-		if c.cfg.APIKey != "" {
-			req.Header.Set("x-goog-api-key", c.cfg.APIKey)
-		}
-	} else if isAnthropic && c.cfg.APIKey != "" {
-		req.Header.Set("x-api-key", c.cfg.APIKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
-	} else if c.cfg.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
-	}
+	applyAuthHeaders(req, ep)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

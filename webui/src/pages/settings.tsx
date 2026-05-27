@@ -36,9 +36,11 @@ import {
 } from "@/api/queries";
 import { useAuth } from "@/store/auth";
 import type { EnvironmentSettings, EnvironmentVariableSetting, LLMSettings } from "@/types/api";
+import ProvidersTab from "./settings/providers-tab";
 
 const settingsTabs = [
   "llm",
+  "providers",
   "engagement",
   "notifications",
   "email",
@@ -193,6 +195,7 @@ export default function SettingsPage() {
       <Tabs value={activeTab} onValueChange={changeTab}>
         <TabsList className="flex h-auto flex-wrap">
           <TabsTrigger value="llm">LLM</TabsTrigger>
+          <TabsTrigger value="providers">Providers</TabsTrigger>
           <TabsTrigger value="engagement">Engagement</TabsTrigger>
           <TabsTrigger value="notifications">Notifications</TabsTrigger>
           <TabsTrigger value="email">AgentMail</TabsTrigger>
@@ -365,6 +368,10 @@ export default function SettingsPage() {
               </CardContent>
             </Card>
           )}
+        </TabsContent>
+
+        <TabsContent value="providers">
+          <ProvidersTab />
         </TabsContent>
 
         <TabsContent value="engagement">

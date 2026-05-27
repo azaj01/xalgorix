@@ -27,7 +27,7 @@ import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { PHASES } from "@/components/phase-progress";
 import { api } from "@/api/client";
-import { useStartScan } from "@/api/queries";
+import { useAuthProfiles, useProviders, useStartScan } from "@/api/queries";
 import { cn } from "@/lib/utils";
 
 const SCAN_MODES = [
@@ -81,6 +81,11 @@ export default function NewScanPage() {
   const [selectedPhases, setSelectedPhases] = useState<number[]>([]);
   const [severityFilter, setSeverityFilter] = useState<string[]>([]);
   const [model, setModel] = useState("");
+  // Optional "<provider>:<profileId>" key naming a stored AuthProfile
+  // (provider-catalog-and-oauth, R11.1, R14.4). Empty string ("default"
+  // option) means "let the server pick" — don't send provider_profile
+  // and the legacy / catalog-default path resolves the credentials.
+  const [providerProfile, setProviderProfile] = useState("");
   const [companyName, setCompanyName] = useState("");
   const [logoPath, setLogoPath] = useState("");
   const [logoFileName, setLogoFileName] = useState("");
@@ -95,6 +100,27 @@ export default function NewScanPage() {
         .filter(Boolean),
     [targetsText],
   );
+
+  // Profile picker source. Profiles drive the picker; the catalog
+  // (separate query) supplies the human-readable displayName per
+  // entry. Both queries fail open: when neither has loaded yet (or
+  // the user has no profiles configured) the picker collapses to
+  // the single "Server default" option.
+  const profilesQuery = useAuthProfiles();
+  const catalogQuery = useProviders();
+  const profileOptions = useMemo(() => {
+    const profiles = profilesQuery.data ?? [];
+    const catalog = catalogQuery.data ?? [];
+    const byID = new Map(catalog.map((e) => [e.id, e]));
+    return profiles.map((p) => {
+      const entry = byID.get(p.provider);
+      const display = entry?.displayName ?? p.provider;
+      return {
+        value: `${p.provider}:${p.profileId}`,
+        label: `${display} · ${p.profileId}`,
+      };
+    });
+  }, [profilesQuery.data, catalogQuery.data]);
 
   function togglePhase(id: number) {
     setSelectedPhases((cur) =>
@@ -154,6 +180,7 @@ export default function NewScanPage() {
         scan_intensity: scanIntensity,
         severity_filter: severityFilter.length ? severityFilter : undefined,
         model: model.trim() || undefined,
+        provider_profile: providerProfile || undefined,
         company_name: companyName.trim() || undefined,
         logo_path: logoPath || undefined,
         save_only: saveOnly || undefined,
@@ -526,28 +553,29 @@ export default function NewScanPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label>Model override</Label>
+              <Label>Provider profile</Label>
               <Select
-                value={model || "default"}
-                onValueChange={(v) => setModel(v === "default" ? "" : v)}
+                value={providerProfile || "default"}
+                onValueChange={(v) =>
+                  setProviderProfile(v === "default" ? "" : v)
+                }
               >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="default">Server default</SelectItem>
-                  <SelectItem value="openai/gpt-5">openai/gpt-5</SelectItem>
-                  <SelectItem value="openai/gpt-5-mini">
-                    openai/gpt-5-mini
-                  </SelectItem>
-                  <SelectItem value="anthropic/claude-opus-4.6">
-                    anthropic/claude-opus-4.6
-                  </SelectItem>
-                  <SelectItem value="google/gemini-3-flash">
-                    google/gemini-3-flash
-                  </SelectItem>
+                  {profileOptions.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
+              <p className="text-[11px] text-muted-foreground">
+                Pick a stored credential profile to route this scan
+                through. Manage profiles under Settings → Providers.
+              </p>
             </div>
           </CardContent>
         </Card>

@@ -194,6 +194,121 @@ export interface ScanRequest {
   scan_intensity?: "active" | "passive";
   company_name?: string;
   logo_path?: string;
+  // Optional "<provider>:<profileId>" key naming the AuthProfile to
+  // use for this scan. When unset the legacy / catalog-default path
+  // applies. Mirrors the Go ScanRequest.ProviderProfile field on
+  // /api/scan and is honored only for authenticated operators
+  // (Requirement 11.1, 11.5).
+  provider_profile?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Provider catalog + auth profile contract types
+//
+// Mirror the JSON shapes returned by the catalog and profile HTTP
+// surface added in this feature. The on-the-wire field names are
+// pinned by the design — keep these types in sync with
+// internal/providers/types.go (CatalogEntry ↔ providers.Entry) and
+// internal/auth/profile.go (AuthProfile ↔ auth.Profile, masked at
+// the HTTP boundary by internal/web/masks.go).
+// ---------------------------------------------------------------------------
+
+// CatalogEntry mirrors providers.Entry. The runtime-editable LLM
+// provider catalog persisted at ~/.xalgorix/data/providers.json and
+// returned by GET /api/providers.
+export interface CatalogEntry {
+  id: string;
+  displayName: string;
+  baseURL: string;
+  models?: string[];
+  headerStyle: "openai" | "anthropic" | "gemini";
+  flow?: "" | "pkce" | "device_code" | "setup_token" | "claude_cli_reuse";
+  clientID?: string;
+  authorizationEndpoint?: string;
+  tokenEndpoint?: string;
+  deviceAuthorizationEndpoint?: string;
+  scopes?: string[];
+  audience?: string;
+}
+
+// AuthProfileType discriminates between the two stored credential
+// shapes returned by GET /api/auth/profiles.
+export type AuthProfileType = "api_key" | "oauth";
+
+// AuthProfile mirrors auth.Profile. Credential strings (apiKey,
+// accessToken, refreshToken) are MASKED on the wire — the server
+// returns "****" for empty/short values and "****<last8>" for longer
+// ones (see internal/web/masks.go, Requirements 5.1, 5.2). The
+// expiresAt and updatedAt fields are RFC3339 / ISO 8601 timestamps.
+export interface AuthProfile {
+  provider: string;
+  profileId: string;
+  type: AuthProfileType;
+  // API_Key fields. Masked credential string when type === "api_key".
+  apiKey?: string;
+  apiBaseOverride?: string;
+  // OAuth fields. Masked credential strings when type === "oauth".
+  accessToken?: string;
+  refreshToken?: string;
+  expiresAt?: string;
+  scopes?: string[];
+  tokenType?: string;
+  requiresReauth?: boolean;
+  updatedAt: string;
+}
+
+// OpenclawImportOutcome reports the per-entry result of
+// POST /api/providers/import-openclaw. action is "imported" when the
+// id was new and added to the local catalog, or "skipped" when the
+// id already existed locally (reason === "id_exists" today).
+export interface OpenclawImportOutcome {
+  id: string;
+  action: "imported" | "skipped";
+  reason?: string;
+}
+
+// OpenclawImportResponse is the success-envelope returned by
+// POST /api/providers/import-openclaw. Upstream errors instead
+// surface as HTTP 502 with the upstream {statusCode, body} payload.
+export interface OpenclawImportResponse {
+  outcomes: OpenclawImportOutcome[];
+}
+
+// OAuthStartMode discriminates the three shapes returned by
+// POST /api/auth/profiles/oauth/start. "loopback" includes authURL
+// for an ephemeral 127.0.0.1 callback; "device" includes userCode
+// and verificationURI for the device-code flow; "paste" returns
+// authURL plus a flowId the dashboard feeds back to
+// POST /api/auth/profiles/oauth/complete.
+export type OAuthStartMode = "loopback" | "device" | "paste";
+
+// OAuthStartSubmode disambiguates the three "paste" variants the
+// dashboard renders differently. "paste_code" is the PKCE OOB
+// fallback (textarea for the authorization code); "setup_token"
+// is the setup_token driver (textarea for the one-time
+// vendor-issued token). The empty / unspecified case is the
+// claude_cli_reuse confirm-and-import UI (no input field — the
+// credential file is already on disk and Complete reads it
+// directly). Mirrors the Submode field on auth.StartResult (H9).
+export type OAuthStartSubmode = "" | "paste_code" | "setup_token";
+
+// OAuthStartResponse mirrors the auth.StartResult JSON envelope.
+// Optional fields are populated per mode:
+//   loopback: authURL, expiresAt
+//   device:   userCode, verificationURI, expiresAt
+//   paste:    authURL, expiresAt, submode
+export interface OAuthStartResponse {
+  flowId: string;
+  mode: OAuthStartMode;
+  // submode is only populated for mode === "paste"; older servers
+  // omit it entirely. The dashboard treats undefined the same as
+  // "" (claude_cli_reuse confirm-and-import) to stay backward-
+  // compatible.
+  submode?: OAuthStartSubmode;
+  authURL?: string;
+  userCode?: string;
+  verificationURI?: string;
+  expiresAt?: string;
 }
 
 export interface QueueStatus {
@@ -289,6 +404,11 @@ export interface ScanSchedule {
   logo_path?: string;
   discord_webhook?: string;
   model?: string;
+  // Optional "<provider>:<profileId>" key naming the AuthProfile this
+  // schedule should run scans under (provider-catalog-and-oauth, R14.4).
+  // Mirrors ScanRequest.provider_profile; persisted on the schedule
+  // and re-applied on each trigger.
+  provider_profile?: string;
 }
 
 // Response shape of GET /api/findings/summary. Polled every 10s by the

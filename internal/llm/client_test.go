@@ -3,14 +3,21 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/xalgord/xalgorix/v4/internal/auth"
 	"github.com/xalgord/xalgorix/v4/internal/config"
+	"github.com/xalgord/xalgorix/v4/internal/providers"
 )
 
 // newTestClient returns a Client wired to a minimal Config — enough for the
@@ -500,5 +507,439 @@ func jsonResponse(status int, body string) *http.Response {
 		StatusCode: status,
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+
+// ---------------------------------------------------------------------------
+// Wave H — task 9.7 — composite Resolver decision matrix + header switch.
+//
+// These tests cover Property 5 (legacy/catalog/error branch decision,
+// Requirements 2.1–2.4) and the (HeaderStyle, AuthMethod) header
+// switch matrix in applyAuthHeaders (Requirements 2.2, 2.3, 11.2).
+// Each randomized property test runs ≥ 100 iterations against a real
+// *providers.Service and *auth.Store rooted at t.TempDir() for full
+// filesystem isolation — no stubs for the catalog or profile stores
+// so the legacy/catalog routing decision is exercised end-to-end the
+// same way the production resolver consumes them.
+// ---------------------------------------------------------------------------
+
+// legacyExpectedURL returns the URL the legacy resolver should
+// produce for a given legacy slug + bare model name. Mirrors the
+// switch in legacyResolver.Resolve so the test asserts the resolver
+// produces byte-identical URLs to the pre-feature client.go path.
+func legacyExpectedURL(slug, model string) string {
+	switch slug {
+	case "openai":
+		return "https://api.openai.com/v1/chat/completions"
+	case "anthropic":
+		return "https://api.anthropic.com/v1/messages"
+	case "minimax":
+		return "https://api.minimax.io/v1/chat/completions"
+	case "deepseek":
+		return "https://api.deepseek.com/v1/chat/completions"
+	case "groq":
+		return "https://api.groq.com/openai/v1/chat/completions"
+	case "ollama":
+		return "http://localhost:11434/v1/chat/completions"
+	case "google", "gemini":
+		return "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent"
+	}
+	return ""
+}
+
+// legacyExpectedHeaderStyle returns the HeaderStyle the legacy
+// resolver should set for a given slug — kept here so the test can
+// assert the header style independently of the URL builder.
+func legacyExpectedHeaderStyle(slug string) string {
+	switch slug {
+	case "anthropic":
+		return "anthropic"
+	case "google", "gemini":
+		return "gemini"
+	default:
+		return "openai"
+	}
+}
+
+// resolverFixture wires a real *providers.Service + *auth.Store
+// rooted at the supplied tempDir. When seedEntry is non-zero the
+// catalog gets that entry plus a matching API_Key profile so the
+// catalog branch's defaultCatalogPick can resolve a (entry, profile)
+// pair on its first call.
+type resolverFixture struct {
+	cat     *providers.Service
+	prof    *auth.Store
+	catPath string
+}
+
+func newResolverFixture(t *testing.T, tempDir string, seedEntry providers.Entry, seedProfileAPIKey string) resolverFixture {
+	t.Helper()
+	dataDir := filepath.Join(tempDir, "data")
+	catPath := filepath.Join(dataDir, "providers.json")
+	profPath := filepath.Join(dataDir, "auth-profiles.json")
+
+	cat, err := providers.NewService(catPath)
+	if err != nil {
+		t.Fatalf("providers.NewService: %v", err)
+	}
+	if seedEntry.ID != "" {
+		if err := cat.Create(context.Background(), seedEntry); err != nil {
+			t.Fatalf("cat.Create(%+v): %v", seedEntry, err)
+		}
+	}
+	prof, err := auth.NewStore(profPath, cat)
+	if err != nil {
+		t.Fatalf("auth.NewStore: %v", err)
+	}
+	if seedEntry.ID != "" {
+		if err := prof.Put(context.Background(), auth.Profile{
+			Provider:  seedEntry.ID,
+			ProfileID: "default",
+			Type:      auth.APIKey,
+			APIKey:    seedProfileAPIKey,
+		}); err != nil {
+			t.Fatalf("prof.Put: %v", err)
+		}
+	}
+	return resolverFixture{cat: cat, prof: prof, catPath: catPath}
+}
+
+// TestResolver_LegacyFallbackDecision validates Property 5 for the
+// legacy branch: when the catalog reports zero entries AND
+// XALGORIX_LLM matches Legacy_Provider_Shape, Resolve must dispatch
+// through the legacy provider table and return a URL byte-identical
+// to the pre-feature Client.resolveEndpoint output.
+//
+// Iterates ≥ 100 times across all eight legacy slugs with randomized
+// model tails so the fingerprint of every legacy URL builder branch
+// (anthropic /v1/messages, gemini :generateContent, openai-compat
+// /v1/chat/completions) is exercised.
+//
+// Validates: Requirements 2.1, 2.3, 2.4.
+func TestResolver_LegacyFallbackDecision(t *testing.T) {
+	const iterations = 120
+	legacySlugs := []string{"openai", "anthropic", "minimax", "deepseek", "groq", "ollama", "google", "gemini"}
+
+	seed := time.Now().UnixNano()
+	t.Logf("legacy fallback seed: %d", seed)
+	rng := rand.New(rand.NewSource(seed))
+
+	for i := 0; i < iterations; i++ {
+		slug := legacySlugs[rng.Intn(len(legacySlugs))]
+		modelTail := fmt.Sprintf("legacy-model-%d", i)
+		cfg := &config.Config{
+			LLM:    slug + "/" + modelTail,
+			APIKey: fmt.Sprintf("legacy-key-%d", i),
+		}
+
+		// catalog stays empty: providers.NewService treats a
+		// missing file as an empty catalog without creating it
+		// (Requirement 1.3), so the legacy branch is the only
+		// reachable dispatch.
+		fx := newResolverFixture(t, t.TempDir(), providers.Entry{}, "")
+		r := NewCompositeResolver(
+			WithCatalog(fx.cat, fx.prof),
+			WithLegacy(cfg),
+		)
+
+		ep, err := r.Resolve(context.Background())
+		if err != nil {
+			t.Fatalf("iter %d slug=%s: Resolve: %v", i, slug, err)
+		}
+
+		wantURL := legacyExpectedURL(slug, modelTail)
+		if ep.URL != wantURL {
+			t.Errorf("iter %d slug=%s: URL = %q, want %q", i, slug, ep.URL, wantURL)
+		}
+		if got, want := ep.HeaderStyle, legacyExpectedHeaderStyle(slug); got != want {
+			t.Errorf("iter %d slug=%s: HeaderStyle = %q, want %q", i, slug, got, want)
+		}
+		if ep.Auth != AuthAPIKey {
+			t.Errorf("iter %d slug=%s: Auth = %q, want %q", i, slug, ep.Auth, AuthAPIKey)
+		}
+		if ep.APIKey != cfg.APIKey {
+			t.Errorf("iter %d slug=%s: APIKey = %q, want %q", i, slug, ep.APIKey, cfg.APIKey)
+		}
+		if ep.AccessToken != "" {
+			t.Errorf("iter %d slug=%s: AccessToken = %q, want empty", i, slug, ep.AccessToken)
+		}
+		if ep.Model != modelTail {
+			t.Errorf("iter %d slug=%s: Model = %q, want %q", i, slug, ep.Model, modelTail)
+		}
+	}
+}
+
+// TestResolver_CatalogPreemptsLegacy validates Property 5 for the
+// catalog branch: any time the catalog reports at least one entry,
+// Resolve dispatches through catalogResolver regardless of whether
+// XALGORIX_LLM names a legacy slug. The test asserts the URL,
+// HeaderStyle, and credentials all come from the seeded catalog
+// entry + matching profile — never from the legacy provider table.
+//
+// The randomized table covers every header style and the on/off
+// state of XALGORIX_LLM's legacy shape so the catalog-wins
+// invariant holds under every (catalogNonEmpty, legacyShape)
+// combination Property 5 enumerates.
+//
+// Validates: Requirements 2.2, 2.3, 11.2.
+func TestResolver_CatalogPreemptsLegacy(t *testing.T) {
+	const iterations = 120
+	headerStyles := []string{"openai", "anthropic", "gemini"}
+	// Used to randomize the legacy XALGORIX_LLM shape. A mix of
+	// legacy slugs and non-legacy strings drives Property 5's
+	// "regardless of legacy shape" assertion.
+	legacyVariants := []string{
+		"openai/legacy-model",
+		"anthropic/legacy-model",
+		"gemini/legacy-model",
+		"google/legacy-model",
+		"custom/legacy-model",
+		"",
+	}
+
+	seed := time.Now().UnixNano()
+	t.Logf("catalog preempts seed: %d", seed)
+	rng := rand.New(rand.NewSource(seed))
+
+	for i := 0; i < iterations; i++ {
+		hs := headerStyles[rng.Intn(len(headerStyles))]
+		legacy := legacyVariants[rng.Intn(len(legacyVariants))]
+		// Distinctive base URL so the assertions can verify the
+		// catalog path won — none of the legacy provider defaults
+		// share this hostname.
+		entryID := fmt.Sprintf("catprov%d", i)
+		modelName := fmt.Sprintf("cat-model-%d", i)
+		baseURL := fmt.Sprintf("https://catalog%d.example.com/v1", i)
+		entry := providers.Entry{
+			ID:          entryID,
+			DisplayName: "Catalog " + entryID,
+			BaseURL:     baseURL,
+			Models:      []string{modelName},
+			HeaderStyle: hs,
+		}
+		profileKey := fmt.Sprintf("catalog-key-%d", i)
+
+		fx := newResolverFixture(t, t.TempDir(), entry, profileKey)
+		cfg := &config.Config{LLM: legacy, APIKey: "ignored-legacy-key"}
+		r := NewCompositeResolver(
+			WithCatalog(fx.cat, fx.prof),
+			WithLegacy(cfg),
+		)
+
+		ep, err := r.Resolve(context.Background())
+		if err != nil {
+			t.Fatalf("iter %d hs=%s legacy=%q: Resolve: %v", i, hs, legacy, err)
+		}
+
+		// Build the expected URL by mirroring catalogResolver's
+		// own URL-builder branch logic for the chosen header
+		// style. The catalog path must produce a URL whose host
+		// is the seeded catalog host — never the legacy default.
+		var wantURL string
+		switch hs {
+		case "openai":
+			wantURL = baseURL + "/chat/completions"
+		case "anthropic":
+			wantURL = baseURL + "/messages"
+		case "gemini":
+			// Gemini strips trailing /v1 before appending /v1beta/...
+			wantURL = strings.TrimSuffix(baseURL, "/v1") + "/v1beta/models/" + modelName + ":generateContent"
+		}
+		if ep.URL != wantURL {
+			t.Errorf("iter %d hs=%s legacy=%q: URL = %q, want %q", i, hs, legacy, ep.URL, wantURL)
+		}
+		if !strings.Contains(ep.URL, fmt.Sprintf("catalog%d.example.com", i)) {
+			t.Errorf("iter %d: URL %q lost the catalog host — legacy may have leaked", i, ep.URL)
+		}
+		if ep.HeaderStyle != hs {
+			t.Errorf("iter %d hs=%s: HeaderStyle = %q, want %q", i, hs, ep.HeaderStyle, hs)
+		}
+		if ep.Auth != AuthAPIKey {
+			t.Errorf("iter %d hs=%s: Auth = %q, want %q", i, hs, ep.Auth, AuthAPIKey)
+		}
+		if ep.APIKey != profileKey {
+			t.Errorf("iter %d hs=%s: APIKey = %q, want %q (catalog profile)", i, hs, ep.APIKey, profileKey)
+		}
+		// AccessToken must be empty for an API-key profile.
+		if ep.AccessToken != "" {
+			t.Errorf("iter %d hs=%s: AccessToken = %q, want empty for api_key profile", i, hs, ep.AccessToken)
+		}
+		// Model must come from the catalog entry, not from the
+		// legacy XALGORIX_LLM (which carries its own model tail).
+		if ep.Model != modelName {
+			t.Errorf("iter %d hs=%s: Model = %q, want %q (catalog entry)", i, hs, ep.Model, modelName)
+		}
+	}
+}
+
+// TestResolver_NoCatalogNoLegacy_ReturnsConfigError validates
+// Property 5 for the error branch: when the catalog is empty AND
+// XALGORIX_LLM does not match Legacy_Provider_Shape, Resolve must
+// return a *ConfigError so the HTTP layer can surface "no provider
+// configured" instead of dispatching a malformed request.
+//
+// Iterates ≥ 100 times across non-legacy strings (custom slugs,
+// blank values, slugs with whitespace) to exercise every shape that
+// must NOT slip through the legacy gate.
+//
+// Validates: Requirement 2.4.
+func TestResolver_NoCatalogNoLegacy_ReturnsConfigError(t *testing.T) {
+	const iterations = 120
+	// Every value here must NOT match LegacyProviderShape — that
+	// is the precondition Property 5's error branch enumerates.
+	nonLegacy := []string{
+		"",
+		"custom/foo",
+		"perplexity/sonar",
+		"mistral/large",
+		"my-internal/model",
+		"acme-corp/llama",
+	}
+
+	seed := time.Now().UnixNano()
+	t.Logf("no-catalog-no-legacy seed: %d", seed)
+	rng := rand.New(rand.NewSource(seed))
+
+	for i := 0; i < iterations; i++ {
+		llm := nonLegacy[rng.Intn(len(nonLegacy))]
+		// Defensive: assert the test data really doesn't match the
+		// legacy shape, so a future change to LegacyProviderShape
+		// can't silently invalidate this property.
+		if LegacyProviderShape(llm) {
+			t.Fatalf("iter %d: LLM %q unexpectedly matches Legacy_Provider_Shape — fixture bug", i, llm)
+		}
+
+		cfg := &config.Config{LLM: llm}
+		fx := newResolverFixture(t, t.TempDir(), providers.Entry{}, "")
+		r := NewCompositeResolver(
+			WithCatalog(fx.cat, fx.prof),
+			WithLegacy(cfg),
+		)
+
+		ep, err := r.Resolve(context.Background())
+		if err == nil {
+			t.Fatalf("iter %d llm=%q: Resolve returned %+v with nil error, want *ConfigError", i, llm, ep)
+		}
+		var ce *ConfigError
+		if !errors.As(err, &ce) {
+			t.Fatalf("iter %d llm=%q: Resolve err = %v, want *ConfigError", i, llm, err)
+		}
+		// Empty Endpoint is the contract: no URL/credentials leak
+		// when the resolver has nothing to dispatch.
+		if ep.URL != "" || ep.APIKey != "" || ep.AccessToken != "" {
+			t.Errorf("iter %d llm=%q: non-empty Endpoint on error path: %+v", i, llm, ep)
+		}
+	}
+}
+
+// TestClient_HeaderSwitch_Matrix exercises every cell of the
+// (HeaderStyle, AuthMethod) switch in applyAuthHeaders and asserts
+// the exact outbound headers. This is the unit-test counterpart to
+// the resolver tests above: those drive the URL/credentials
+// upstream, this one drives the header switch downstream.
+//
+// The matrix covers:
+//
+//   - openai    + api_key     → Authorization: Bearer <APIKey>
+//   - openai    + oauth       → Authorization: Bearer <AccessToken>
+//   - anthropic + api_key     → x-api-key + anthropic-version
+//   - anthropic + oauth       → Authorization: Bearer + anthropic-version
+//   - gemini    + api_key     → x-goog-api-key
+//   - gemini    + oauth       → Authorization: Bearer
+//
+// Asserts both the present headers AND the absence of headers from
+// other branches so a future header-switch refactor can't quietly
+// add an Authorization shadow on the api_key paths.
+//
+// Validates: Requirements 2.2, 2.3, 11.2.
+func TestClient_HeaderSwitch_Matrix(t *testing.T) {
+	const apiKeyVal = "API-KEY-VAL"
+	const accessTokenVal = "ACCESS-TOKEN-VAL"
+
+	type wantHeaders struct {
+		authorization string
+		xAPIKey       string
+		xGoogAPIKey   string
+		anthropicVer  string
+	}
+
+	cases := []struct {
+		name        string
+		headerStyle string
+		auth        AuthMethod
+		want        wantHeaders
+	}{
+		{
+			name:        "openai_apikey",
+			headerStyle: "openai",
+			auth:        AuthAPIKey,
+			want:        wantHeaders{authorization: "Bearer " + apiKeyVal},
+		},
+		{
+			name:        "openai_oauth",
+			headerStyle: "openai",
+			auth:        AuthOAuthBearer,
+			want:        wantHeaders{authorization: "Bearer " + accessTokenVal},
+		},
+		{
+			name:        "anthropic_apikey",
+			headerStyle: "anthropic",
+			auth:        AuthAPIKey,
+			want:        wantHeaders{xAPIKey: apiKeyVal, anthropicVer: "2023-06-01"},
+		},
+		{
+			name:        "anthropic_oauth",
+			headerStyle: "anthropic",
+			auth:        AuthOAuthBearer,
+			want:        wantHeaders{authorization: "Bearer " + accessTokenVal, anthropicVer: "2023-06-01"},
+		},
+		{
+			name:        "gemini_apikey",
+			headerStyle: "gemini",
+			auth:        AuthAPIKey,
+			want:        wantHeaders{xGoogAPIKey: apiKeyVal},
+		},
+		{
+			name:        "gemini_oauth",
+			headerStyle: "gemini",
+			auth:        AuthOAuthBearer,
+			want:        wantHeaders{authorization: "Bearer " + accessTokenVal},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ep := Endpoint{
+				URL:         "https://example.test/path",
+				HeaderStyle: tc.headerStyle,
+				Auth:        tc.auth,
+			}
+			switch tc.auth {
+			case AuthAPIKey:
+				ep.APIKey = apiKeyVal
+			case AuthOAuthBearer:
+				ep.AccessToken = accessTokenVal
+			}
+
+			req, err := http.NewRequest(http.MethodPost, ep.URL, nil)
+			if err != nil {
+				t.Fatalf("http.NewRequest: %v", err)
+			}
+			applyAuthHeaders(req, ep)
+
+			if got := req.Header.Get("Authorization"); got != tc.want.authorization {
+				t.Errorf("Authorization = %q, want %q", got, tc.want.authorization)
+			}
+			if got := req.Header.Get("x-api-key"); got != tc.want.xAPIKey {
+				t.Errorf("x-api-key = %q, want %q", got, tc.want.xAPIKey)
+			}
+			if got := req.Header.Get("x-goog-api-key"); got != tc.want.xGoogAPIKey {
+				t.Errorf("x-goog-api-key = %q, want %q", got, tc.want.xGoogAPIKey)
+			}
+			if got := req.Header.Get("anthropic-version"); got != tc.want.anthropicVer {
+				t.Errorf("anthropic-version = %q, want %q", got, tc.want.anthropicVer)
+			}
+		})
 	}
 }

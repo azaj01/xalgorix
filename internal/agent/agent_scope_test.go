@@ -1,18 +1,27 @@
 package agent
 
 import (
+	"errors"
+	"fmt"
+	"math/rand"
+	"net"
 	"strings"
 	"testing"
-	"unicode/utf8"
+
+	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 )
 
-// TestShouldBlockForOutOfScope_BlocksThirdPartyHost is the regression
-// test for the "agent reports findings on unrelated host" bug
-// (Grafana on 159.223.74.62:9999 turning up in a scan of
-// pentest-ground.com). The agent must reject any tool call whose
-// arguments name a host that isn't the configured target or a
-// subdomain of it.
-func TestShouldBlockForOutOfScope_BlocksThirdPartyHost(t *testing.T) {
+// TestShouldBlockForOutOfScope_AllowsThirdPartyHost is the inverted
+// successor to the original "blocks third party host" test (Bucket A
+// of the scope-guard-local-only spec → Test Surface Migration). Each
+// row references a Public_OOS_Host — including 159.223.74.62, a real
+// public DigitalOcean address — and the post-fix guard MUST allow
+// every one of them: engagement-scope policing is no longer the
+// agent guard's job. Each row asserts blocked == false and that
+// args are byte-identical pre- and post-call (Property 1).
+//
+// Validates: Requirements 2.1, 2.2, 2.3, 2.4.
+func TestShouldBlockForOutOfScope_AllowsThirdPartyHost(t *testing.T) {
 	a := &Agent{}
 	a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
 
@@ -58,12 +67,13 @@ func TestShouldBlockForOutOfScope_BlocksThirdPartyHost(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			before := cloneArgs(tc.args)
 			blocked, reason := a.shouldBlockForOutOfScope(tc.tool, tc.args)
-			if !blocked {
-				t.Fatalf("expected %s with args %v to be blocked, got allow", tc.tool, tc.args)
+			if blocked {
+				t.Fatalf("expected %s with args %v to be allowed, got blocked: %s", tc.tool, tc.args, reason)
 			}
-			if reason == "" {
-				t.Fatalf("expected non-empty rejection reason")
+			if !argsEqual(tc.args, before) {
+				t.Fatalf("args mutated: before=%v after=%v", before, tc.args)
 			}
 		})
 	}
@@ -138,16 +148,47 @@ func TestShouldBlockForOutOfScope_AllowsHostlessCommands(t *testing.T) {
 	}
 }
 
-// TestShouldBlockForOutOfScope_DisabledWhenNoScope confirms the gate
-// is a no-op when no activity hosts are configured. A scope-less scan
-// (CLI mode without targets piped in) shouldn't fail every tool call.
-func TestShouldBlockForOutOfScope_DisabledWhenNoScope(t *testing.T) {
-	a := &Agent{}
-	// activityHosts left empty
-	if blocked, _ := a.shouldBlockForOutOfScope("terminal_execute",
-		map[string]string{"command": "curl http://anywhere.example"}); blocked {
-		t.Fatal("expected guard to be disabled when activityHosts is empty")
-	}
+// TestShouldBlockForOutOfScope_AllowsAnywhereWhenNoScope confirms
+// the gate's behaviour when no activity hosts are configured. The
+// guard is no longer "disabled" on empty scope; it just has no
+// Public_OOS_Host rule left to fire (engagement scope is not
+// consulted at all post-fix). Public_OOS_Host references therefore
+// flow through. The Local_Or_Listener_Host rule, however, MUST
+// remain active even with empty scope — see Requirement 3.7's
+// parenthetical and design.md → "Open Question: Requirement 3.7".
+//
+// Validates: Requirements 2.2, 3.7.
+func TestShouldBlockForOutOfScope_AllowsAnywhereWhenNoScope(t *testing.T) {
+	t.Run("public OOS host allowed when scope is empty", func(t *testing.T) {
+		a := &Agent{}
+		// activityHosts left empty
+		args := map[string]string{"command": "curl http://anywhere.example"}
+		before := cloneArgs(args)
+		if blocked, reason := a.shouldBlockForOutOfScope("terminal_execute", args); blocked {
+			t.Fatalf("expected public OOS host to be allowed when scope is empty, got blocked: %s", reason)
+		}
+		if !argsEqual(args, before) {
+			t.Fatalf("args mutated: before=%v after=%v", before, args)
+		}
+	})
+
+	t.Run("loopback still blocks when scope is empty (Req 3.7)", func(t *testing.T) {
+		a := &Agent{}
+		// activityHosts left empty; localGuard is the zero Config
+		// which IsLocalOrListener treats as BindAddr "127.0.0.1".
+		args := map[string]string{"command": "curl http://127.0.0.1/admin"}
+		before := cloneArgs(args)
+		blocked, reason := a.shouldBlockForOutOfScope("terminal_execute", args)
+		if !blocked {
+			t.Fatalf("Requirement 3.7: loopback MUST still block when scope is empty, got allow")
+		}
+		if reason == "" {
+			t.Fatalf("expected non-empty rejection reason")
+		}
+		if !argsEqual(args, before) {
+			t.Fatalf("args mutated: before=%v after=%v", before, args)
+		}
+	})
 }
 
 // TestExtractHostFromTokenForScope tests the host-extraction primitive
@@ -176,35 +217,6 @@ func TestExtractHostFromTokenForScope(t *testing.T) {
 		got := extractHostFromTokenForScope(tc.in)
 		if got != tc.want {
 			t.Errorf("extractHostFromTokenForScope(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
-// TestHostInScope tests the scope membership primitive.
-func TestHostInScope(t *testing.T) {
-	hosts := []string{"pentest-ground.com", "another.example"}
-	cases := []struct {
-		in   string
-		want bool
-	}{
-		{"pentest-ground.com", true},
-		{"api.pentest-ground.com", true},
-		{"deep.nested.api.pentest-ground.com", true},
-		{"another.example", true},
-		{"sub.another.example", true},
-		// Suffix attack: must not match.
-		{"evilpentest-ground.com", false},
-		{"pentest-ground.com.attacker.example", false},
-		// Unrelated.
-		{"159.223.74.62", false},
-		{"google.com", false},
-		// Empty host = always in-scope (caller's call).
-		{"", true},
-	}
-	for _, tc := range cases {
-		got := hostInScope(tc.in, hosts)
-		if got != tc.want {
-			t.Errorf("hostInScope(%q, %v) = %v, want %v", tc.in, hosts, got, tc.want)
 		}
 	}
 }
@@ -291,21 +303,29 @@ func TestExtractHostsFromArgs_QueryParamRedirect(t *testing.T) {
 		})
 	}
 
-	// Req 1.3: a redirect-style URL whose query parameter wraps an
-	// OOS host must cause a gated tool call to be rejected, with the
-	// rejection reason naming the OOS host.
-	t.Run("gated tool blocked on wrapped OOS host", func(t *testing.T) {
+	// Req 1.3 (post-fix Bucket A inversion per scope-guard-local-only
+	// → Test Surface Migration): the wrapped host is `oos.example`,
+	// a Public_OOS_Host. The narrowed guard does NOT consult
+	// Activity_Hosts, so a redirect-style URL whose query parameter
+	// wraps a Public_OOS_Host MUST be allowed. The extraction
+	// sub-cases above keep — the tokenizer still surfaces every
+	// embedded host — but the gating verdict on the wrapped OOS
+	// host flips from "blocked" to "allowed". The Local_Or_Listener
+	// behaviour for wrapped local IPs is exercised separately by
+	// TestProperty_LocalOrListenerInvarianceUnderTokenizationShape.
+	t.Run("gated tool allowed on wrapped OOS host", func(t *testing.T) {
 		a := &Agent{}
 		a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
 		args := map[string]string{
 			"url": "https://app.pentest-ground.com/redirect?next=https://oos.example/path",
 		}
+		before := cloneArgs(args)
 		blocked, reason := a.shouldBlockForOutOfScope("browser_action", args)
-		if !blocked {
-			t.Fatalf("expected redirect-style OOS URL to be blocked, got allow")
+		if blocked {
+			t.Fatalf("expected redirect-style Public_OOS_Host wrapper to be allowed, got blocked: %s", reason)
 		}
-		if !strings.Contains(reason, "oos.example") {
-			t.Errorf("rejection reason should name the OOS host, got %q", reason)
+		if !argsEqual(args, before) {
+			t.Fatalf("args mutated: before=%v after=%v", before, args)
 		}
 	})
 }
@@ -362,9 +382,12 @@ func TestExtractHostsFromArgs_UserinfoForm(t *testing.T) {
 		})
 	}
 
-	// Gated-tool path: a userinfo-wrapped OOS host inside a
-	// terminal_execute command must be blocked, naming the OOS host.
-	t.Run("gated tool blocked on userinfo OOS host", func(t *testing.T) {
+	// Gated-tool path (post-fix Bucket A inversion per
+	// scope-guard-local-only → Test Surface Migration): a userinfo-
+	// wrapped OOS host inside a terminal_execute command MUST be
+	// allowed, because oos.example is a Public_OOS_Host and the
+	// narrowed guard no longer consults Activity_Hosts.
+	t.Run("gated tool allowed on userinfo OOS host", func(t *testing.T) {
 		a := &Agent{}
 		a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
 		for _, raw := range []string{
@@ -372,13 +395,14 @@ func TestExtractHostsFromArgs_UserinfoForm(t *testing.T) {
 			"https://user:pass@oos.example",
 		} {
 			args := map[string]string{"command": "curl " + raw}
+			before := cloneArgs(args)
 			blocked, reason := a.shouldBlockForOutOfScope("terminal_execute", args)
-			if !blocked {
-				t.Errorf("expected userinfo OOS form %q to be blocked, got allow", raw)
+			if blocked {
+				t.Errorf("expected userinfo Public_OOS_Host form %q to be allowed, got blocked: %s", raw, reason)
 				continue
 			}
-			if !strings.Contains(reason, "oos.example") {
-				t.Errorf("rejection reason for %q should name oos.example, got %q", raw, reason)
+			if !argsEqual(args, before) {
+				t.Errorf("args mutated for %q: before=%v after=%v", raw, before, args)
 			}
 		}
 	})
@@ -443,442 +467,30 @@ func TestScopeHostTokenSplit_NewSeparators(t *testing.T) {
 	}
 }
 
-// TestExtractHostsFromArgs_LongValueTruncated locks in the 8 KiB
-// per-value scan cap. Host-shaped tokens that sit past the
-// argScanLimitBytes boundary must be ignored, and the gate must not
-// block, deny, or fail a tool call solely because the argument is
-// long.
-//
-// Validates Requirements 2.1, 2.2.
-func TestExtractHostsFromArgs_LongValueTruncated(t *testing.T) {
-	const oosHost = "evil.example"
-	const inScopeHost = "in.example"
-
-	// Build a payload whose first argScanLimitBytes bytes contain an
-	// in-scope host and whose tail (past byte 8192) contains an OOS
-	// host. The OOS host must not surface from extractHostsFromArgs.
-	var b strings.Builder
-	b.WriteString(inScopeHost)
-	b.WriteByte(' ')
-	// Pad with whitespace-separated junk until we are well past the
-	// 8 KiB cap, then append the OOS host.
-	pad := strings.Repeat("x ", argScanLimitBytes)
-	b.WriteString(pad)
-	b.WriteString(oosHost)
-	long := b.String()
-	if len(long) <= argScanLimitBytes {
-		t.Fatalf("test setup: long value should exceed the cap, got %d bytes", len(long))
-	}
-
-	hosts := extractHostsFromArgs(map[string]string{"command": long})
-	joined := "," + strings.Join(hosts, ",") + ","
-	if !strings.Contains(joined, ","+inScopeHost+",") {
-		t.Errorf("in-scope host before cap missing: hosts=%v", hosts)
-	}
-	if strings.Contains(joined, ","+oosHost+",") {
-		t.Errorf("OOS host past the 8 KiB cap must be ignored, got hosts=%v", hosts)
-	}
-
-	// Req 2.2: a gated tool whose OOS reference sits entirely past
-	// the cap must not be blocked.
-	a := &Agent{}
-	a.SetActivityPolicy("active", "active", []string{"https://" + inScopeHost})
-	if blocked, reason := a.shouldBlockForOutOfScope("terminal_execute",
-		map[string]string{"command": long}); blocked {
-		t.Fatalf("OOS reference past the 8 KiB cap must not block, got blocked: %s", reason)
-	}
-
-	// And: a value that is simply long with no host-shaped tokens at
-	// all must produce no hosts and must not raise an error.
-	hostlessLong := strings.Repeat("x ", argScanLimitBytes*2)
-	if got := extractHostsFromArgs(map[string]string{"command": hostlessLong}); len(got) != 0 {
-		t.Errorf("hostless long value should produce no hosts, got %v", got)
-	}
-}
-
-// TestExtractHostsFromArgs_ShortValueUnaffected pins the
-// behavior-preservation guarantee for values whose byte length is
-// at or below the 8 KiB cap: tokenization must walk the entire
-// value and return the same host set the implementation produced
-// before the cap was introduced.
-//
-// Validates Requirement 2.3.
-func TestExtractHostsFromArgs_ShortValueUnaffected(t *testing.T) {
-	cases := []struct {
-		name  string
-		value string
-		want  []string
-	}{
-		{
-			name:  "short value, host at end",
-			value: "scan target evil.example",
-			want:  []string{"evil.example"},
-		},
-		{
-			name:  "two hosts in a short value",
-			value: "curl https://example.com/foo && nmap evil.org",
-			want:  []string{"example.com", "evil.org"},
-		},
-		{
-			name: "value of exactly argScanLimitBytes bytes with host at the end",
-			value: strings.Repeat("x ", (argScanLimitBytes-len("evil.example"))/2) +
-				"evil.example",
-			want: []string{"evil.example"},
-		},
-		{
-			name: "value of argScanLimitBytes-1 bytes with host at the end",
-			value: strings.Repeat("x ", (argScanLimitBytes-1-len("evil.example"))/2) +
-				" evil.example",
-			want: []string{"evil.example"},
-		},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			if len(tc.value) > argScanLimitBytes {
-				t.Fatalf("test setup: value must be <= cap, got %d bytes", len(tc.value))
-			}
-			hosts := extractHostsFromArgs(map[string]string{"command": tc.value})
-			joined := "," + strings.Join(hosts, ",") + ","
-			for _, want := range tc.want {
-				if !strings.Contains(joined, ","+want+",") {
-					t.Errorf("extractHostsFromArgs(%q) = %v, missing %q", tc.value, hosts, want)
-				}
-			}
-		})
-	}
-}
-
-// TestTruncateForScopeScan_UTF8Boundary pins the rune-boundary trim
-// behavior of truncateForScopeScan. When the 8 KiB cap falls inside
-// a multi-byte UTF-8 sequence, the helper must walk back to the
-// largest byte offset <= argScanLimitBytes that lies on a rune
-// start, and the returned string must be valid UTF-8 so downstream
-// FieldsFunc never sees a partial rune.
-//
-// Validates Requirement 2.4.
-func TestTruncateForScopeScan_UTF8Boundary(t *testing.T) {
-	// "✓" is U+2713, encoded as 3 bytes (0xE2 0x9C 0x93).
-	const checkmark = "\u2713"
-	if utf8.RuneLen('\u2713') != 3 {
-		t.Fatalf("test setup: expected ✓ to be 3 bytes")
-	}
-
-	t.Run("value at or below cap returned unchanged", func(t *testing.T) {
-		short := "https://example.com/path"
-		if got := truncateForScopeScan(short); got != short {
-			t.Errorf("short value should be returned unchanged, got %q", got)
-		}
-		exact := strings.Repeat("a", argScanLimitBytes)
-		if got := truncateForScopeScan(exact); got != exact {
-			t.Errorf("value of exactly cap length should be returned unchanged (len=%d)", len(got))
-		}
-	})
-
-	t.Run("cap inside multi-byte rune walks back to rune start", func(t *testing.T) {
-		// Place an ASCII pad of (cap-2) bytes then a checkmark so the
-		// checkmark's bytes live at offsets cap-2, cap-1, cap. The
-		// cap index argScanLimitBytes itself sits on the trailing
-		// byte of the checkmark, which is a continuation byte.
-		pad := strings.Repeat("a", argScanLimitBytes-2)
-		v := pad + checkmark + checkmark
-		if len(v) <= argScanLimitBytes {
-			t.Fatalf("test setup: v must exceed cap, got %d bytes", len(v))
-		}
-		got := truncateForScopeScan(v)
-		if len(got) > argScanLimitBytes {
-			t.Errorf("truncated length %d exceeds cap %d", len(got), argScanLimitBytes)
-		}
-		if !utf8.ValidString(got) {
-			t.Errorf("truncated string must be valid UTF-8, got %q", got)
-		}
-		// The first checkmark spans bytes [cap-2, cap-1, cap]; since
-		// the cap byte is a continuation, the helper must walk back
-		// to argScanLimitBytes-2 (the rune start of the first
-		// checkmark).
-		if len(got) != argScanLimitBytes-2 {
-			t.Errorf("expected truncation back to cap-2 (%d), got %d", argScanLimitBytes-2, len(got))
-		}
-		if got != pad {
-			t.Errorf("truncated string should equal the ASCII pad, got %q", got)
-		}
-		// And: the truncated string must not panic when fed into the
-		// downstream FieldsFunc-based tokenizer.
-		_ = scopeHostTokenSplit(got)
-	})
-
-	t.Run("cap exactly on rune boundary keeps the prefix", func(t *testing.T) {
-		// Pad with cap bytes of ASCII, then append a checkmark. The
-		// cap index sits on the lead byte of the checkmark, which is
-		// itself a rune start, so the helper returns the prefix
-		// untouched at exactly cap bytes.
-		pad := strings.Repeat("a", argScanLimitBytes)
-		v := pad + checkmark
-		got := truncateForScopeScan(v)
-		if len(got) != argScanLimitBytes {
-			t.Errorf("expected truncation length cap (%d), got %d", argScanLimitBytes, len(got))
-		}
-		if got != pad {
-			t.Errorf("truncated string should equal the ASCII pad")
-		}
-		if !utf8.ValidString(got) {
-			t.Errorf("truncated string must be valid UTF-8")
-		}
-	})
-}
-
-// runAddNoteRedaction mirrors the pre-gate redaction step the agent
-// loop runs at internal/agent/agent.go (~line 1633) before
-// shouldBlockForOutOfScope. It walks `key` and `value` independently,
-// applies redactOutOfScopeHosts, and writes the rewritten string
-// back into args when the substitution count is non-zero. Returning
-// the total count lets the wiring tests assert end-to-end behaviour
-// without booting the full agent loop. Kept tiny on purpose so the
-// production wiring it stands in for stays the source of truth.
+// runAddNoteRedaction previously mirrored the pre-gate redaction step
+// the agent loop ran before shouldBlockForOutOfScope. That production
+// wiring at internal/agent/agent.go:1614–1631 was removed in task 3.6
+// of the scope-guard-local-only spec, so this helper is now a no-op
+// pass-through: it never mutates args and always reports zero
+// redactions. Kept temporarily so the bug-condition exploration test
+// keeps its symbolic call site; task 3.8 deletes the redaction-era
+// tests that still consume it.
 func runAddNoteRedaction(a *Agent, args map[string]string) int {
-	if len(a.activityHosts) == 0 {
-		return 0
-	}
-	total := 0
-	for _, k := range []string{"key", "value"} {
-		if v, ok := args[k]; ok {
-			if r, n := a.redactOutOfScopeHosts(v); n > 0 {
-				args[k] = r
-				total += n
-			}
-		}
-	}
-	return total
+	_ = a
+	_ = args
+	return 0
 }
 
-// TestRedactOutOfScopeHosts_BasicReplace pins the core behaviour of
-// the redact helper: every OOS host span is replaced in place with
-// the literal marker `[redacted: out-of-scope host]`, the
-// substitution count matches the number of distinct OOS spans, and
-// the rewriter handles the three shapes the URL sweep and separator
-// pass surface (bare host, full URL, userinfo, query-style
-// `key=URL`). Tokenization mirrors extractHostsFromArgs.
+// TestAddNote_PassesThroughOOSHosts pins the byte-identical
+// pass-through guarantee for non-gated tools. add_note is not in
+// the gated tool list and the pre-gate redaction wiring was removed
+// in task 3.6 of the scope-guard-local-only spec. Even when key /
+// value carry Public_OOS_Host text, the args MUST reach the tool
+// handler byte-identical (no redaction marker substitution, no
+// mutation of any sort).
 //
-// Validates Requirements 4.1, 4.2, 4.5.
-func TestRedactOutOfScopeHosts_BasicReplace(t *testing.T) {
-	a := &Agent{}
-	a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
-
-	const marker = "[redacted: out-of-scope host]"
-
-	cases := []struct {
-		name      string
-		in        string
-		wantOut   string
-		wantCount int
-	}{
-		{
-			name:      "bare OOS host",
-			in:        "saw evil.example today",
-			wantOut:   "saw " + marker + " today",
-			wantCount: 1,
-		},
-		{
-			name:      "OOS URL with path",
-			in:        "visit https://oos.example/path now",
-			wantOut:   "visit " + marker + " now",
-			wantCount: 1,
-		},
-		{
-			name:      "userinfo bare form (split on @ separator)",
-			in:        "ssh user@oos.example",
-			wantOut:   "ssh user@" + marker,
-			wantCount: 1,
-		},
-		{
-			name:      "redirect query parameter",
-			in:        "go=https://oos.example/redirect",
-			wantOut:   "go=" + marker,
-			wantCount: 1,
-		},
-		{
-			name:      "two distinct OOS hosts in one value",
-			in:        "first evil.example then evil2.example",
-			wantOut:   "first " + marker + " then " + marker,
-			wantCount: 2,
-		},
-		{
-			name:      "OOS host inside redirect-style URL",
-			in:        "https://app.pentest-ground.com/redirect?next=https://oos.example/path",
-			wantOut:   "https://app.pentest-ground.com/redirect?next=" + marker,
-			wantCount: 1,
-		},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			got, count := a.redactOutOfScopeHosts(tc.in)
-			if got != tc.wantOut {
-				t.Errorf("redactOutOfScopeHosts(%q)\n got = %q\nwant = %q", tc.in, got, tc.wantOut)
-			}
-			if count != tc.wantCount {
-				t.Errorf("redactOutOfScopeHosts(%q) count = %d, want %d", tc.in, count, tc.wantCount)
-			}
-			if !strings.Contains(got, marker) {
-				t.Errorf("redaction marker missing from output %q", got)
-			}
-		})
-	}
-}
-
-// TestRedactOutOfScopeHosts_PreservesInScope locks in the
-// no-mutation guarantee for in-scope inputs: when every host in the
-// value is in-scope (or no host is named at all), the helper must
-// return the input string byte-identical and a zero substitution
-// count. This is the read_notes round-trip safety net — legitimate
-// notes referencing the configured target must not be mangled.
-//
-// Validates Requirements 4.3, 4.4, 4.5, 4.8.
-func TestRedactOutOfScopeHosts_PreservesInScope(t *testing.T) {
-	a := &Agent{}
-	a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
-
-	cases := []struct {
-		name string
-		in   string
-	}{
-		{
-			name: "configured host bare",
-			in:   "found CSRF token on pentest-ground.com",
-		},
-		{
-			name: "configured host as URL",
-			in:   "visit https://app.pentest-ground.com/login soon",
-		},
-		{
-			name: "subdomain URL with path and query",
-			in:   "GET https://api.pentest-ground.com/v1/users?id=1&role=admin",
-		},
-		{
-			name: "no host tokens at all",
-			in:   "scan completed, see notes.json for output",
-		},
-		{
-			name: "configured host plus filename and version token",
-			in:   "wrote https://pentest-ground.com to scan.txt v1.2.3",
-		},
-		{
-			name: "empty string",
-			in:   "",
-		},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			got, count := a.redactOutOfScopeHosts(tc.in)
-			if got != tc.in {
-				t.Errorf("redactOutOfScopeHosts(%q) mutated string to %q, expected byte-identical passthrough", tc.in, got)
-			}
-			if count != 0 {
-				t.Errorf("redactOutOfScopeHosts(%q) count = %d, want 0", tc.in, count)
-			}
-			if strings.Contains(got, "[redacted: out-of-scope host]") {
-				t.Errorf("in-scope value should not contain the redaction marker, got %q", got)
-			}
-		})
-	}
-
-	// Empty activityHosts → redact path is a no-op even for
-	// host-shaped inputs. Matches the shouldBlockForOutOfScope
-	// short-circuit and keeps scope-less CLI runs from corrupting
-	// notes.
-	t.Run("empty activityHosts is no-op", func(t *testing.T) {
-		bare := &Agent{}
-		got, count := bare.redactOutOfScopeHosts("saw evil.example today")
-		if got != "saw evil.example today" {
-			t.Errorf("no-scope agent should not redact, got %q", got)
-		}
-		if count != 0 {
-			t.Errorf("no-scope agent should report zero redactions, got %d", count)
-		}
-	})
-}
-
-// TestAddNote_RedactsOOSInKeyAndValue exercises the agent loop's
-// add_note pre-gate wiring (internal/agent/agent.go ~line 1633). A
-// ToolCall named `add_note` whose `key` and `value` arguments each
-// reference an OOS host must have both arguments rewritten in place
-// with the redaction marker substituted, the call must be allowed
-// to proceed (shouldBlockForOutOfScope returns allow on the rewritten
-// args because the OOS tokens are gone), and the gated-tool list
-// must remain unchanged.
-//
-// Validates Requirements 4.1, 4.2, 4.3, 4.6, 4.7.
-func TestAddNote_RedactsOOSInKeyAndValue(t *testing.T) {
-	a := &Agent{}
-	a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
-
-	const marker = "[redacted: out-of-scope host]"
-
-	args := map[string]string{
-		"key":   "leak_from_oos.example",
-		"value": "found at https://evil.example/dump and also tracker.example",
-	}
-
-	total := runAddNoteRedaction(a, args)
-	if total < 2 {
-		t.Errorf("expected at least 2 total redactions across key+value, got %d", total)
-	}
-
-	if !strings.Contains(args["key"], marker) {
-		t.Errorf("key should contain redaction marker, got %q", args["key"])
-	}
-	if strings.Contains(args["key"], "oos.example") {
-		t.Errorf("key still contains OOS host: %q", args["key"])
-	}
-
-	if !strings.Contains(args["value"], marker) {
-		t.Errorf("value should contain redaction marker, got %q", args["value"])
-	}
-	if strings.Contains(args["value"], "evil.example") {
-		t.Errorf("value still contains OOS host evil.example: %q", args["value"])
-	}
-	if strings.Contains(args["value"], "tracker.example") {
-		t.Errorf("value still contains OOS host tracker.example: %q", args["value"])
-	}
-
-	// Req 4.3: post-redaction the gate must allow add_note. (add_note
-	// is not in the gated tool list, so this is a belt-and-braces
-	// check that the OOS-clean rewritten args don't surface any host
-	// that would trip a hypothetical future gate addition.)
-	if blocked, reason := a.shouldBlockForOutOfScope("add_note", args); blocked {
-		t.Errorf("add_note must be allowed after redaction, got blocked: %s", reason)
-	}
-
-	// Req 4.6: the gated reject path must NOT invoke the redactor.
-	// Re-run a Gated_Tool with the same OOS shape and confirm the
-	// args are still byte-identical to the inputs (i.e. the gated
-	// rejection path leaves them alone — only the redact wiring
-	// mutates).
-	gatedArgs := map[string]string{"command": "curl https://evil.example/dump"}
-	want := gatedArgs["command"]
-	blocked, reason := a.shouldBlockForOutOfScope("terminal_execute", gatedArgs)
-	if !blocked {
-		t.Fatalf("gated tool with OOS host should be rejected, got allow")
-	}
-	if !strings.Contains(reason, "evil.example") {
-		t.Errorf("gated rejection reason should name evil.example, got %q", reason)
-	}
-	if gatedArgs["command"] != want {
-		t.Errorf("gated path mutated args (redactor leaked into reject path): %q", gatedArgs["command"])
-	}
-}
-
-// TestAddNote_NoOpWhenAllInScope locks in the byte-identical
-// passthrough guarantee from Requirement 4.4: when neither argument
-// of an add_note call references any OOS host, both arguments must
-// reach the tool handler exactly as the LLM emitted them, and the
-// redaction wiring must not raise an error or mutate the args even
-// when one of the documented arguments is missing or non-host (Req
-// 4.8). Also exercises the empty-activityHosts short-circuit.
-//
-// Validates Requirements 4.4, 4.6, 4.8.
-func TestAddNote_NoOpWhenAllInScope(t *testing.T) {
+// Validates: Requirements 2.4, 3.9.
+func TestAddNote_PassesThroughOOSHosts(t *testing.T) {
 	a := &Agent{}
 	a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
 
@@ -887,34 +499,34 @@ func TestAddNote_NoOpWhenAllInScope(t *testing.T) {
 		args map[string]string
 	}{
 		{
-			name: "both args reference in-scope host",
+			name: "OOS host text in key and value",
+			args: map[string]string{
+				"key":   "leak_oos.example",
+				"value": "saw https://evil.example/dump",
+			},
+		},
+		{
+			name: "in-scope host text in key and value",
 			args: map[string]string{
 				"key":   "csrf_token_app",
 				"value": "found at https://app.pentest-ground.com/login",
 			},
 		},
 		{
-			name: "neither arg names a host",
+			name: "no host tokens at all",
 			args: map[string]string{
 				"key":   "phase_done",
 				"value": "recon complete, see notes.json",
 			},
 		},
 		{
-			name: "value reference subdomain via URL with path+query",
-			args: map[string]string{
-				"key":   "user_endpoint",
-				"value": "GET https://api.pentest-ground.com/v1/users?id=1",
-			},
-		},
-		{
-			name: "missing key argument (Req 4.8 passthrough)",
+			name: "missing key (passthrough)",
 			args: map[string]string{
 				"value": "ok",
 			},
 		},
 		{
-			name: "missing value argument (Req 4.8 passthrough)",
+			name: "missing value (passthrough)",
 			args: map[string]string{
 				"key": "phase_done",
 			},
@@ -923,54 +535,1414 @@ func TestAddNote_NoOpWhenAllInScope(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			// Snapshot the original args so the comparison is
-			// byte-identical even if the wiring mutates the map.
-			before := make(map[string]string, len(tc.args))
-			for k, v := range tc.args {
-				before[k] = v
+			before := cloneArgs(tc.args)
+			blocked, reason := a.shouldBlockForOutOfScope("add_note", tc.args)
+			if blocked {
+				t.Fatalf("add_note must bypass the gate, got blocked: %s", reason)
 			}
-
-			total := runAddNoteRedaction(a, tc.args)
-			if total != 0 {
-				t.Errorf("expected zero redactions for in-scope/missing-arg input, got %d", total)
-			}
-			for k, want := range before {
-				if got := tc.args[k]; got != want {
-					t.Errorf("arg %q mutated: got %q, want %q", k, got, want)
-				}
-			}
-			if len(tc.args) != len(before) {
-				t.Errorf("args map size changed: got %d entries, want %d", len(tc.args), len(before))
+			if !argsEqual(tc.args, before) {
+				t.Fatalf("add_note args mutated:\n  before=%v\n  after =%v", before, tc.args)
 			}
 			for _, v := range tc.args {
 				if strings.Contains(v, "[redacted: out-of-scope host]") {
-					t.Errorf("in-scope arg gained a redaction marker: %q", v)
+					t.Errorf("add_note arg gained a redaction marker (wiring should be deleted): %q", v)
 				}
 			}
 		})
 	}
 
-	// Empty activityHosts: the wiring's `len(a.activityHosts) > 0`
-	// guard short-circuits the path entirely, so even an OOS-rich
-	// arg set passes through untouched.
-	t.Run("empty activityHosts short-circuits the wiring", func(t *testing.T) {
+	// Empty activityHosts: add_note still passes through untouched
+	// — no redaction wiring exists and the gate doesn't apply to
+	// add_note in any case.
+	t.Run("empty activityHosts pass-through", func(t *testing.T) {
 		bare := &Agent{}
 		args := map[string]string{
 			"key":   "leak_from_oos.example",
 			"value": "saw https://evil.example/dump",
 		}
-		want := map[string]string{
-			"key":   "leak_from_oos.example",
+		before := cloneArgs(args)
+		blocked, reason := bare.shouldBlockForOutOfScope("add_note", args)
+		if blocked {
+			t.Fatalf("add_note with empty scope must pass through, got blocked: %s", reason)
+		}
+		if !argsEqual(args, before) {
+			t.Fatalf("scope-less add_note mutated args:\n  before=%v\n  after =%v", before, args)
+		}
+	})
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Bug condition exploration property test (spec: scope-guard-local-only,
+// task 1). This test encodes Property 1 ("Public_OOS_Host pass-through
+// through Agent_Scope_Guard") from design.md → "Correctness Properties"
+// and bugfix.md → "Properties":
+//
+//   FOR ALL X WHERE isBugCondition(X) DO
+//     (blocked, _) := shouldBlockForOutOfScope(X.toolName, X.toolArgs)
+//     ASSERT blocked = false
+//     ASSERT X.toolArgs is byte-identical pre- and post-call
+//   END FOR
+//
+// where isBugCondition(X) is (per design.md → "Bug Condition"):
+//
+//   X.toolName ∈ GATED_TOOLS
+//   ∧ Activity_Hosts ≠ ∅
+//   ∧ extractHostsFromArgs(X.toolArgs) ≠ ∅
+//   ∧ ∃ h: ¬isLocalOrListenerHost(h) ∧ ¬hostInScope(h, Activity_Hosts)
+//   ∧ ¬∃ h: isLocalOrListenerHost(h)
+//
+// THE TEST IS EXPECTED TO FAIL ON UNFIXED CODE. The failure confirms
+// the "Conflated SSRF-vs-scope" root-cause hypothesis from design.md →
+// "Hypothesized Root Cause": today the agent guard rejects any
+// host-shaped token outside Activity_Hosts, so a Public_OOS_Host inside
+// any Gated_Tool argument trips the gate. After task 3 narrows the
+// guard to Local_Or_Listener_Host this same test passes.
+
+// scopeBugSeed is the fixed seed used by the bug-condition exploration
+// PBT. Documented here so reruns reproduce the same counterexamples.
+const scopeBugSeed = int64(0x53434F50455F4255) // "SCOPE_BU"
+
+// gatedToolsForBugProperty enumerates every Gated_Tool name the agent
+// guard inspects today. Mirrors the switch in shouldBlockForOutOfScope
+// (internal/agent/agent.go ~line 821) so the property covers every
+// gated path including report_vulnerability's belt-and-braces leg.
+// Covers Requirements 2.1, 2.2, 2.3.
+var gatedToolsForBugProperty = []string{
+	"terminal_execute",
+	"python_action",
+	"browser_action",
+	"page_agent",
+	"pageagent",
+	"report_vulnerability",
+}
+
+// genPublicOOSLabel returns a host-shaped label that:
+//   - uses only ASCII letters / digits / dots / dashes (no slashes),
+//   - has at least two dot-separated labels (so the tokenizer treats
+//     it as a host, not a bare word),
+//   - is not version-shaped (won't be filtered by isVersionLike),
+//   - is not file-name-shaped (won't be filtered by looksLikeFilename),
+//   - is not a reserved-IP literal (composed entirely of letters in
+//     the TLD, so net.ParseIP rejects it),
+//   - is not equal to or a subdomain of any string in avoid (so it
+//     stays out of Activity_Hosts).
+//
+// extractHostFromTokenForScope returning a non-empty host on the
+// generated label is asserted by the caller — that's the "tokenizer
+// surfaces it" precondition for isBugCondition.
+func genPublicOOSLabel(r *rand.Rand, avoid []string) string {
+	const letters = "abcdefghijklmnopqrstuvwxyz"
+	const lettersDigits = "abcdefghijklmnopqrstuvwxyz0123456789"
+	for attempt := 0; attempt < 100; attempt++ {
+		// 2 to 4 labels, each 3 to 10 runes. First/last char of each
+		// label is a letter (avoids leading-digit / trailing-dash
+		// shapes that some resolvers reject and that aren't useful
+		// here). Final label (TLD) is letters-only, length 2 to 6.
+		nLabels := 2 + r.Intn(3)
+		var sb strings.Builder
+		for i := 0; i < nLabels; i++ {
+			if i > 0 {
+				sb.WriteByte('.')
+			}
+			isTLD := i == nLabels-1
+			labelLen := 3 + r.Intn(8)
+			if isTLD {
+				labelLen = 2 + r.Intn(5)
+			}
+			for j := 0; j < labelLen; j++ {
+				switch {
+				case isTLD:
+					sb.WriteByte(letters[r.Intn(len(letters))])
+				case j == 0 || j == labelLen-1:
+					sb.WriteByte(letters[r.Intn(len(letters))])
+				default:
+					alphabet := lettersDigits
+					// 1-in-6 chance of a dash in interior positions.
+					if r.Intn(6) == 0 {
+						sb.WriteByte('-')
+						continue
+					}
+					sb.WriteByte(alphabet[r.Intn(len(alphabet))])
+				}
+			}
+		}
+		label := sb.String()
+
+		// Reject if version-like, file-name-shaped, or IP-shaped.
+		if isVersionLike(label) || looksLikeFilename(label) {
+			continue
+		}
+		if net.ParseIP(label) != nil {
+			continue
+		}
+		// Tokenizer must surface the label as a host.
+		if extractHostFromTokenForScope(label) == "" {
+			continue
+		}
+		// Reject if in scope (equal to, subdomain of, or contains an
+		// avoid token).
+		clash := false
+		for _, a := range avoid {
+			a = strings.ToLower(strings.TrimSpace(a))
+			if a == "" {
+				continue
+			}
+			if label == a || strings.HasSuffix(label, "."+a) || strings.Contains(label, a) {
+				clash = true
+				break
+			}
+		}
+		if clash {
+			continue
+		}
+		return label
+	}
+	// Fallback — astronomically unlikely. Shape obviously OOS.
+	return "rare-public-oos.example"
+}
+
+// argShapeName labels each of the five argument shapes the existing
+// tokenizer surfaces (per design.md → "Property-based shape"):
+// bare host, full URL, userinfo wrapper, redirect query parameter,
+// fragment-embedded URL.
+type argShape int
+
+const (
+	shapeBareHost argShape = iota
+	shapeFullURL
+	shapeUserinfoURL
+	shapeRedirectQuery
+	shapeFragmentEmbed
+)
+
+func (s argShape) String() string {
+	switch s {
+	case shapeBareHost:
+		return "bare-host"
+	case shapeFullURL:
+		return "full-url"
+	case shapeUserinfoURL:
+		return "userinfo-url"
+	case shapeRedirectQuery:
+		return "redirect-query"
+	case shapeFragmentEmbed:
+		return "fragment-embed"
+	}
+	return "unknown"
+}
+
+// embedOOSHostInArg returns a tool-argument value that embeds host
+// using the requested shape. inScope is the operator's configured
+// host (used as the wrapper origin in redirect/fragment shapes so
+// the value also contains an in-scope reference, mirroring how
+// these shapes appear in real LLM output).
+func embedOOSHostInArg(shape argShape, host, inScope string) string {
+	switch shape {
+	case shapeBareHost:
+		return host
+	case shapeFullURL:
+		return "https://" + host + "/admin"
+	case shapeUserinfoURL:
+		return "https://user:pass@" + host + "/path"
+	case shapeRedirectQuery:
+		return "https://" + inScope + "/redirect?next=https://" + host + "/path"
+	case shapeFragmentEmbed:
+		return "https://" + inScope + "/page#https://" + host + "/p"
+	}
+	return host
+}
+
+// argFieldForTool picks the conventional argument field the agent
+// uses for each Gated_Tool. report_vulnerability also gets the OOS
+// host on the explicit `target` field so the belt-and-braces leg is
+// exercised.
+func argFieldForTool(toolName string) string {
+	switch toolName {
+	case "browser_action":
+		return "url"
+	case "python_action":
+		return "code"
+	case "report_vulnerability":
+		return "target"
+	default:
+		// terminal_execute, page_agent, pageagent
+		return "command"
+	}
+}
+
+// shapeIntoCommand wraps the OOS-bearing payload into a plausible
+// command/code string for tools that take free-form text. Keeps the
+// value byte-stable so the byte-identical assertion is meaningful.
+func shapeIntoCommand(toolName, payload string) string {
+	switch toolName {
+	case "python_action":
+		return "import requests; requests.get('" + payload + "')"
+	case "terminal_execute", "page_agent", "pageagent":
+		return "curl " + payload
+	default:
+		return payload
+	}
+}
+
+// cloneArgs returns a deep copy of args so the caller can compare
+// pre- and post-call maps byte-identically.
+func cloneArgs(args map[string]string) map[string]string {
+	out := make(map[string]string, len(args))
+	for k, v := range args {
+		out[k] = v
+	}
+	return out
+}
+
+// argsEqual reports whether a and b have identical keys and
+// byte-identical values.
+func argsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+// TestBugCondition_PublicOOSHostPassThrough is the property-based
+// exploration test for spec scope-guard-local-only, task 1.
+//
+// Property 1 (Bug Condition): for every (toolName, toolArgs) where
+// isBugCondition holds — Gated_Tool, non-empty Activity_Hosts, at
+// least one Public_OOS_Host token, no Local_Or_Listener_Host tokens —
+// the fixed shouldBlockForOutOfScope returns (false, "") and leaves
+// toolArgs byte-identical to the input.
+//
+// Generators (per design.md → "Property-based shape"):
+//   - random Public_OOS_Host labels via genPublicOOSLabel,
+//   - five argument shapes via embedOOSHostInArg,
+//   - every Gated_Tool name via gatedToolsForBugProperty.
+//
+// Plus four scoped deterministic counterexamples (per design.md →
+// "Exploratory Bug Condition Checking → Test Cases") pinned to
+// anchor the property at known-failing inputs.
+//
+// Validates: Requirements 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4.
+//
+// EXPECTED OUTCOME on UNFIXED code: this test FAILS. The failure
+// confirms the bug exists. After task 3's fix the same test passes.
+func TestBugCondition_PublicOOSHostPassThrough(t *testing.T) {
+	// ── Scoped deterministic counterexamples ────────────────────
+	// These four cases are pinned per design.md → "Exploratory Bug
+	// Condition Checking → Test Cases". They serve as reproducible
+	// anchors for the property and survive any future change to
+	// the random generator.
+
+	t.Run("scoped/python_attribute_reference", func(t *testing.T) {
+		// Case 1: python_action with `requests.get(...)` and scope
+		// {pentest-ground.com}. Today rejected as
+		// `"requests.get" is not in scope`. Expected: allow.
+		a := &Agent{}
+		a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
+		args := map[string]string{
+			"code": "import requests; requests.get('http://example.org/admin')",
+		}
+		before := cloneArgs(args)
+		blocked, reason := a.shouldBlockForOutOfScope("python_action", args)
+		if blocked {
+			t.Fatalf("BUG: python_action with `requests.get` rejected: %s", reason)
+		}
+		if !argsEqual(args, before) {
+			t.Fatalf("BUG: python_action args mutated: before=%v after=%v", before, args)
+		}
+	})
+
+	t.Run("scoped/bare_third_party_host", func(t *testing.T) {
+		// Case 2: terminal_execute against pentest-ground.com with
+		// scope {gov.pk, dgip.gov.pk, clientfeedback.dgip.gov.pk}.
+		// Today rejected as `"pentest-ground.com" is not in scope`.
+		// Expected: allow.
+		a := &Agent{}
+		a.SetActivityPolicy("active", "active", []string{
+			"https://gov.pk",
+			"https://dgip.gov.pk",
+			"https://clientfeedback.dgip.gov.pk",
+		})
+		args := map[string]string{"command": "nmap pentest-ground.com"}
+		before := cloneArgs(args)
+		blocked, reason := a.shouldBlockForOutOfScope("terminal_execute", args)
+		if blocked {
+			t.Fatalf("BUG: terminal_execute against pentest-ground.com rejected: %s", reason)
+		}
+		if !argsEqual(args, before) {
+			t.Fatalf("BUG: terminal_execute args mutated: before=%v after=%v", before, args)
+		}
+	})
+
+	t.Run("scoped/report_vulnerability_oos_target", func(t *testing.T) {
+		// Case 3: report_vulnerability with target=https://oos.example
+		// and scope {pentest-ground.com}. Today rejected via the
+		// explicit-target leg with the
+		// `report_vulnerability target … is out of scope` reason.
+		// Expected: allow.
+		a := &Agent{}
+		a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
+		args := map[string]string{
+			"title":    "XSS",
+			"target":   "https://oos.example",
+			"endpoint": "https://oos.example/login?title=<svg>",
+			"severity": "high",
+		}
+		before := cloneArgs(args)
+		blocked, reason := a.shouldBlockForOutOfScope("report_vulnerability", args)
+		if blocked {
+			t.Fatalf("BUG: report_vulnerability against oos.example rejected: %s", reason)
+		}
+		if !argsEqual(args, before) {
+			t.Fatalf("BUG: report_vulnerability args mutated: before=%v after=%v", before, args)
+		}
+	})
+
+	t.Run("scoped/add_note_redaction_observation", func(t *testing.T) {
+		// Case 4 (observation): add_note with OOS-host text in key
+		// and value. add_note is NOT a gated tool, but the agent
+		// loop currently runs a pre-gate redaction step that rewrites
+		// `key` and `value` with `[redacted: out-of-scope host]`
+		// markers (internal/agent/agent.go ~line 1614–1631). This
+		// substitution is what task 3.6 removes. The assertion here
+		// is the byte-identical guarantee from Property 1 ("toolArgs
+		// is byte-identical pre- and post-call"), enforced through
+		// runAddNoteRedaction (the test helper that mirrors the
+		// agent loop's pre-gate path). On unfixed code the helper
+		// mutates args; the assertion fails — that's the bug.
+		a := &Agent{}
+		a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
+		args := map[string]string{
+			"key":   "leak_oos.example",
 			"value": "saw https://evil.example/dump",
 		}
-		total := runAddNoteRedaction(bare, args)
-		if total != 0 {
-			t.Errorf("scope-less agent should not redact, got %d", total)
+		before := cloneArgs(args)
+		_ = runAddNoteRedaction(a, args)
+		if !argsEqual(args, before) {
+			t.Fatalf("BUG: add_note args mutated by pre-gate redaction:\n  before=%v\n  after =%v", before, args)
 		}
-		for k, v := range want {
-			if args[k] != v {
-				t.Errorf("scope-less wiring mutated %q: got %q, want %q", k, args[k], v)
+	})
+
+	// ── Property-based generation ───────────────────────────────
+	// Random Public_OOS_Hosts × 5 shapes × every Gated_Tool. Fixed
+	// seed (scopeBugSeed) for reproducibility.
+
+	r := rand.New(rand.NewSource(scopeBugSeed))
+	const inScope = "pentest-ground.com"
+	scope := []string{"https://" + inScope}
+	avoid := []string{inScope, "pentest-ground", "ground"}
+
+	const iterations = 60
+
+	type counterexample struct {
+		toolName string
+		shape    argShape
+		host     string
+		args     map[string]string
+		reason   string
+		mutated  bool
+	}
+	var counterexamples []counterexample
+
+	for i := 0; i < iterations; i++ {
+		host := genPublicOOSLabel(r, avoid)
+		// Sanity: tokenizer must surface this as a host, otherwise
+		// the bug condition can't fire and we'd be testing nothing.
+		if extractHostFromTokenForScope(host) == "" {
+			t.Fatalf("generator emitted non-host-shaped label %q (seed bug)", host)
+		}
+		// Sanity: must not be reserved-IP literal.
+		if net.ParseIP(host) != nil {
+			t.Fatalf("generator emitted IP-shaped label %q (seed bug)", host)
+		}
+
+		for _, tool := range gatedToolsForBugProperty {
+			for _, shape := range []argShape{
+				shapeBareHost,
+				shapeFullURL,
+				shapeUserinfoURL,
+				shapeRedirectQuery,
+				shapeFragmentEmbed,
+			} {
+				payload := embedOOSHostInArg(shape, host, inScope)
+				field := argFieldForTool(tool)
+
+				var args map[string]string
+				switch tool {
+				case "report_vulnerability":
+					// Put the OOS host on the explicit target field
+					// so the belt-and-braces leg is exercised.
+					args = map[string]string{
+						"title":    "Auto-generated finding for property test",
+						"target":   payload,
+						"endpoint": payload,
+						"severity": "medium",
+					}
+				default:
+					value := payload
+					if shape != shapeBareHost && (tool == "terminal_execute" ||
+						tool == "python_action" ||
+						tool == "page_agent" ||
+						tool == "pageagent") {
+						value = shapeIntoCommand(tool, payload)
+					} else if tool == "browser_action" {
+						// browser_action expects a URL on `url`; the
+						// bare-host shape is fine as-is for the
+						// tokenizer.
+						value = payload
+					}
+					args = map[string]string{field: value}
+				}
+
+				// Fresh local Agent per iteration so accidental
+				// state in one tool's run cannot affect another.
+				a := &Agent{}
+				a.SetActivityPolicy("active", "active", scope)
+
+				before := cloneArgs(args)
+				blocked, reason := a.shouldBlockForOutOfScope(tool, args)
+				mutated := !argsEqual(args, before)
+
+				if blocked || mutated {
+					counterexamples = append(counterexamples, counterexample{
+						toolName: tool,
+						shape:    shape,
+						host:     host,
+						args:     before,
+						reason:   reason,
+						mutated:  mutated,
+					})
+				}
 			}
+		}
+	}
+
+	if len(counterexamples) > 0 {
+		// Cap the dump so the failure log stays readable.
+		const dumpCap = 8
+		var b strings.Builder
+		fmt.Fprintf(&b, "found %d Public_OOS_Host counterexamples (seed=0x%x); first %d:\n",
+			len(counterexamples), uint64(scopeBugSeed), min(dumpCap, len(counterexamples)))
+		for i, c := range counterexamples {
+			if i >= dumpCap {
+				break
+			}
+			fmt.Fprintf(&b, "  [%d] tool=%s shape=%s host=%s mutated=%v\n      args=%v\n      reason=%q\n",
+				i, c.toolName, c.shape, c.host, c.mutated, c.args, c.reason)
+		}
+		t.Fatalf("BUG: Property 1 violated — Public_OOS_Hosts blocked or args mutated.\n%s", b.String())
+	}
+}
+
+
+// ───────────────────────────────────────────────────────────────────
+// Preservation property tests (spec: scope-guard-local-only, task 2).
+// Property 2 from design.md → "Correctness Properties":
+//
+//   FOR ALL X WHERE ¬isBugCondition(X) DO
+//     ASSERT oracleShouldBlockForOutOfScope(X) == shouldBlockForOutOfScope(X)
+//     ASSERT toolArgs is byte-identical pre- and post-call
+//   END FOR
+//
+// On UNFIXED code the oracle (oracleShouldBlockForOutOfScope, captured
+// in scope_oracle_test.go) is byte-frozen against today's production
+// implementation, so the equality assertion is tautological. After
+// task 3 narrows the production guard, the same oracle is the
+// ground-truth `F` against which the post-fix `F'` must match for
+// every ¬C(X) input.
+//
+// "(blocked, reason) tuple" from the task is interpreted as: the
+// `blocked` bool matches and, when blocked, both implementations
+// produce a non-empty reason. The reason TEXT itself is allowed to
+// change between F and F' (design.md → "Narrow shouldBlockForOutOfScope"
+// rewrites the wording for Local_Or_Listener_Host rejections). What
+// preservation pins is the BEHAVIOR (allow/block), not the wording.
+//
+// The empty-scope-+-Local_Or_Listener_Host cell is treated specially
+// per design.md → "Open Question: Requirement 3.7": today the oracle
+// short-circuits empty scope to allow, and the production code does
+// the same; post-fix the production code keeps the local check active
+// even when scope is empty (oracle = allow, fixed = block). The
+// asymmetry is intentional. Rows in this cell are excluded from
+// strict oracle-vs-production comparison — the property pins
+// oracle = allow (unchanged across the spec) and lets task 3.11
+// reconcile the production divergence post-fix.
+
+// preservationCounterResolver wraps a stub resolver with a per-host
+// call counter so the DNS-lookup-count sub-property can assert
+// exactly one resolution per host-shaped argument. Today the agent
+// guard does no DNS (only the web guard does), so this counter is
+// observed via the agent oracle's own oracleLookupHost var. After
+// task 3 migrates the agent guard to scopeguard.LookupHost the same
+// counter shape is reused via that var.
+type preservationCounterResolver struct {
+	calls   int
+	perHost map[string]int
+	stub    func(string) ([]string, error)
+}
+
+func newPreservationCounterResolver(stub func(string) ([]string, error)) *preservationCounterResolver {
+	return &preservationCounterResolver{
+		perHost: make(map[string]int),
+		stub:    stub,
+	}
+}
+
+func (r *preservationCounterResolver) lookup(host string) ([]string, error) {
+	r.calls++
+	r.perHost[host]++
+	return r.stub(host)
+}
+
+// withOracleLookupHost swaps oracleLookupHost (the agent oracle's
+// frozen resolver indirection) for the duration of a single test.
+// Restoration runs via t.Cleanup so the original binding is
+// preserved on every exit path.
+func withOracleLookupHost(t *testing.T, stub func(string) ([]string, error)) {
+	t.Helper()
+	prev := oracleLookupHost
+	oracleLookupHost = stub
+	t.Cleanup(func() { oracleLookupHost = prev })
+}
+
+// preservationRow is one ¬C(X) input the preservation property
+// exercises. cell tags which partition cell the row belongs to so
+// the test output names which preservation requirement is being
+// hit when a row fails post-fix.
+type preservationRow struct {
+	cell  string // partition cell name from task 2
+	name  string
+	scope []string
+	tool  string
+	args  map[string]string
+	// excludeProductionComparison is set for the empty-scope-+-Local
+	// cell where post-fix divergence is expected per Requirement 3.7.
+	excludeProductionComparison bool
+}
+
+func preservationRows() []preservationRow {
+	return []preservationRow{
+		// ── Cell 1: Local_Or_Listener_Host ────────────────────────
+		// Literal locals. Both oracle and production today reject
+		// because the host is not in Activity_Hosts (oracle's OOS
+		// rule). Post-fix production rejects because the host is
+		// Local_Or_Listener_Host. blocked bool matches in both eras.
+		{
+			cell:  "local-or-listener",
+			name:  "loopback literal in curl",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "terminal_execute",
+			args:  map[string]string{"command": "curl http://127.0.0.1/admin"},
+		},
+		{
+			cell:  "local-or-listener",
+			name:  "localhost literal in curl",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "terminal_execute",
+			args:  map[string]string{"command": "curl http://localhost/admin"},
+		},
+		{
+			cell:  "local-or-listener",
+			name:  "rfc1918 ipv4 in browser_action",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "browser_action",
+			args:  map[string]string{"url": "http://10.0.0.1:8080/"},
+		},
+		{
+			cell:  "local-or-listener",
+			name:  "rfc1918 ipv4 192.168 in python_action",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "python_action",
+			args:  map[string]string{"code": "import requests; requests.get('http://192.168.1.1/')"},
+		},
+		{
+			cell:  "local-or-listener",
+			name:  "link-local 169.254 in curl",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "terminal_execute",
+			args:  map[string]string{"command": "curl http://169.254.169.254/latest/meta-data/"},
+		},
+
+		// ── Cell 2: Self-listener ─────────────────────────────────
+		// Today the unfixed agent guard rejects these because the
+		// host literal isn't in Activity_Hosts. Post-fix production
+		// rejects because the (host, port) pair matches the operator's
+		// listener via scopeguard.IsLocalOrListener. blocked bool
+		// matches in both eras.
+		{
+			cell:  "self-listener",
+			name:  "127.0.0.1:8080 (default bind+port)",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "terminal_execute",
+			args:  map[string]string{"command": "curl http://127.0.0.1:8080/admin"},
+		},
+
+		// ── Cell 3: In-scope ──────────────────────────────────────
+		// Both implementations allow.
+		{
+			cell:  "in-scope",
+			name:  "exact configured target",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "terminal_execute",
+			args:  map[string]string{"command": "nmap -sV pentest-ground.com"},
+		},
+		{
+			cell:  "in-scope",
+			name:  "subdomain of configured target",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "terminal_execute",
+			args:  map[string]string{"command": "curl https://api.pentest-ground.com/v1/users"},
+		},
+		{
+			cell:  "in-scope",
+			name:  "deeply-nested subdomain",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "browser_action",
+			args:  map[string]string{"url": "https://app.api.v2.pentest-ground.com/"},
+		},
+		{
+			cell:  "in-scope",
+			name:  "www variant",
+			scope: []string{"https://pentest-ground.com", "https://www.pentest-ground.com"},
+			tool:  "browser_action",
+			args:  map[string]string{"url": "https://www.pentest-ground.com/login"},
+		},
+
+		// ── Cell 4: Hostless ──────────────────────────────────────
+		// Both implementations allow.
+		{
+			cell:  "hostless",
+			name:  "ls",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "terminal_execute",
+			args:  map[string]string{"command": "ls -la"},
+		},
+		{
+			cell:  "hostless",
+			name:  "grep over notes file",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "terminal_execute",
+			args:  map[string]string{"command": "grep 'csrf' notes.json"},
+		},
+		{
+			cell:  "hostless",
+			name:  "jq over scan output",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "terminal_execute",
+			args:  map[string]string{"command": "jq '.vulns[]' scan.json"},
+		},
+		{
+			cell:  "hostless",
+			name:  "wc over recon list",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "terminal_execute",
+			args:  map[string]string{"command": "wc -l live_subdomains.txt"},
+		},
+
+		// ── Cell 5: Empty Activity_Hosts ──────────────────────────
+		// Hostless and Public_OOS_Host inputs: both eras allow (the
+		// oracle short-circuits, today's production short-circuits,
+		// post-fix the rewritten guard has nothing to do with scope
+		// at all on these inputs).
+		{
+			cell:  "empty-scope/hostless",
+			name:  "empty scope, hostless",
+			scope: nil,
+			tool:  "terminal_execute",
+			args:  map[string]string{"command": "ls"},
+		},
+		{
+			cell:  "empty-scope/public-oos",
+			name:  "empty scope, public OOS host",
+			scope: nil,
+			tool:  "terminal_execute",
+			args:  map[string]string{"command": "curl http://anywhere.example/"},
+		},
+		// Empty-scope-+-Local — the documented Requirement 3.7
+		// asymmetry. Oracle allows (short-circuits before any
+		// local check). Production today allows (oracle == production
+		// on unfixed code). Post-fix production blocks. We exclude
+		// this row from the strict oracle-vs-production comparison
+		// and pin the oracle verdict explicitly so reviewers can
+		// see the asymmetry.
+		{
+			cell:                        "empty-scope/local",
+			name:                        "empty scope, loopback (Requirement 3.7 asymmetry)",
+			scope:                       nil,
+			tool:                        "terminal_execute",
+			args:                        map[string]string{"command": "curl http://127.0.0.1/"},
+			excludeProductionComparison: true,
+		},
+
+		// ── Cell 6: Non-gated tools ───────────────────────────────
+		// Both eras bypass the gate entirely; args byte-identical.
+		{
+			cell:  "non-gated",
+			name:  "add_note (with OOS host text)",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "add_note",
+			args: map[string]string{
+				"key":   "leak_oos.example",
+				"value": "saw https://evil.example/dump",
+			},
+		},
+		{
+			cell:  "non-gated",
+			name:  "read_notes",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "read_notes",
+			args:  map[string]string{},
+		},
+		{
+			cell:  "non-gated",
+			name:  "finish",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "finish",
+			args:  map[string]string{"summary": "done with https://evil.example/dump"},
+		},
+		{
+			cell:  "non-gated",
+			name:  "web_search",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "web_search",
+			args:  map[string]string{"query": "site:evil.example admin login"},
+		},
+		{
+			cell:  "non-gated",
+			name:  "list_skills",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "list_skills",
+			args:  map[string]string{},
+		},
+		{
+			cell:  "non-gated",
+			name:  "agentmail",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "agentmail",
+			args:  map[string]string{"to": "ops@evil.example", "subject": "x"},
+		},
+
+		// ── Cell 7: report_vulnerability on local target ──────────
+		// Both eras reject. blocked bool matches.
+		{
+			cell:  "report-vuln-local",
+			name:  "report_vulnerability against 127.0.0.1",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "report_vulnerability",
+			args: map[string]string{
+				"title":    "Local-only finding",
+				"target":   "http://127.0.0.1",
+				"endpoint": "http://127.0.0.1/admin",
+				"severity": "high",
+			},
+		},
+		{
+			cell:  "report-vuln-local",
+			name:  "report_vulnerability against [::1]:8080",
+			scope: []string{"https://pentest-ground.com"},
+			tool:  "report_vulnerability",
+			args: map[string]string{
+				"title":    "IPv6 loopback finding",
+				"target":   "http://[::1]:8080/x",
+				"endpoint": "http://[::1]:8080/x",
+				"severity": "high",
+			},
+		},
+	}
+}
+
+// TestPreservation_AgentGuardMatchesOracle pins Property 2 across
+// the seven ¬C(X) partition cells. Asserts:
+//
+//  1. oracleShouldBlockForOutOfScope(X).blocked ==
+//     shouldBlockForOutOfScope(X).blocked
+//  2. when blocked, both produce a non-empty reason
+//  3. toolArgs byte-identical pre- and post-call (no mutation under
+//     preservation)
+//
+// The empty-scope-+-Local cell (preservationRow.excludeProductionComparison)
+// is the documented Requirement 3.7 asymmetry: the oracle's
+// short-circuit on empty scope returns allow, post-fix production
+// returns block. On unfixed code production happens to match the
+// oracle (allow); post-fix it diverges. The property pins oracle =
+// allow for the row and skips the strict equality check, leaving
+// task 3.11 to validate the post-fix shift.
+//
+// Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.9.
+func TestPreservation_AgentGuardMatchesOracle(t *testing.T) {
+	for _, row := range preservationRows() {
+		row := row
+		t.Run(row.cell+"/"+row.name, func(t *testing.T) {
+			a := &Agent{}
+			a.SetActivityPolicy("active", "active", row.scope)
+
+			oracleA := &Agent{}
+			oracleA.SetActivityPolicy("active", "active", row.scope)
+
+			// Snapshot args for byte-identical comparison.
+			oracleArgsBefore := cloneArgs(row.args)
+			oracleArgs := cloneArgs(row.args)
+			oracleBlocked, oracleReason := oracleShouldBlockForOutOfScope(oracleA, row.tool, oracleArgs)
+			if !argsEqual(oracleArgs, oracleArgsBefore) {
+				t.Fatalf("oracle mutated args: before=%v after=%v", oracleArgsBefore, oracleArgs)
+			}
+
+			prodArgsBefore := cloneArgs(row.args)
+			prodArgs := cloneArgs(row.args)
+			prodBlocked, prodReason := a.shouldBlockForOutOfScope(row.tool, prodArgs)
+			if !argsEqual(prodArgs, prodArgsBefore) {
+				t.Fatalf("production mutated args: before=%v after=%v", prodArgsBefore, prodArgs)
+			}
+
+			// Empty-scope-+-Local cell: pin oracle = allow per Req 3.7
+			// and skip the strict production comparison (post-fix
+			// divergence is expected and validated by task 3.11).
+			if row.excludeProductionComparison {
+				if oracleBlocked {
+					t.Fatalf("Requirement 3.7: oracle MUST allow on empty-scope-+-Local, got blocked: %s", oracleReason)
+				}
+				return
+			}
+
+			if oracleBlocked != prodBlocked {
+				t.Fatalf("blocked verdicts diverge: oracle=%v (reason=%q), production=%v (reason=%q)",
+					oracleBlocked, oracleReason, prodBlocked, prodReason)
+			}
+			if oracleBlocked && oracleReason == "" {
+				t.Errorf("oracle blocked but reason empty")
+			}
+			if prodBlocked && prodReason == "" {
+				t.Errorf("production blocked but reason empty")
+			}
+		})
+	}
+}
+
+// TestPreservation_LocalOrListenerInvarianceUnderTokenizationShape
+// pins the sub-property called out in task 2: the same
+// Local_Or_Listener_Host expressed as bare host / host:port /
+// http://host / http://user:pass@host / inside redirect query
+// parameters MUST reject identically — pre- and post-fix.
+//
+// On unfixed code the agent guard rejects all five shapes via the
+// OOS rule (because none of these literals appear in Activity_Hosts).
+// Post-fix the agent guard rejects all five shapes via the
+// Local_Or_Listener_Host rule. Either way blocked = true across
+// every shape.
+//
+// Validates: Requirements 3.1, 3.2, 3.3, 3.4.
+func TestPreservation_LocalOrListenerInvarianceUnderTokenizationShape(t *testing.T) {
+	a := &Agent{}
+	a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
+
+	hosts := []string{
+		"127.0.0.1",
+		"10.0.0.1",
+		"192.168.1.1",
+		"169.254.169.254",
+	}
+	shapeBuilders := map[string]func(string) string{
+		"bare host":      func(h string) string { return "curl " + h },
+		"host:port":      func(h string) string { return "curl " + h + ":8080" },
+		"scheme://host":  func(h string) string { return "curl http://" + h },
+		"userinfo URL":   func(h string) string { return "curl http://user:pass@" + h },
+		"redirect query": func(h string) string { return "curl https://app.pentest-ground.com/redir?next=http://" + h },
+	}
+
+	for _, host := range hosts {
+		host := host
+		for shapeName, build := range shapeBuilders {
+			shapeName, build := shapeName, build
+			t.Run(host+"/"+shapeName, func(t *testing.T) {
+				args := map[string]string{"command": build(host)}
+				before := cloneArgs(args)
+				blocked, reason := a.shouldBlockForOutOfScope("terminal_execute", args)
+				if !blocked {
+					t.Fatalf("Local_Or_Listener_Host %s in shape %q must be blocked across the spec, got allow", host, shapeName)
+				}
+				if reason == "" {
+					t.Errorf("blocked but reason empty for %s/%s", host, shapeName)
+				}
+				if !argsEqual(args, before) {
+					t.Errorf("args mutated under preservation: before=%v after=%v", before, args)
+				}
+				// Oracle parity check: on unfixed code the oracle
+				// matches production (tautological); the assertion
+				// is here to lock the parity in for post-fix runs.
+				oracleA := &Agent{}
+				oracleA.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
+				oracleArgs := cloneArgs(args)
+				oracleBlocked, _ := oracleShouldBlockForOutOfScope(oracleA, "terminal_execute", oracleArgs)
+				if !oracleBlocked {
+					t.Errorf("oracle disagrees: %s in shape %q allowed by oracle", host, shapeName)
+				}
+			})
+		}
+	}
+}
+
+// TestPreservation_AgentOracleStableAcrossLookupSwap is a defensive
+// sanity check on the oracle's frozen-byte property. The oracle
+// declares its own oracleLookupHost var; even if a future reviewer
+// accidentally rewires the oracle to call DNS, this test catches
+// the regression by feeding a bomb resolver and asserting the
+// oracle's verdicts on the standard preservation rows are
+// unaffected (because today's oracle does no DNS).
+//
+// On post-fix runs the production agent guard does call DNS via
+// scopeguard.LookupHost, but the oracle keeps reading from
+// oracleLookupHost — so the byte-frozen pre-fix `F` stays stable
+// regardless of how the production resolver is wired.
+func TestPreservation_AgentOracleStableAcrossLookupSwap(t *testing.T) {
+	withOracleLookupHost(t, func(host string) ([]string, error) {
+		t.Errorf("oracle MUST NOT call DNS today (host=%q)", host)
+		return nil, fmt.Errorf("oracle must not call DNS")
+	})
+
+	for _, row := range preservationRows() {
+		oracleA := &Agent{}
+		oracleA.SetActivityPolicy("active", "active", row.scope)
+		args := cloneArgs(row.args)
+		_, _ = oracleShouldBlockForOutOfScope(oracleA, row.tool, args)
+	}
+}
+
+
+
+// ───────────────────────────────────────────────────────────────────
+// Bucket D — new coverage for the narrowed Local_Or_Listener_Host
+// rule. See design.md → "Test Surface Migration → Bucket D — add"
+// and tasks.md → 3.8 Bucket D.
+
+// withScopeguardLookupHost swaps scopeguard.LookupHost for the
+// duration of a single test. Restoration runs via t.Cleanup so the
+// original net.LookupHost binding is preserved on every exit path.
+// The test functions below MUST NOT call t.Parallel() because
+// scopeguard.LookupHost is package-level state.
+func withScopeguardLookupHost(t *testing.T, stub func(string) ([]string, error)) {
+	t.Helper()
+	prev := scopeguard.LookupHost
+	scopeguard.LookupHost = stub
+	t.Cleanup(func() { scopeguard.LookupHost = prev })
+}
+
+// firstLocalInterfaceIP returns the first IP address bound to one of
+// this machine's interfaces. Used by the Bucket D row that asserts
+// hostnames whose injected resolver returns a local-interface IP
+// must reject. Returns "" if no interface address is available, in
+// which case the row is skipped.
+func firstLocalInterfaceIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		var ip net.IP
+		switch v := a.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip == nil || ip.IsLoopback() {
+			continue
+		}
+		if v4 := ip.To4(); v4 != nil {
+			return v4.String()
+		}
+	}
+	return ""
+}
+
+// TestShouldBlockForOutOfScope_BlocksLocalOrListener pins the
+// post-fix Local_Or_Listener_Host rule across the full classifier
+// surface: literal loopback / RFC1918 / link-local, the listener
+// bind:port pairing, and hostnames whose injected resolver returns
+// either a private-range IP or a local-interface IP. Each row
+// asserts blocked == true.
+//
+// Validates: Requirements 3.1, 3.2, 3.3, 3.4.
+func TestShouldBlockForOutOfScope_BlocksLocalOrListener(t *testing.T) {
+	const listenerPort = 9000
+	const bindAddr = "127.0.0.1"
+
+	// Build an agent with a configured listener identity. The
+	// localGuard field is consulted by shouldBlockForOutOfScope via
+	// scopeguard.IsLocalOrListener.
+	makeAgent := func() *Agent {
+		a := &Agent{
+			localGuard: scopeguard.Config{BindAddr: bindAddr, Port: listenerPort},
+		}
+		a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
+		return a
+	}
+
+	type row struct {
+		name       string
+		command    string
+		stubLookup func(string) ([]string, error)
+	}
+
+	rows := []row{
+		{name: "loopback ipv4 literal", command: "curl http://127.0.0.1/admin"},
+		{name: "localhost name", command: "curl http://localhost/admin"},
+		// NOTE on bracketed IPv6 literals (`[::1]`, `[fe80::1]`,
+		// `[fc00::1]` etc.): the agent's tokenizer (extractHostsFromArgs
+		// → extractHostFromTokenForScope) cannot surface bracketed
+		// IPv6 hosts from a free-form command string today. `[` / `]`
+		// are token separators in scopeTokenSeparator, so `http://[::1]:8080/admin`
+		// is broken into tokens {`curl`, `http://`, `::1`, `:8080/admin`}
+		// and `extractHostFromTokenForScope` rejects `::1` after the
+		// leading `:` is stripped by its punctuation trim. IPv6
+		// literal coverage for the Local_Or_Listener_Host rule is
+		// therefore exercised via:
+		//   - TestShouldBlockForOutOfScope_ReportVulnerabilityLocalOrListener
+		//     where the report_vulnerability belt-and-braces leg
+		//     passes the raw `endpoint=http://[::1]:8080/x` directly
+		//     to scopeguard.IsLocalOrListener (bypassing the tokenizer).
+		//   - the "hostname resolves to ::1" stub row below.
+		// The classifier itself (scopeguard.IsLocalOrListener) handles
+		// every IPv6 literal shape and is independently covered by
+		// internal/scopeguard/scopeguard_test.go.
+		{name: "rfc1918 10.x", command: "curl http://10.0.0.1/"},
+		{name: "rfc1918 192.168.x", command: "curl http://192.168.1.1/"},
+		{name: "link-local 169.254", command: "curl http://169.254.169.254/latest/meta-data/"},
+		{name: "0.0.0.0 paired with listener port", command: "curl http://0.0.0.0:9000/"},
+		{name: "configured bind:port", command: "curl http://127.0.0.1:9000/"},
+		{
+			name:    "hostname resolves to private IP via scopeguard.LookupHost",
+			command: "curl http://internal.example/",
+			stubLookup: func(host string) ([]string, error) {
+				return []string{"10.0.0.5"}, nil
+			},
+		},
+		{
+			name:    "hostname resolves to ipv6 loopback via scopeguard.LookupHost",
+			command: "curl http://lb6.example/",
+			stubLookup: func(host string) ([]string, error) {
+				return []string{"::1"}, nil
+			},
+		},
+	}
+
+	// Local-interface row only runs if the machine has a non-loopback
+	// interface address available to inject through the resolver.
+	if iface := firstLocalInterfaceIP(); iface != "" {
+		rows = append(rows, row{
+			name:    "hostname resolves to local-interface IP via scopeguard.LookupHost",
+			command: "curl http://lb.example/",
+			stubLookup: func(host string) ([]string, error) {
+				return []string{iface}, nil
+			},
+		})
+	}
+
+	for _, tc := range rows {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.stubLookup != nil {
+				withScopeguardLookupHost(t, tc.stubLookup)
+			} else {
+				// Even rows that should NOT trigger DNS still install
+				// a counter-only stub. If the production code regresses
+				// and starts looking up an IP literal, the assertion
+				// fails loudly.
+				withScopeguardLookupHost(t, func(host string) ([]string, error) {
+					return nil, fmt.Errorf("DNS should not have been invoked for row %q (host=%q)", tc.name, host)
+				})
+			}
+
+			a := makeAgent()
+			args := map[string]string{"command": tc.command}
+			before := cloneArgs(args)
+			blocked, reason := a.shouldBlockForOutOfScope("terminal_execute", args)
+			if !blocked {
+				t.Fatalf("Local_Or_Listener_Host row %q must block, got allow", tc.name)
+			}
+			if reason == "" {
+				t.Errorf("blocked but reason empty for %q", tc.name)
+			}
+			if !argsEqual(args, before) {
+				t.Errorf("args mutated under preservation: before=%v after=%v", before, args)
+			}
+		})
+	}
+}
+
+// TestShouldBlockForOutOfScope_LocalGuardActiveWithEmptyScope pins
+// Requirement 3.7's parenthetical: the Local_Or_Listener_Host block
+// path remains active independent of Activity_Hosts being populated.
+// An agent with empty activityHosts that sees a Gated_Tool referring
+// to 127.0.0.1 MUST still block.
+//
+// Validates: Requirement 3.7.
+func TestShouldBlockForOutOfScope_LocalGuardActiveWithEmptyScope(t *testing.T) {
+	a := &Agent{
+		localGuard: scopeguard.Config{BindAddr: "127.0.0.1", Port: 9000},
+	}
+	// activityHosts intentionally left empty.
+
+	args := map[string]string{"command": "curl http://127.0.0.1/admin"}
+	before := cloneArgs(args)
+	blocked, reason := a.shouldBlockForOutOfScope("terminal_execute", args)
+	if !blocked {
+		t.Fatalf("Requirement 3.7: loopback MUST still block when scope is empty, got allow")
+	}
+	if reason == "" {
+		t.Errorf("expected non-empty rejection reason")
+	}
+	if !argsEqual(args, before) {
+		t.Errorf("args mutated: before=%v after=%v", before, args)
+	}
+}
+
+// TestShouldBlockForOutOfScope_AddNotePassThrough asserts the
+// scoped deterministic case 4 from design.md → "Exploratory Bug
+// Condition Checking → Test Cases" — an add_note call carrying
+// OOS-host text in `key` and `value` reaches the gate, the gate
+// recognises add_note as non-gated, and `key` / `value` reach the
+// handler byte-identical.
+//
+// Validates: Requirements 2.4, 3.9.
+func TestShouldBlockForOutOfScope_AddNotePassThrough(t *testing.T) {
+	a := &Agent{}
+	a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
+
+	args := map[string]string{
+		"key":   "leak_oos.example",
+		"value": "saw https://evil.example/dump",
+	}
+	before := cloneArgs(args)
+	blocked, reason := a.shouldBlockForOutOfScope("add_note", args)
+	if blocked {
+		t.Fatalf("add_note MUST bypass the gate, got blocked: %s", reason)
+	}
+	if !argsEqual(args, before) {
+		t.Fatalf("add_note args mutated:\n  before=%v\n  after =%v", before, args)
+	}
+	if got := args["key"]; got != "leak_oos.example" {
+		t.Errorf("key was rewritten: got %q", got)
+	}
+	if got := args["value"]; got != "saw https://evil.example/dump" {
+		t.Errorf("value was rewritten: got %q", got)
+	}
+}
+
+// TestShouldBlockForOutOfScope_ReportVulnerabilityLocalOrListener
+// pins the report_vulnerability belt-and-braces leg flipping to
+// the Local_Or_Listener_Host rule: target / endpoint pointing at
+// the operator's machine reject; pointing at a Public_OOS_Host
+// allow.
+//
+// Validates: Requirements 2.3, 3.4.
+func TestShouldBlockForOutOfScope_ReportVulnerabilityLocalOrListener(t *testing.T) {
+	a := &Agent{
+		localGuard: scopeguard.Config{BindAddr: "127.0.0.1", Port: 9000},
+	}
+	a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
+
+	cases := []struct {
+		name        string
+		args        map[string]string
+		wantBlocked bool
+	}{
+		{
+			name: "target=http://127.0.0.1 rejects",
+			args: map[string]string{
+				"title":    "Local-only finding",
+				"target":   "http://127.0.0.1",
+				"endpoint": "http://127.0.0.1/admin",
+				"severity": "high",
+			},
+			wantBlocked: true,
+		},
+		{
+			name: "target=https://oos.example allows",
+			args: map[string]string{
+				"title":    "Public OOS finding",
+				"target":   "https://oos.example",
+				"endpoint": "https://oos.example/dump",
+				"severity": "medium",
+			},
+			wantBlocked: false,
+		},
+		{
+			name: "endpoint=http://[::1]:8080/x rejects",
+			args: map[string]string{
+				"title":    "IPv6 loopback finding",
+				"target":   "https://pentest-ground.com",
+				"endpoint": "http://[::1]:8080/x",
+				"severity": "high",
+			},
+			wantBlocked: true,
+		},
+		{
+			name: "endpoint=https://oos.example/x allows",
+			args: map[string]string{
+				"title":    "Public OOS endpoint",
+				"target":   "https://pentest-ground.com",
+				"endpoint": "https://oos.example/x",
+				"severity": "medium",
+			},
+			wantBlocked: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			before := cloneArgs(tc.args)
+			blocked, reason := a.shouldBlockForOutOfScope("report_vulnerability", tc.args)
+			if blocked != tc.wantBlocked {
+				t.Fatalf("blocked = %v, want %v (reason=%q)", blocked, tc.wantBlocked, reason)
+			}
+			if !argsEqual(tc.args, before) {
+				t.Errorf("args mutated: before=%v after=%v", before, tc.args)
+			}
+			if blocked && reason == "" {
+				t.Errorf("blocked but reason empty")
+			}
+		})
+	}
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Bucket D PBT — additional property tests called out in design.md →
+// "Property-Based Tests" that aren't already implemented by Property
+// 1 / Property 2.
+
+// TestProperty_LocalOrListenerInvarianceUnderTokenizationShape pins
+// the sub-property: the same Local_Or_Listener_Host expressed five
+// ways (bare host / host:port / scheme://host / userinfo URL /
+// inside redirect query parameters) MUST reject identically.
+//
+// NOTE: This is the post-fix rejection-side analogue of
+// TestPreservation_LocalOrListenerInvarianceUnderTokenizationShape
+// (task 2). The preservation version asserts oracle-vs-production
+// agreement on shape invariance; this version asserts the
+// production guard alone rejects all five shapes after the
+// scope-guard-local-only fix. We keep them as siblings rather than
+// alias — the preservation test exercises the oracle path
+// independently and would be lost as a sanity check if folded into
+// this one.
+//
+// Validates: Requirements 3.1, 3.2, 3.3, 3.4.
+func TestProperty_LocalOrListenerInvarianceUnderTokenizationShape(t *testing.T) {
+	a := &Agent{
+		localGuard: scopeguard.Config{BindAddr: "127.0.0.1", Port: 9000},
+	}
+	a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
+
+	hosts := []string{
+		"127.0.0.1",
+		"10.0.0.1",
+		"192.168.1.1",
+		"169.254.169.254",
+	}
+	shapeBuilders := map[string]func(string) string{
+		"bare host":      func(h string) string { return "curl " + h },
+		"host:port":      func(h string) string { return "curl " + h + ":8080" },
+		"scheme://host":  func(h string) string { return "curl http://" + h },
+		"userinfo URL":   func(h string) string { return "curl http://user:pass@" + h },
+		"redirect query": func(h string) string { return "curl https://app.pentest-ground.com/redir?next=http://" + h },
+	}
+
+	for _, host := range hosts {
+		host := host
+		for shapeName, build := range shapeBuilders {
+			shapeName, build := shapeName, build
+			t.Run(host+"/"+shapeName, func(t *testing.T) {
+				args := map[string]string{"command": build(host)}
+				before := cloneArgs(args)
+				blocked, reason := a.shouldBlockForOutOfScope("terminal_execute", args)
+				if !blocked {
+					t.Fatalf("Local_Or_Listener_Host %s in shape %q must reject under post-fix rule, got allow", host, shapeName)
+				}
+				if reason == "" {
+					t.Errorf("blocked but reason empty for %s/%s", host, shapeName)
+				}
+				if !argsEqual(args, before) {
+					t.Errorf("args mutated: before=%v after=%v", before, args)
+				}
+			})
+		}
+	}
+}
+
+// TestProperty_DNSLookupCountIsOnePerHostShapedArg pins the
+// single-DNS-lookup contract from design.md → "DNS Lookup Semantics":
+// for every host-shaped argument that requires resolution, the guard
+// invokes scopeguard.LookupHost exactly once. IP literals skip DNS
+// entirely. The counter-wrapped resolver asserts the call count.
+//
+// Validates: Requirement 3.3, design.md → "DNS Lookup Semantics".
+func TestProperty_DNSLookupCountIsOnePerHostShapedArg(t *testing.T) {
+	a := &Agent{
+		localGuard: scopeguard.Config{BindAddr: "127.0.0.1", Port: 9000},
+	}
+	a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
+
+	t.Run("hostname triggers exactly one lookup", func(t *testing.T) {
+		var calls int
+		perHost := map[string]int{}
+		withScopeguardLookupHost(t, func(host string) ([]string, error) {
+			calls++
+			perHost[host]++
+			// Resolve to a public IP so the gate allows the call —
+			// this row is checking the lookup count contract, not
+			// the verdict.
+			return []string{"203.0.113.10"}, nil
+		})
+
+		args := map[string]string{"command": "curl https://oos.example/path"}
+		_, _ = a.shouldBlockForOutOfScope("terminal_execute", args)
+
+		if calls != 1 {
+			t.Fatalf("expected exactly 1 LookupHost call for one host-shaped arg, got %d (per-host=%v)", calls, perHost)
+		}
+		if perHost["oos.example"] != 1 {
+			t.Errorf("expected 1 lookup for oos.example, got %d (per-host=%v)", perHost["oos.example"], perHost)
+		}
+	})
+
+	t.Run("IP literal skips DNS entirely", func(t *testing.T) {
+		var calls int
+		withScopeguardLookupHost(t, func(host string) ([]string, error) {
+			calls++
+			return nil, errors.New("DNS should not have been invoked for an IP literal")
+		})
+
+		args := map[string]string{"command": "curl http://203.0.113.10/"}
+		_, _ = a.shouldBlockForOutOfScope("terminal_execute", args)
+
+		if calls != 0 {
+			t.Fatalf("expected 0 LookupHost calls for an IP literal, got %d", calls)
+		}
+	})
+
+	t.Run("two distinct host-shaped args trigger two lookups", func(t *testing.T) {
+		var calls int
+		perHost := map[string]int{}
+		withScopeguardLookupHost(t, func(host string) ([]string, error) {
+			calls++
+			perHost[host]++
+			return []string{"203.0.113.10"}, nil
+		})
+
+		args := map[string]string{
+			"command": "curl https://a.example/ && nmap b.example",
+		}
+		_, _ = a.shouldBlockForOutOfScope("terminal_execute", args)
+
+		if calls != 2 {
+			t.Fatalf("expected 2 LookupHost calls (one per distinct host-shaped arg), got %d (per-host=%v)", calls, perHost)
+		}
+		if perHost["a.example"] != 1 || perHost["b.example"] != 1 {
+			t.Errorf("expected one lookup each for a.example and b.example, got per-host=%v", perHost)
 		}
 	})
 }

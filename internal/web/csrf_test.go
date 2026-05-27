@@ -3,7 +3,9 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
 )
@@ -128,5 +130,86 @@ func TestAuthMiddleware_CSRFAllowed(t *testing.T) {
 	// CSRF passes, session check fails → 401, not 403.
 	if rr.Code == http.StatusForbidden {
 		t.Fatalf("CSRF gate fired on a legitimate same-origin request: %s", rr.Body.String())
+	}
+}
+
+// TestNewRoutes_CSRFGate asserts Property 25 of the design: every
+// mutating route in the new HTTP surface (POST/PUT/DELETE under
+// /api/providers/* and /api/auth/profiles/*) is rejected with HTTP
+// 403 + "CSRF check failed" when the request arrives from a
+// cross-site Origin, even when carrying a valid session cookie.
+// The CSRF gate must fire BEFORE the inner handler runs, so the
+// inner-handler invocation counter must remain zero.
+//
+// The test reuses the same authMiddleware production wiring uses
+// (the middleware itself enforces the CSRF gate before the session
+// check; see internal/web/server.go isCSRFSafe). We do not enroll a
+// session; the cross-site Origin is enough to short-circuit at the
+// CSRF layer regardless of cookie state.
+//
+// Validates: Requirements 12.5 (Property 25).
+func TestNewRoutes_CSRFGate(t *testing.T) {
+	resetAuthSessionsForTest()
+	// A real session token so the request would otherwise pass
+	// the auth check — the CSRF gate must still reject it.
+	authSessionsMu.Lock()
+	authSessions["csrf-sess"] = time.Now().Add(time.Hour)
+	authSessionsMu.Unlock()
+
+	cfg := minimalCfgForCSRF()
+	mw := authMiddleware(cfg)
+
+	type mutatingRoute struct {
+		method string
+		path   string
+	}
+	// Every mutating verb in the new surface (catalog CRUD,
+	// openclaw import, legacy migrate, profile CRUD, OAuth start
+	// / complete / refresh). The set MUST stay aligned with the
+	// dashboardRoutes slice in server.go so a future addition to
+	// either side surfaces here as a missed test cell.
+	routes := []mutatingRoute{
+		{http.MethodPost, "/api/providers"},
+		{http.MethodPut, "/api/providers/openai"},
+		{http.MethodDelete, "/api/providers/openai"},
+		{http.MethodPost, "/api/providers/import-openclaw"},
+		{http.MethodPost, "/api/providers/migrate-legacy"},
+		{http.MethodPost, "/api/auth/profiles/api-key"},
+		{http.MethodPost, "/api/auth/profiles/oauth/start"},
+		{http.MethodPost, "/api/auth/profiles/oauth/complete"},
+		{http.MethodPost, "/api/auth/profiles/openai:default/refresh"},
+		{http.MethodDelete, "/api/auth/profiles/openai:default"},
+	}
+
+	for _, route := range routes {
+		t.Run(route.method+" "+route.path, func(t *testing.T) {
+			innerCalls := 0
+			handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				innerCalls++
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			req := httptest.NewRequest(route.method, route.path, nil)
+			req.Host = "x.local"
+			// Cross-site Origin → CSRF reject regardless of cookie.
+			req.Header.Set("Origin", "http://attacker.tld")
+			// Add a valid session cookie so the failure mode
+			// is unambiguously the CSRF gate (and not the
+			// session gate).
+			req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "csrf-sess"})
+
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("status = %d body=%q, want 403", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), "CSRF check failed") {
+				t.Fatalf("body = %q, want CSRF check failed envelope", rr.Body.String())
+			}
+			if innerCalls != 0 {
+				t.Fatalf("inner handler ran %d times — CSRF gate should fire first", innerCalls)
+			}
+		})
 	}
 }

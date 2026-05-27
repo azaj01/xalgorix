@@ -11,6 +11,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -37,12 +38,15 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/xalgord/xalgorix/v4/internal/agent"
+	"github.com/xalgord/xalgorix/v4/internal/auth"
 	"github.com/xalgord/xalgorix/v4/internal/config"
 	"github.com/xalgord/xalgorix/v4/internal/llm"
+	"github.com/xalgord/xalgorix/v4/internal/providers"
 	"github.com/xalgord/xalgorix/v4/internal/resources"
 	"github.com/xalgord/xalgorix/v4/internal/safe"
 	"github.com/xalgord/xalgorix/v4/internal/sandbox"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
+	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 	"github.com/xalgord/xalgorix/v4/internal/tools/agentsgraph"
 	"github.com/xalgord/xalgorix/v4/internal/tools/browser"
 	"github.com/xalgord/xalgorix/v4/internal/tools/notes"
@@ -873,6 +877,16 @@ type ScanRequest struct {
 	ScanIntensity  string   `json:"scan_intensity"`  // active or passive testing/scanning
 	CompanyName    string   `json:"company_name"`    // report branding: company name
 	LogoPath       string   `json:"logo_path"`       // report branding: logo file path
+	// ProviderProfile is the optional "<provider>:<profileId>" key
+	// (e.g. "openai:default") that selects an Auth_Profile from
+	// Profile_Store for this scan. When set on a request from an
+	// Authenticated_Operator, resolveScanCredentials maps it to a
+	// (baseURL, auth_method, credentials) tuple at scan start. When
+	// empty, the existing legacy / catalog-default resolver path is
+	// used. Ad-hoc Model/APIKey/APIBase fields still take precedence
+	// per Requirement 11.4.
+	// Validates: Requirements 11.1, 11.2, 11.5.
+	ProviderProfile string `json:"provider_profile,omitempty"`
 	// Internal fields — `json:"-"` makes them un-settable from the wire.
 	// Critical: a client must not be able to set InstanceID to spoof
 	// broadcasts to another scan, or set IsResume to bypass the resume
@@ -1509,6 +1523,72 @@ func (s *Server) clearQueueStatePath(path string) {
 	}
 }
 
+// dashboardRoutes lists every URL pattern the dashboard mux
+// registers in NewServer.Start. It exists primarily as a test
+// surface so that the test in internal/web asserting
+// `/oauth/callback` is NOT mounted on the dashboard mux (R13.3)
+// has a single source of truth to consult — without it, that
+// invariant would have to be re-derived from the call sites in
+// Start every time the route surface changes.
+//
+// The slice is updated in lockstep with the mux.HandleFunc /
+// mux.Handle calls inside Server.Start; if a route is added or
+// removed there, the slice should be updated to match.
+//
+// Validates: Requirement 13.3 ("never registers `/oauth/callback`
+// on the dashboard mux"), Requirement 15.2 (existing routes
+// preserved unchanged).
+var dashboardRoutes = []string{
+	// Static + WebSocket roots (registered as catch-all and "/ws").
+	"/",
+	"/ws",
+
+	// Existing scan / status / report / settings surface (unchanged).
+	"/api/scan",
+	"/api/stop",
+	"/api/status",
+	"/api/findings/summary",
+	"/api/legacy-import/status",
+	"/api/scans",
+	"/api/scans/",
+	"/api/schedules",
+	"/api/schedules/",
+	"/api/upload-targets",
+	"/api/upload-instructions",
+	"/api/upload-logo",
+	"/uploads/logos/",
+	"/api/report/",
+	"/api/settings/rate-limit",
+	"/api/settings/agentmail",
+	"/api/settings/llm",
+	"/api/settings/environment",
+	"/api/queue/status",
+	"/api/queue/resume",
+	"/api/queue/clear",
+	"/api/version",
+	"/api/stop-notify",
+	"/api/instances",
+	"/api/instances/",
+	"/api/chat",
+
+	// Dashboard auth (login/logout/status). Distinct from the new
+	// /api/auth/profiles namespace below.
+	"/api/auth/login",
+	"/api/auth/logout",
+	"/api/auth/status",
+
+	// Provider catalog + auth profile routes (Wave E task 5.4).
+	"/api/providers",
+	"/api/providers/",
+	"/api/providers/migrate-legacy",
+	"/api/providers/migrate-legacy/status",
+	"/api/auth/profiles",
+	"/api/auth/profiles/api-key",
+	"/api/auth/profiles/oauth/start",
+	"/api/auth/profiles/oauth/complete",
+	"/api/auth/profiles/",
+}
+
 // Server is the web UI server.
 type Server struct {
 	cfg                  *config.Config
@@ -1555,6 +1635,37 @@ type Server struct {
 	legacyImportMu        sync.RWMutex
 	legacyImportCount     int
 	legacyImportDismissed bool
+
+	// catalog is the runtime-editable LLM provider catalog backing
+	// the GET/POST/PUT/DELETE /api/providers handlers (Wave E task
+	// 5.1) and the per-scan endpoint resolver (Wave E task 5.3).
+	// It is initialized in NewServer against
+	// ~/.xalgorix/data/providers.json. A nil value signals that
+	// initialization failed at startup; the catalog handlers
+	// surface that as HTTP 503 so the operator sees the dashboard
+	// degrade gracefully rather than crash. Validates: Requirement
+	// 1.1.
+	catalog *providers.Service
+
+	// profiles is the runtime-editable credential profile store
+	// backing /api/auth/profiles (Wave E task 5.2). Like catalog,
+	// it is initialized in NewServer and may be nil if startup
+	// failed. The catalog handlers in this task do not consult
+	// profiles directly, but the field is declared here so task 5.2
+	// can wire profile handlers without re-touching the Server
+	// shape. Validates: Requirement 4.1.
+	profiles *auth.Store
+
+	// oauthRegistry is the OAuth driver registry consulted by
+	// handleOAuthStart / handleOAuthComplete / handleProfileRefresh
+	// (Wave E task 5.2). It is wired in NewServer immediately
+	// after profiles via auth.RegisterDefaultDrivers so the four
+	// built-in flow handlers (pkce, device_code, setup_token,
+	// claude_cli_reuse) are available without further setup. A
+	// nil value mirrors the catalog/profiles fields: the OAuth
+	// handlers surface 503 so the rest of the dashboard keeps
+	// serving traffic. Validates: Requirements 6.x, 7.x, 8.x, 9.x.
+	oauthRegistry *auth.Registry
 }
 
 // NewServer creates a new web server.
@@ -1580,11 +1691,13 @@ func NewServer(cfg *config.Config, port int) *Server {
 		rateLimiter:          rl,
 		instances:            make(map[string]*ScanInstance),
 		queueResumeLaunching: make(map[string]bool),
-		postScanChatFn: func(cfg *config.Config, messages []llm.Message) (string, error) {
-			client := llm.NewClient(cfg)
-			client.SetContext(context.Background())
-			return client.Chat(messages)
-		},
+		// postScanChatFn is set BELOW, after srv has been
+		// allocated, so the closure can capture *srv and read
+		// srv.catalog / srv.profiles at call time. Those fields
+		// are populated later in NewServer when the catalog and
+		// profile stores load successfully; capturing the
+		// pointer keeps the closure valid even when those
+		// fields flip from nil to non-nil during construction.
 		schedules:    make(map[string]*ScanSchedule),
 		shutdownChan: make(chan struct{}),
 		// Buffered to length 1 so a non-blocking send from a terminating
@@ -1592,6 +1705,33 @@ func NewServer(cfg *config.Config, port int) *Server {
 		// is delivered to whichever waiter is currently parked in the
 		// admission select.
 		admissionWake: make(chan struct{}, 1),
+	}
+
+	// Wire postScanChatFn now that srv exists. The closure reads
+	// srv.catalog / srv.profiles at call time so the catalog
+	// branch engages once both stores load below — the values
+	// captured here are pointers, not snapshots, so a successful
+	// catalog load later in NewServer is observable on every
+	// subsequent invocation of postScanChatFn.
+	//
+	// Decision order matches llm.compositeResolver.Resolve
+	// exactly (catalog non-empty → catalogResolver; otherwise
+	// legacy when XALGORIX_LLM matches Legacy_Provider_Shape;
+	// otherwise *ConfigError surfaced to the caller). That is
+	// the contract Requirement 11.2 / Requirement 2.x require
+	// for /api/scan, and putting the same resolver behind every
+	// LLM call site keeps the chat-summary path consistent with
+	// the per-scan path. (Wave E task 5.4.)
+	srv.postScanChatFn = func(cfg *config.Config, messages []llm.Message) (string, error) {
+		opts := []llm.ResolverOption{}
+		if srv.catalog != nil && srv.profiles != nil {
+			opts = append(opts, llm.WithCatalog(srv.catalog, srv.profiles))
+		}
+		opts = append(opts, llm.WithLegacy(cfg))
+		resolver := llm.NewCompositeResolver(opts...)
+		client := llm.NewClient(cfg, llm.WithResolver(resolver))
+		client.SetContext(context.Background())
+		return client.Chat(messages)
 	}
 
 	// Import legacy data dir (pre-migration ~/xalgorix-data/) into the
@@ -1605,6 +1745,45 @@ func NewServer(cfg *config.Config, port int) *Server {
 	}
 	srv.legacyImportCount = imported
 	srv.legacyImportDismissed = false
+
+	// Provider catalog + auth profile store.
+	//
+	// Both stores are file-backed under ~/.xalgorix/data/. A failure
+	// here (permissions, corrupt JSON) is non-fatal — the dashboard
+	// still serves traffic, and the catalog/profile handlers surface
+	// the missing dependency as HTTP 503 so the operator can repair
+	// the file without losing access to the rest of the UI.
+	//
+	// providers.NewService treats a missing file as an empty catalog
+	// without creating it (Requirement 1.3); auth.NewStore likewise
+	// defers file creation until the first write. So the constructors
+	// are safe to invoke unconditionally on every start.
+	//
+	// Driver registration (PKCE / device-code / setup-token /
+	// claude-cli-reuse) lands in Wave E task 5.4 once the registry
+	// surface is finalized.
+	catalogPath := filepath.Join(dataDir, "providers.json")
+	if cat, err := providers.NewService(catalogPath); err != nil {
+		log.Printf("[providers] failed to load catalog at %s: %v (handlers will return 503)", catalogPath, err)
+	} else {
+		srv.catalog = cat
+		profilePath := filepath.Join(dataDir, "auth-profiles.json")
+		if store, err := auth.NewStore(profilePath, cat); err != nil {
+			log.Printf("[auth] failed to load profile store at %s: %v (profile handlers will return 503)", profilePath, err)
+		} else {
+			srv.profiles = store
+			// Wire the OAuth driver registry now that both
+			// catalog + profile store are live. Driver
+			// constructors in internal/auth are unexported,
+			// so RegisterDefaultDrivers is the single
+			// exported seam through which production code
+			// stands up the canonical four-driver registry.
+			// nil clock → registry uses realClock for the
+			// device-code poller. (Wave E task 5.2.)
+			srv.oauthRegistry = auth.NewRegistry(store, http.DefaultClient, nil)
+			auth.RegisterDefaultDrivers(srv.oauthRegistry, nil)
+		}
+	}
 
 	// Rebuild instances map from disk so dashboard shows historical scans on startup
 	srv.rebuildInstancesFromDisk()
@@ -1766,6 +1945,121 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/auth/login", s.handleLogin)
 	mux.HandleFunc("/api/auth/logout", s.handleLogout)
 	mux.HandleFunc("/api/auth/status", s.handleAuthStatus)
+
+	// ── Provider catalog + auth profile routes (Wave E task 5.4) ──
+	//
+	// All these routes mount on the same mux as the rest of /api/*,
+	// so they inherit:
+	//   • authMw  — Authenticated_Operator gate (R12.4) plus the
+	//               global isCSRFSafe check that wraps every
+	//               state-changing /api/* request (R12.5).
+	//   • rlMw    — the per-IP token-bucket rate limiter applied to
+	//               every API route.
+	//
+	// We deliberately do NOT register `/oauth/callback` here — the
+	// PKCE driver allocates its own ephemeral 127.0.0.1 listener
+	// per flow start (R13.1, R13.3). Putting the callback on the
+	// dashboard mux would expose it to CSRF and to any long-lived
+	// network exposure the operator chooses; the per-flow listener
+	// avoids both. The dashboardRoutes slice below is consulted in
+	// tests to assert this invariant continues to hold.
+	//
+	// Multi-method routes are dispatched by HTTP method via small
+	// adapters; each downstream handler still validates its own
+	// method so an unexpected verb returns 405 even when called
+	// through these adapters from a future entry point.
+	mux.HandleFunc("/api/providers", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			s.handleListProviders(w, r)
+		case http.MethodPost:
+			s.handleCreateProvider(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	// /api/providers/{id} (PUT/DELETE) and the special
+	// /api/providers/import-openclaw (POST) sub-route share a single
+	// trailing-slash registration because http.ServeMux dispatches
+	// every sub-path of "/api/providers/" through the same handler.
+	// /api/providers/migrate-legacy (POST) and
+	// /api/providers/migrate-legacy/status (GET) — the Wave G
+	// one-time legacy importer (see internal/web/migrate.go) — are
+	// routed through this same dispatcher to keep the catalog
+	// surface consolidated under one mux registration.
+	mux.HandleFunc("/api/providers/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/providers/import-openclaw":
+			s.handleImportOpenclaw(w, r)
+			return
+		case "/api/providers/migrate-legacy":
+			s.handleLegacyMigrate(w, r)
+			return
+		case "/api/providers/migrate-legacy/status":
+			s.handleLegacyMigrateStatus(w, r)
+			return
+		}
+		switch r.Method {
+		case http.MethodPut:
+			s.handleUpdateProvider(w, r)
+		case http.MethodDelete:
+			s.handleDeleteProvider(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/auth/profiles", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleListProfiles(w, r)
+	})
+	mux.HandleFunc("/api/auth/profiles/api-key", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleCreateAPIKeyProfile(w, r)
+	})
+	mux.HandleFunc("/api/auth/profiles/oauth/start", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleOAuthStart(w, r)
+	})
+	mux.HandleFunc("/api/auth/profiles/oauth/complete", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleOAuthComplete(w, r)
+	})
+	// /api/auth/profiles/{key}/refresh (POST) and
+	// /api/auth/profiles/{key} (DELETE) share the same trailing-slash
+	// dispatcher because http.ServeMux funnels every sub-path of
+	// "/api/auth/profiles/" through one handler. We branch on the
+	// "/refresh" suffix first; everything else is treated as the
+	// {key}-only DELETE path. Both /api/auth/profiles/api-key and
+	// /api/auth/profiles/oauth/{start,complete} are registered as
+	// exact-match patterns above so their longer-prefix dispatch
+	// wins over this trailing-slash handler.
+	mux.HandleFunc("/api/auth/profiles/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/refresh") {
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			s.handleProfileRefresh(w, r)
+			return
+		}
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleDeleteProfile(w, r)
+	})
 
 	// Wrap with auth middleware (outermost) then rate limiting
 	authMw := authMiddleware(s.cfg)
@@ -2038,6 +2332,32 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	normalizeScanRequestActivity(&req)
+
+	// R11.6 precondition check: if the request names a
+	// provider_profile, fail fast with HTTP 400 BEFORE spawning a
+	// scan goroutine. Other resolver errors are intentionally NOT
+	// surfaced here — they're either transient (file lock contention
+	// during a concurrent profile edit) or downstream concerns the
+	// LLM client's own resolver will report when it actually runs
+	// the request. This guard exists solely so a misspelled profile
+	// id never produces a "started" instance the operator then has
+	// to clean up.
+	if _, err := s.resolveScanCredentials(r.Context(), req, s.cfg); err != nil {
+		if errors.Is(err, errUnknownProviderProfile) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Non-sentinel resolver error (typically a transient
+		// flock contention or a profile race-deleted between
+		// the dashboard's profile-list fetch and the scan
+		// submission). M8: log so the error is visible at
+		// triage time rather than being silently swallowed; the
+		// LLM client's own resolver will surface a follow-up
+		// envelope at first chat call.
+		log.Printf("scan: precondition resolveScanCredentials returned non-sentinel error: %v", err)
+		// fall through — surface the error only when it is the
+		// canonical R11.6 sentinel.
+	}
 
 	// Apply LLM provider settings from web UI securely using a copy
 	scanCfg := *s.cfg // shallow copy
@@ -2733,6 +3053,16 @@ type scanSession struct {
 	reconMode         string               // active or passive reconnaissance
 	scanIntensity     string               // active or passive testing/scanning
 
+	// llmClient, when non-nil, is a pre-built llm.Client carrying
+	// a per-scan endpoint resolver derived from the originating
+	// ScanRequest.ProviderProfile (B1). executeScanSession threads
+	// it into agent.NewAgent via agent.WithLLMClient so the scan's
+	// outbound traffic actually uses the operator's chosen
+	// credentials. nil falls back to the agent's default
+	// llm.NewClient(cfg) construction, preserving the prior
+	// behavior for tests and CLI paths that have not opted in.
+	llmClient *llm.Client
+
 	// Wildcard lifecycle flags
 	skipNotesCleanup     bool   // when true, don't delete notes store on cleanup (discovery phase)
 	parentReportingCtxID string // stable context ID for accumulating vulns across wildcard subdomain scans
@@ -3190,10 +3520,24 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	sctx.Terminal.SetWorkDir(sess.scanDir)
 	sctx.Browser.SetSessionPath(sess.scanDir)
 
-	// 3. Create agent with session's config AND ScanContext
+	// 3. Create agent with session's config AND ScanContext.
+	// When the per-scan code path supplied a pre-resolved llm.Client
+	// (B1: provider_profile-aware endpoint), thread it through
+	// agent.WithLLMClient so the agent's outbound traffic actually
+	// uses the operator's chosen credentials. A nil llmClient falls
+	// back to the agent's default llm.NewClient(cfg) construction,
+	// preserving the legacy behavior for tests / CLI / call sites
+	// that have not opted in.
 	events := make(chan agent.Event, 512)
 	sess.events = events
-	agnt := agent.NewAgent(sess.cfg, "XalgorixAgent", events, sctx)
+	agentOpts := []any{sctx}
+	if sess.llmClient != nil {
+		agentOpts = append(agentOpts, agent.WithLLMClient(sess.llmClient))
+	}
+	agnt := agent.NewAgent(sess.cfg, "XalgorixAgent", events, scopeguard.Config{
+		BindAddr: s.cfg.BindAddr,
+		Port:     s.port,
+	}, agentOpts...)
 	agnt.SetPhaseRestrictions(sess.phases)
 	agnt.SetActivityPolicy(sess.reconMode, sess.scanIntensity, []string{sess.target, sess.parentTarget})
 	if sess.discoveryMode || isReconReportOnlyPhaseSelection(sess.phases) {
@@ -4214,6 +4558,7 @@ func (s *Server) runSingleTarget(_ context.Context, scanCfg *config.Config, req 
 		phases:          req.Phases,
 		reconMode:       req.ReconMode,
 		scanIntensity:   req.ScanIntensity,
+		llmClient:       s.scanLLMClientForRequest(req, scanCfg),
 	}
 	s.executeScanSession(sess)
 	if s.instanceInterrupted(req.InstanceID) {
@@ -4279,6 +4624,7 @@ func (s *Server) runDASTTarget(_ context.Context, scanCfg *config.Config, req Sc
 		phases:          req.Phases,
 		reconMode:       req.ReconMode,
 		scanIntensity:   req.ScanIntensity,
+		llmClient:       s.scanLLMClientForRequest(req, scanCfg),
 	}
 	s.executeScanSession(sess)
 	if s.instanceInterrupted(req.InstanceID) {
@@ -4384,6 +4730,7 @@ func (s *Server) runWildcardTarget(_ context.Context, scanCfg *config.Config, re
 			phases:           req.Phases,
 			reconMode:        req.ReconMode,
 			scanIntensity:    req.ScanIntensity,
+			llmClient:        s.scanLLMClientForRequest(req, scanCfg),
 		}
 		s.executeScanSession(discoverySess)
 		if s.instanceInterrupted(req.InstanceID) {
@@ -4624,6 +4971,7 @@ func (s *Server) runWildcardTarget(_ context.Context, scanCfg *config.Config, re
 				phases:               req.Phases,
 				reconMode:            req.ReconMode,
 				scanIntensity:        req.ScanIntensity,
+				llmClient:            s.scanLLMClientForRequest(req, scanCfg),
 			}
 			s.executeScanSession(subSess)
 			if s.instanceInterrupted(req.InstanceID) {
@@ -7262,189 +7610,17 @@ func (s *Server) sendSimpleEmbed(color int, title, description string) {
 	}()
 }
 
-// lookupHost is a package-level indirection over net.LookupHost so tests can
-// swap the resolver out and assert the per-call lookup count. The single call
-// site lives inside isBlockedTarget below; nothing else in this package
-// resolves DNS for self-listener / private-range checks.
-var lookupHost = net.LookupHost
-
-// isBlockedTarget checks whether a target resolves to a local, loopback, or internal
-// IP address — OR matches the running Xalgorix instance's bind address + port.
-// This prevents the agent from inadvertently scanning the host machine OR the
-// dashboard's own listener (which is reachable on a public IP when
-// XALGORIX_BIND=0.0.0.0). Both forms are blocked.
+// isBlockedTarget delegates to scopeguard.IsLocalOrListener, the
+// authoritative classifier for Local_Or_Listener_Host shared by the
+// web fetcher and the agent-side gate. Verdict for every target is
+// identical to the pre-relocation in-package implementation; the
+// shared package preserves the single-DNS-lookup-per-call contract
+// (Requirement 3.8 / design.md → "DNS Lookup Semantics").
 func (s *Server) isBlockedTarget(target string) bool {
-	// Strip scheme if present (http://127.0.0.1 → 127.0.0.1)
-	host := target
-	hostPort := ""
-	if u, err := url.Parse(target); err == nil && u.Host != "" {
-		host = u.Hostname()
-		hostPort = u.Port()
-	}
-	// Also handle host:port without scheme
-	if h, p, err := net.SplitHostPort(host); err == nil {
-		host = h
-		if hostPort == "" {
-			hostPort = p
-		}
-	}
-
-	// Self-listener guard. Block if the target's port matches our own
-	// listening port AND the host either matches our bind address, is
-	// any local address, or resolves to one. This catches the case where
-	// XALGORIX_BIND=0.0.0.0 and the operator types the public IP back
-	// in — the previous loopback-only check missed it.
-	//
-	// We capture portMatch here but defer the interface-address comparison
-	// until after the single DNS resolution below, so the same resolved IP
-	// set feeds both the self-listener check and the private-range check.
-	portMatch := false
-	if s != nil && hostPort != "" {
-		if portNum, err := strconv.Atoi(hostPort); err == nil && portNum == s.port {
-			portMatch = true
-			bind := strings.ToLower(strings.TrimSpace(s.cfg.BindAddr))
-			if bind == "" {
-				bind = "127.0.0.1"
-			}
-			lowerHost := strings.ToLower(strings.TrimSpace(host))
-			if lowerHost == bind || lowerHost == "0.0.0.0" || lowerHost == "::" {
-				return true
-			}
-		}
-	}
-
-	// Explicit textual matches (fast path)
-	lower := strings.ToLower(host)
-	if lower == "localhost" || lower == "0.0.0.0" || lower == "[::1]" || lower == "::1" {
-		return true
-	}
-
-	// Resolve the target host to one or more IPs exactly once for the
-	// remainder of this call. IP literals skip DNS entirely; otherwise a
-	// single net.LookupHost feeds every downstream check. An empty or
-	// failing resolution falls back to "allow" (matching prior behavior)
-	// so that unreachable hostnames are not blocked solely on lookup
-	// failure — the request will fail naturally further down the stack.
-	var resolvedIPs []net.IP
-	if ip := net.ParseIP(host); ip != nil {
-		resolvedIPs = []net.IP{ip}
-	} else {
-		addrs, err := lookupHost(host)
-		if err != nil || len(addrs) == 0 {
-			return false // can't resolve — let it through, will fail naturally
-		}
-		for _, a := range addrs {
-			if parsed := net.ParseIP(a); parsed != nil {
-				resolvedIPs = append(resolvedIPs, parsed)
-			}
-		}
-		if len(resolvedIPs) == 0 {
-			return false
-		}
-	}
-
-	// Self-listener interface check, gated by the port-match flag captured
-	// above. Uses the already-resolved IP set so we never issue a second
-	// DNS lookup. Covers the bind=0.0.0.0 + operator-types-public-IP loophole.
-	if portMatch && ipsMatchLocalInterface(resolvedIPs) {
-		return true
-	}
-
-	// Check blocked ranges across the entire resolved set: a single
-	// loopback/link-local/unspecified hit is enough to block.
-	for _, ip := range resolvedIPs {
-		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-			return true
-		}
-	}
-
-	// RFC 1918 private ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-	privateCIDRs := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"127.0.0.0/8",
-		"169.254.0.0/16", // link-local
-		"::1/128",
-		"fc00::/7",  // IPv6 unique local
-		"fe80::/10", // IPv6 link-local
-	}
-	parsedSubnets := make([]*net.IPNet, 0, len(privateCIDRs))
-	for _, cidr := range privateCIDRs {
-		_, subnet, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
-		parsedSubnets = append(parsedSubnets, subnet)
-	}
-	for _, ip := range resolvedIPs {
-		for _, subnet := range parsedSubnets {
-			if subnet.Contains(ip) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// ipsMatchLocalInterface returns true if any IP in the supplied slice
-// matches one of this machine's interface addresses. Issues a single
-// net.InterfaceAddrs call and walks ips × addrs so callers can resolve
-// a hostname once and reuse the result for every downstream check.
-func ipsMatchLocalInterface(ips []net.IP) bool {
-	if len(ips) == 0 {
-		return false
-	}
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return false
-	}
-	for _, ip := range ips {
-		if ip == nil {
-			continue
-		}
-		for _, a := range addrs {
-			var aIP net.IP
-			switch v := a.(type) {
-			case *net.IPNet:
-				aIP = v.IP
-			case *net.IPAddr:
-				aIP = v.IP
-			}
-			if aIP == nil {
-				continue
-			}
-			if aIP.Equal(ip) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// ipMatchesLocalInterface walks every configured interface address and
-// returns true if any of them equals the supplied IP.
-func ipMatchesLocalInterface(ip net.IP) bool {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return false
-	}
-	for _, a := range addrs {
-		var aIP net.IP
-		switch v := a.(type) {
-		case *net.IPNet:
-			aIP = v.IP
-		case *net.IPAddr:
-			aIP = v.IP
-		}
-		if aIP == nil {
-			continue
-		}
-		if aIP.Equal(ip) {
-			return true
-		}
-	}
-	return false
+	return scopeguard.IsLocalOrListener(scopeguard.Config{
+		BindAddr: s.cfg.BindAddr,
+		Port:     s.port,
+	}, target)
 }
 
 // severityMeetsThreshold returns true if the vuln severity is at or above the minimum

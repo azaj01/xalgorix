@@ -30,6 +30,8 @@ import {
   useUpdateSchedule,
   useDeleteSchedule,
   useTriggerSchedule,
+  useAuthProfiles,
+  useProviders,
 } from "@/api/queries";
 import { cn, menuContentClass, menuItemClass } from "@/lib/utils";
 import type { ScanSchedule } from "@/types/api";
@@ -73,6 +75,11 @@ export default function SchedulesPage() {
   const [scanIntensity, setScanIntensity] = useState<ActivityMode>("active");
   const [instruction, setInstruction] = useState("");
   const [model, setModel] = useState("");
+  // Optional "<provider>:<profileId>" key naming a stored AuthProfile
+  // (provider-catalog-and-oauth, R11.1, R14.4). Empty string means
+  // "let the server pick" — don't send provider_profile at trigger
+  // time and the legacy / catalog-default path applies.
+  const [providerProfile, setProviderProfile] = useState("");
   const [companyName, setCompanyName] = useState("");
   const [logoPath, setLogoPath] = useState("");
   const [logoFileName, setLogoFileName] = useState("");
@@ -94,6 +101,26 @@ export default function SchedulesPage() {
     return list;
   }, [data, q]);
 
+  // Provider profile picker source. Mirrors new-scan.tsx — we look up
+  // each profile's catalog entry to render `displayName · profileId`.
+  // When neither query has loaded yet the picker collapses to the
+  // single "Server default" option.
+  const profilesQuery = useAuthProfiles();
+  const catalogQuery = useProviders();
+  const profileOptions = useMemo(() => {
+    const profiles = profilesQuery.data ?? [];
+    const catalog = catalogQuery.data ?? [];
+    const byID = new Map(catalog.map((e) => [e.id, e]));
+    return profiles.map((p) => {
+      const entry = byID.get(p.provider);
+      const display = entry?.displayName ?? p.provider;
+      return {
+        value: `${p.provider}:${p.profileId}`,
+        label: `${display} · ${p.profileId}`,
+      };
+    });
+  }, [profilesQuery.data, catalogQuery.data]);
+
   // Open dialog for new schedule
   function handleNewSchedule() {
     setEditingSchedule(null);
@@ -110,6 +137,7 @@ export default function SchedulesPage() {
     setLogoFileName("");
     setDiscordWebhook("");
     setSeverityFilter([]);
+    setProviderProfile("");
     setFormError(null);
     setDialogOpen(true);
   }
@@ -133,6 +161,7 @@ export default function SchedulesPage() {
     setLogoFileName(sch.logo_path ? "Uploaded logo" : "");
     setDiscordWebhook(sch.discord_webhook || "");
     setSeverityFilter(sch.severity_filter || []);
+    setProviderProfile(sch.provider_profile || "");
     setFormError(null);
     setDialogOpen(true);
   }
@@ -221,6 +250,7 @@ export default function SchedulesPage() {
       scan_intensity: scanIntensity,
       instruction: instruction.trim() || undefined,
       model: model || undefined,
+      provider_profile: providerProfile || undefined,
       company_name: companyName.trim() || undefined,
       logo_path: logoPath || undefined,
       discord_webhook: discordWebhook.trim() || undefined,
@@ -454,28 +484,29 @@ export default function SchedulesPage() {
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label>Model Override</Label>
+                <Label>Provider profile</Label>
                 <Select
-                  value={model || "default"}
-                  onValueChange={(v) => setModel(v === "default" ? "" : v)}
+                  value={providerProfile || "default"}
+                  onValueChange={(v) =>
+                    setProviderProfile(v === "default" ? "" : v)
+                  }
                 >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="default">Server default</SelectItem>
-                    <SelectItem value="openai/gpt-5">openai/gpt-5</SelectItem>
-                    <SelectItem value="openai/gpt-5-mini">
-                      openai/gpt-5-mini
-                    </SelectItem>
-                    <SelectItem value="anthropic/claude-opus-4.6">
-                      anthropic/claude-opus-4.6
-                    </SelectItem>
-                    <SelectItem value="google/gemini-3-flash">
-                      google/gemini-3-flash
-                    </SelectItem>
+                    {profileOptions.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
+                <p className="text-[11px] text-muted-foreground">
+                  Pick a stored credential profile to run this schedule
+                  under. Manage profiles under Settings → Providers.
+                </p>
               </div>
             </div>
 

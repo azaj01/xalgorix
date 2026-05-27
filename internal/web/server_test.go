@@ -22,6 +22,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/config"
 	"github.com/xalgord/xalgorix/v4/internal/llm"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
+	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
 )
 
@@ -491,7 +492,7 @@ func TestHandleChat_RoutesRunningInstanceByInstanceID(t *testing.T) {
 	s := newTestServer(t, nil)
 	events := make(chan agent.Event, 4)
 	sctx := scanctx.New("chat-running", t.TempDir())
-	agnt := agent.NewAgent(s.cfg, "test-agent", events, sctx)
+	agnt := agent.NewAgent(s.cfg, "test-agent", events, scopeguard.Config{BindAddr: "127.0.0.1", Port: 0}, sctx)
 	inst := &ScanInstance{
 		ID:      "inst-running",
 		Targets: "https://running.test",
@@ -608,7 +609,7 @@ func TestHandleChat_WithoutInstanceIDIgnoresStaleFinishedAgent(t *testing.T) {
 	s := newTestServer(t, &config.Config{RateLimitRequests: 60, RateLimitWindow: 60})
 	events := make(chan agent.Event, 4)
 	sctx := scanctx.New("stale-agent", t.TempDir())
-	agnt := agent.NewAgent(s.cfg, "stale-agent", events, sctx)
+	agnt := agent.NewAgent(s.cfg, "stale-agent", events, scopeguard.Config{BindAddr: "127.0.0.1", Port: 0}, sctx)
 	t.Cleanup(func() {
 		agnt.Stop()
 		sctx.Close()
@@ -1975,16 +1976,17 @@ func TestInstanceAction_GetAndStopSpecificInstance(t *testing.T) {
 }
 
 
-// withStubLookupHost swaps the package-level lookupHost shim for the
-// duration of a single test. Restoration runs via t.Cleanup so every
-// test exits with the original net.LookupHost binding in place,
-// regardless of failure or skip. The test functions below MUST NOT call
-// t.Parallel() because lookupHost is package-level state.
+// withStubLookupHost swaps the package-level scopeguard.LookupHost
+// shim for the duration of a single test. Restoration runs via
+// t.Cleanup so every test exits with the original net.LookupHost
+// binding in place, regardless of failure or skip. The test functions
+// below MUST NOT call t.Parallel() because scopeguard.LookupHost is
+// package-level state.
 func withStubLookupHost(t *testing.T, stub func(string) ([]string, error)) {
 	t.Helper()
-	prev := lookupHost
-	lookupHost = stub
-	t.Cleanup(func() { lookupHost = prev })
+	prev := scopeguard.LookupHost
+	scopeguard.LookupHost = stub
+	t.Cleanup(func() { scopeguard.LookupHost = prev })
 }
 
 // TestIsBlockedTarget_SingleLookup asserts that isBlockedTarget invokes
@@ -2087,4 +2089,335 @@ func TestIsBlockedTarget_DNSFailureAllows(t *testing.T) {
 			t.Fatalf("lookupHost calls = %d, want 1", calls)
 		}
 	})
+}
+
+
+// ───────────────────────────────────────────────────────────────────
+// Preservation property tests (spec: scope-guard-local-only, task 2).
+//
+// Property 2 (web side): for every host-shaped argument X the
+// preservation partition exercises, oracleIsBlockedTarget(X) ==
+// (*Server).isBlockedTarget(X). The oracle (oracleIsBlockedTarget,
+// captured in scope_oracle_test.go) is byte-frozen against today's
+// production isBlockedTarget. On unfixed code the assertion is
+// tautological. After task 3.2 reduces the production function to a
+// one-line scopeguard.IsLocalOrListener delegation, the same property
+// pins behavior preservation across the web/scopeguard refactor
+// (Requirement 3.8).
+//
+// DNS lookup count sub-property: the production isBlockedTarget
+// guarantees a single net.LookupHost call per non-IP-literal target
+// (design.md → "DNS Lookup Semantics"). The frozen oracle MUST do
+// the same, otherwise the per-call cost would have already drifted
+// pre-fix. Both indirections are wrapped with a counter and
+// asserted equal at one apiece.
+
+// withOracleLookupHostWeb swaps oracleLookupHost (the web oracle's
+// frozen resolver indirection) for the duration of a single test.
+// Restoration runs via t.Cleanup so the original binding is
+// preserved on every exit path.
+func withOracleLookupHostWeb(t *testing.T, stub func(string) ([]string, error)) {
+	t.Helper()
+	prev := oracleLookupHost
+	oracleLookupHost = stub
+	t.Cleanup(func() { oracleLookupHost = prev })
+}
+
+// webPreservationRow is one ¬C(X) input the web preservation
+// property exercises. cell tags which partition cell the row
+// belongs to so the test output names which preservation
+// requirement is being hit when a row fails post-fix.
+type webPreservationRow struct {
+	cell    string // partition cell name from task 2
+	name    string
+	target  string
+	wantDNS bool // true if the target must trigger a DNS lookup
+	// stubResolution is the value the injected resolver returns for
+	// the target hostname. Empty means "no resolver swap needed"
+	// (the row uses an IP literal or short-circuits before DNS).
+	stubResolution []string
+}
+
+// webPreservationRows lists the ¬C(X) inputs for the web-side
+// preservation property. The cells map to task 2's partition
+// (Local_Or_Listener_Host literals, hostnames resolving to a
+// private IP, hostnames resolving to a public IP, IP literals,
+// and the empty-host edge case isBlockedTarget already handles).
+func webPreservationRows() []webPreservationRow {
+	return []webPreservationRow{
+		// ── Cell 1 (a): Local_Or_Listener_Host literal ────────────
+		{cell: "local-literal", name: "loopback ipv4", target: "http://127.0.0.1/admin"},
+		{cell: "local-literal", name: "loopback ipv4 with port", target: "http://127.0.0.1:9000/x"},
+		{cell: "local-literal", name: "localhost name", target: "http://localhost/x"},
+		{cell: "local-literal", name: "ipv6 loopback bracket", target: "http://[::1]:8080/"},
+		{cell: "local-literal", name: "rfc1918 10/8", target: "http://10.0.0.1/"},
+		{cell: "local-literal", name: "rfc1918 172.16/12", target: "http://172.16.5.5/"},
+		{cell: "local-literal", name: "rfc1918 192.168/16", target: "http://192.168.1.1/"},
+		{cell: "local-literal", name: "link-local ipv4 169.254", target: "http://169.254.169.254/latest/meta-data/"},
+		{cell: "local-literal", name: "ipv6 link-local fe80", target: "http://[fe80::1]/"},
+		{cell: "local-literal", name: "ipv6 unique-local fc00", target: "http://[fc00::1]/"},
+		{cell: "local-literal", name: "unspecified 0.0.0.0", target: "http://0.0.0.0/"},
+
+		// ── Cell 1 (b): hostname → private IP ─────────────────────
+		{
+			cell:           "hostname-resolves-private",
+			name:           "hostname resolves to 10.0.0.5",
+			target:         "https://internal.example/",
+			wantDNS:        true,
+			stubResolution: []string{"10.0.0.5"},
+		},
+		{
+			cell:           "hostname-resolves-private",
+			name:           "hostname resolves to 169.254.169.254",
+			target:         "https://metadata.example/",
+			wantDNS:        true,
+			stubResolution: []string{"169.254.169.254"},
+		},
+		{
+			cell:           "hostname-resolves-private",
+			name:           "hostname resolves to ::1",
+			target:         "https://lb6.example/",
+			wantDNS:        true,
+			stubResolution: []string{"::1"},
+		},
+
+		// ── Cell 3: In-scope (public hostname / public IP) ────────
+		// Both implementations allow.
+		{
+			cell:           "public-host",
+			name:           "hostname resolves to public IP",
+			target:         "https://example.com/",
+			wantDNS:        true,
+			stubResolution: []string{"93.184.216.34"},
+		},
+		{
+			cell:           "public-host",
+			name:           "public IP literal",
+			target:         "http://203.0.113.10/",
+			wantDNS:        false,
+		},
+
+		// ── DNS edge: failing lookup falls back to allow ──────────
+		{
+			cell:           "dns-failure",
+			name:           "lookup error",
+			target:         "https://nope.example/",
+			wantDNS:        true,
+			stubResolution: nil, // signals stub should error
+		},
+	}
+}
+
+// TestPreservation_WebGuardMatchesOracle pins Property 2 on the web
+// side. Asserts oracleIsBlockedTarget(target) ==
+// (*Server).isBlockedTarget(target) for every preservation row.
+//
+// On unfixed code the oracle is byte-identical to production so the
+// equality is tautological. After task 3.2 reduces production to a
+// one-line scopeguard.IsLocalOrListener delegation, this property
+// catches any drift introduced by the refactor (Requirement 3.8).
+//
+// Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.8.
+func TestPreservation_WebGuardMatchesOracle(t *testing.T) {
+	for _, row := range webPreservationRows() {
+		row := row
+		t.Run(row.cell+"/"+row.name, func(t *testing.T) {
+			s := newTestServer(t, nil)
+
+			// Stub both the oracle's resolver and the production
+			// resolver with the same response so the two
+			// implementations see identical inputs.
+			stub := func(host string) ([]string, error) {
+				if row.stubResolution == nil && row.wantDNS {
+					return nil, errors.New("simulated NXDOMAIN")
+				}
+				return row.stubResolution, nil
+			}
+			withOracleLookupHostWeb(t, stub)
+			withStubLookupHost(t, stub)
+
+			oracleVerdict := oracleIsBlockedTarget(s, row.target)
+			prodVerdict := s.isBlockedTarget(row.target)
+
+			if oracleVerdict != prodVerdict {
+				t.Fatalf("verdict mismatch for %q: oracle=%v production=%v",
+					row.target, oracleVerdict, prodVerdict)
+			}
+		})
+	}
+}
+
+// TestPreservation_WebGuardSingleLookupCount pins the DNS lookup
+// count sub-property: every host-shaped argument that requires DNS
+// triggers exactly one lookup per call against the production
+// resolver. The oracle preserves the same property — its frozen body
+// keeps the single-lookup semantics identical to production today
+// and across the spec.
+//
+// Validates: Requirements 3.3, 3.8 (and design.md → "DNS Lookup
+// Semantics").
+func TestPreservation_WebGuardSingleLookupCount(t *testing.T) {
+	for _, row := range webPreservationRows() {
+		row := row
+		if !row.wantDNS {
+			continue
+		}
+		t.Run(row.cell+"/"+row.name, func(t *testing.T) {
+			s := newTestServer(t, nil)
+
+			oracleR := newPreservationCounterResolverWeb(func(host string) ([]string, error) {
+				if row.stubResolution == nil {
+					return nil, errors.New("simulated NXDOMAIN")
+				}
+				return row.stubResolution, nil
+			})
+			prodR := newPreservationCounterResolverWeb(func(host string) ([]string, error) {
+				if row.stubResolution == nil {
+					return nil, errors.New("simulated NXDOMAIN")
+				}
+				return row.stubResolution, nil
+			})
+			withOracleLookupHostWeb(t, oracleR.lookup)
+			withStubLookupHost(t, prodR.lookup)
+
+			_ = oracleIsBlockedTarget(s, row.target)
+			_ = s.isBlockedTarget(row.target)
+
+			if oracleR.calls != 1 {
+				t.Errorf("oracle DNS calls = %d, want exactly 1 per host-shaped arg", oracleR.calls)
+			}
+			if prodR.calls != 1 {
+				t.Errorf("production DNS calls = %d, want exactly 1 per host-shaped arg", prodR.calls)
+			}
+		})
+	}
+}
+
+// preservationCounterResolverWeb wraps a stub resolver with a
+// per-host call counter so the DNS-lookup-count sub-property can
+// assert exactly one resolution per host-shaped argument. A
+// dedicated type lives in the web package to avoid pulling in the
+// agent package's identically-named helper across the package
+// boundary.
+type preservationCounterResolverWeb struct {
+	calls   int
+	perHost map[string]int
+	stub    func(string) ([]string, error)
+}
+
+func newPreservationCounterResolverWeb(stub func(string) ([]string, error)) *preservationCounterResolverWeb {
+	return &preservationCounterResolverWeb{
+		perHost: make(map[string]int),
+		stub:    stub,
+	}
+}
+
+func (r *preservationCounterResolverWeb) lookup(host string) ([]string, error) {
+	r.calls++
+	r.perHost[host]++
+	return r.stub(host)
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Integration cross-check (spec: scope-guard-local-only, task 3.9).
+//
+// Test 5 — Web-fetcher cross-check
+// ───────────────────────────────────────────────────────────────────
+
+// TestIntegration_WebFetcherCrossCheckMatchesAgentGuardOracle pins
+// Requirement 3.8 end-to-end: for the same set of targets the agent
+// guard saw (one Local_Or_Listener_Host, one Public_OOS_Host, one
+// in-scope, one self-listener), the web fetcher's
+// (*Server).isBlockedTarget verdict matches the captured oracle's
+// verdict on byte-identical inputs. The shared classifier
+// (scopeguard.IsLocalOrListener) is the structural reason the two
+// can never drift; this test is the runtime cross-check.
+//
+// "End-to-end web-fetcher run" here means: invoke
+// (*Server).isBlockedTarget on each target the way the production
+// fetcher does (server.go:4020 in runMultiScan filters with the same
+// call), and assert the verdict matches oracleIsBlockedTarget on the
+// same input. The oracle is byte-frozen against the pre-fix
+// production isBlockedTarget body (internal/web/scope_oracle_test.go),
+// so this test catches any drift introduced by the
+// scopeguard.IsLocalOrListener delegation in 3.2.
+//
+// Validates: Requirement 3.8.
+func TestIntegration_WebFetcherCrossCheckMatchesAgentGuardOracle(t *testing.T) {
+	const listenerPort = 9000
+
+	// Server is constructed via NewServer with port = listenerPort
+	// so the self-listener row exercises the bind:port pairing rule
+	// (BindAddr defaults to "127.0.0.1" via the per-test config).
+	s := newTestServer(t, &config.Config{
+		BindAddr:          "127.0.0.1",
+		RateLimitRequests: 60,
+		RateLimitWindow:   60,
+	})
+	s.port = listenerPort
+
+	// Inject the same deterministic resolution into both indirections
+	// so the oracle and the production guard see identical DNS state.
+	// `pentest-ground.com` resolves to a public IP, `oos.example` to
+	// another public IP — both must allow under either implementation.
+	stub := func(host string) ([]string, error) {
+		switch host {
+		case "pentest-ground.com":
+			return []string{"203.0.113.42"}, nil
+		case "oos.example":
+			return []string{"198.51.100.7"}, nil
+		}
+		return nil, errors.New("unexpected host: " + host)
+	}
+	withStubLookupHost(t, stub)
+	withOracleLookupHostWeb(t, stub)
+
+	cases := []struct {
+		name        string
+		category    string // task 3.9 partition cell label
+		target      string
+		wantBlocked bool
+	}{
+		{
+			name:        "Local_Or_Listener_Host: loopback literal",
+			category:    "Local_Or_Listener_Host",
+			target:      "http://127.0.0.1/admin",
+			wantBlocked: true,
+		},
+		{
+			name:        "Public_OOS_Host: oos.example resolves to public IP",
+			category:    "Public_OOS_Host",
+			target:      "https://oos.example/dump",
+			wantBlocked: false,
+		},
+		{
+			name:        "in-scope: pentest-ground.com resolves to public IP",
+			category:    "in-scope",
+			target:      "https://pentest-ground.com/",
+			wantBlocked: false,
+		},
+		{
+			name:        "self-listener: 127.0.0.1:listenerPort",
+			category:    "self-listener",
+			target:      "http://127.0.0.1:9000/dashboard",
+			wantBlocked: true,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.category+"/"+tc.name, func(t *testing.T) {
+			oracleVerdict := oracleIsBlockedTarget(s, tc.target)
+			prodVerdict := s.isBlockedTarget(tc.target)
+
+			if oracleVerdict != prodVerdict {
+				t.Fatalf("Requirement 3.8: web-guard drift detected for %q\n  oracle    = %v\n  production = %v",
+					tc.target, oracleVerdict, prodVerdict)
+			}
+			if prodVerdict != tc.wantBlocked {
+				t.Fatalf("expected blocked=%v for %q (category=%s), got %v",
+					tc.wantBlocked, tc.target, tc.category, prodVerdict)
+			}
+		})
+	}
 }

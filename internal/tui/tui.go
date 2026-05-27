@@ -11,6 +11,7 @@ import (
 
 	"github.com/xalgord/xalgorix/v4/internal/agent"
 	"github.com/xalgord/xalgorix/v4/internal/config"
+	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
 )
 
@@ -177,7 +178,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) startAgent() tea.Cmd {
 	m.events = make(chan agent.Event, 512)
-	m.ag = agent.NewAgent(m.cfg, "XalgorixAgent", m.events)
+	// TUI runs without the dashboard listener, so the localGuard's
+	// listener-port rule is dormant. Default BindAddr ("127.0.0.1") and
+	// Port (0) keep loopback / RFC1918 / link-local rejection active.
+	m.ag = agent.NewAgent(m.cfg, "XalgorixAgent", m.events, scopeguard.Config{BindAddr: "127.0.0.1", Port: 0})
 	m.agentRunning = true
 
 	m.chatLog = append(m.chatLog,
@@ -568,7 +572,10 @@ func RunCLI(cfg *config.Config, targets []string, instruction string) {
 	fmt.Println()
 
 	events := make(chan agent.Event, 256)
-	ag := agent.NewAgent(cfg, "XalgorixAgent", events)
+	// CLI mode has no dashboard listener; localGuard defaults keep the
+	// loopback / RFC1918 / link-local rejection active without firing
+	// the listener-port rule.
+	ag := agent.NewAgent(cfg, "XalgorixAgent", events, scopeguard.Config{BindAddr: "127.0.0.1", Port: 0})
 
 	done := make(chan struct{})
 	go func() {
