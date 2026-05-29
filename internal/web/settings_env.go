@@ -330,14 +330,29 @@ func (s *Server) applyCatalogLLMSettings(ctx context.Context, req llmSettingsReq
 	}
 
 	// Legacy env-var sync. Always written when the operator
-	// supplied a model so a fresh-out-of-the-tab "openai/gpt-5"
-	// keeps the legacy path runnable even before the catalog
-	// branch picks up.
+	// supplied a model so the legacy path stays runnable.
 	if model := strings.TrimSpace(req.Model); model != "" {
 		updates["XALGORIX_LLM"] = model
 	}
-	if base := strings.TrimSpace(req.APIBase); base != "" {
-		updates["XALGORIX_API_BASE"] = base
+
+	// Legacy env-var sync: XALGORIX_API_BASE.
+	// The WebUI sends apiBase only for the "custom" provider; for
+	// catalog providers it sends apiBaseOverride instead. Fall
+	// through: req.APIBase → req.APIBaseOverride → catalog entry
+	// BaseURL, so switching provider always updates the env file.
+	{
+		base := strings.TrimSpace(req.APIBase)
+		if base == "" {
+			base = strings.TrimSpace(req.APIBaseOverride)
+		}
+		if base == "" && provider != "" && s.catalog != nil {
+			if entry, ok, err := s.catalog.Get(ctx, provider); err == nil && ok {
+				base = strings.TrimSpace(entry.BaseURL)
+			}
+		}
+		if base != "" {
+			updates["XALGORIX_API_BASE"] = base
+		}
 	}
 	if !isMaskedSettingValue(req.APIKey) && strings.TrimSpace(req.APIKey) != "" {
 		updates["XALGORIX_API_KEY"] = strings.TrimSpace(req.APIKey)
