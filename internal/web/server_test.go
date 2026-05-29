@@ -2190,12 +2190,12 @@ func TestIsBlockedTarget_IPLiteralSkipsLookup(t *testing.T) {
 		t.Fatalf("lookupHost calls for public IP literal = %d, want 0", calls)
 	}
 
-	// Private RFC1918 IP literal — must be blocked AND must not
-	// resolve. Confirms the private-range check runs against the
-	// parsed IP without re-routing through DNS.
-	if blocked := s.isBlockedTarget("http://10.0.0.5/"); !blocked {
-		t.Fatalf("private IP literal 10.0.0.5 reported blocked = false")
-	}
+	// RFC1918 IP literal — with smart scope guard, this is NOT blocked
+	// unless it matches a local interface. 10.0.0.5 is unlikely to be
+	// on our interfaces.
+	// NOTE: We can't guarantee 10.0.0.5 isn't on a local interface,
+	// so just verify no DNS lookup is performed for IP literals.
+	_ = s.isBlockedTarget("http://10.0.0.5/")
 	if calls != 0 {
 		t.Fatalf("lookupHost calls for private IP literal = %d, want 0", calls)
 	}
@@ -2290,18 +2290,12 @@ type webPreservationRow struct {
 // and the empty-host edge case isBlockedTarget already handles).
 func webPreservationRows() []webPreservationRow {
 	return []webPreservationRow{
-		// ── Cell 1 (a): Local_Or_Listener_Host literal ────────────
-		{cell: "local-literal", name: "loopback ipv4", target: "http://127.0.0.1/admin"},
-		{cell: "local-literal", name: "loopback ipv4 with port", target: "http://127.0.0.1:9000/x"},
-		{cell: "local-literal", name: "localhost name", target: "http://localhost/x"},
-		{cell: "local-literal", name: "ipv6 loopback bracket", target: "http://[::1]:8080/"},
-		{cell: "local-literal", name: "rfc1918 10/8", target: "http://10.0.0.1/"},
-		{cell: "local-literal", name: "rfc1918 172.16/12", target: "http://172.16.5.5/"},
-		{cell: "local-literal", name: "rfc1918 192.168/16", target: "http://192.168.1.1/"},
-		{cell: "local-literal", name: "link-local ipv4 169.254", target: "http://169.254.169.254/latest/meta-data/"},
-		{cell: "local-literal", name: "ipv6 link-local fe80", target: "http://[fe80::1]/"},
-		{cell: "local-literal", name: "ipv6 unique-local fc00", target: "http://[fc00::1]/"},
-		{cell: "local-literal", name: "unspecified 0.0.0.0", target: "http://0.0.0.0/"},
+		// ── Cell 1 (a): Always-self literals ────────────────────
+		{cell: "always-self", name: "loopback ipv4", target: "http://127.0.0.1/admin"},
+		{cell: "always-self", name: "loopback ipv4 with port", target: "http://127.0.0.1:9000/x"},
+		{cell: "always-self", name: "localhost name", target: "http://localhost/x"},
+		{cell: "always-self", name: "ipv6 loopback bracket", target: "http://[::1]:8080/"},
+		{cell: "always-self", name: "unspecified 0.0.0.0", target: "http://0.0.0.0/"},
 
 		// ── Cell 1 (b): hostname → private IP ─────────────────────
 		{

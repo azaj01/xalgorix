@@ -8,13 +8,29 @@
 // pulling in the web package. Its single semantic entry point is
 // IsLocalOrListener, which classifies a target string (bare host,
 // host:port, scheme://host[:port][/path], or [ipv6][:port]) against
-// the operator's listener identity (Config) and a fixed table of
-// private/loopback/link-local/ULA CIDRs.
+// the operator's listener identity (Config) and the machine's actual
+// network interfaces.
 //
-// Centralising the classifier here makes Requirement 3.8 of the
-// scope-guard-local-only bugfix structurally true: the web guard and
-// the agent guard literally call the same function, so the verdict
-// for any input is identical by construction.
+// DESIGN PRINCIPLE: only block IPs that provably belong to the
+// operator's own machine. Do NOT blanket-block entire private ranges
+// (RFC1918, link-local) — the agent is a security scanner that needs
+// to test SSRF payloads like 169.254.169.254 (cloud metadata) and
+// internal IPs that belong to the TARGET, not the operator.
+//
+// What we block:
+//   - Loopback addresses (127.0.0.0/8, ::1) — always self
+//   - Unspecified addresses (0.0.0.0, ::) — always self
+//   - "localhost" hostname — always self
+//   - IPs matching any local network interface — the operator's machine
+//   - Self-listener textual match (bind addr + port)
+//
+// What we ALLOW (that the old code incorrectly blocked):
+//   - RFC1918 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) — unless
+//     they match a local interface
+//   - Link-local (169.254.0.0/16) including 169.254.169.254 cloud
+//     metadata — unless they match a local interface
+//   - IPv6 ULA (fc00::/7) and link-local (fe80::/10) — unless they
+//     match a local interface
 package scopeguard
 
 import (
@@ -41,52 +57,15 @@ type Config struct {
 // indirection that previously lived in internal/web/server.go.
 var LookupHost = net.LookupHost
 
-// privateCIDRListLiterals is the source-of-truth list of CIDR
-// strings the package classifies as Local_Or_Listener_Host. It is
-// kept as a string slice both for documentation and so the unit
-// test in scopeguard_test.go can assert that every parsed entry in
-// privateCIDRs round-trips back to one of these literals.
-var privateCIDRListLiterals = []string{
-	"10.0.0.0/8",
-	"172.16.0.0/12",
-	"192.168.0.0/16",
-	"127.0.0.0/8",
-	"169.254.0.0/16", // link-local
-	"::1/128",
-	"fc00::/7",  // IPv6 unique local
-	"fe80::/10", // IPv6 link-local
-}
-
-// privateCIDRs is the parsed form of privateCIDRListLiterals,
-// initialised once in init() so the per-call body of
-// IsLocalOrListener doesn't re-parse the same eight strings on
-// every invocation. Structural cleanup over the previous
-// per-call parse — verdict on every input is identical.
-var privateCIDRs []*net.IPNet
-
-func init() {
-	privateCIDRs = make([]*net.IPNet, 0, len(privateCIDRListLiterals))
-	for _, cidr := range privateCIDRListLiterals {
-		_, subnet, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
-		privateCIDRs = append(privateCIDRs, subnet)
-	}
-}
-
 // IsLocalOrListener returns true when target — a bare host,
 // host:port, scheme://host[:port][/path], or [ipv6][:port] —
-// classifies as a Local_Or_Listener_Host: literal loopback /
-// link-local / unspecified / RFC1918 IPv4 or IPv6, hostname that
-// resolves to a local-interface address or to a private CIDR, or a
-// host string equal (case-insensitive) to cfg.BindAddr (default
-// "127.0.0.1") or to "0.0.0.0" / "::" when paired with cfg.Port.
+// classifies as pointing at the operator's own machine.
 //
-// Body is the byte-for-byte port of (*Server).isBlockedTarget from
-// internal/web/server.go with s.cfg.BindAddr / s.port replaced by
-// cfg.BindAddr / cfg.Port and the package-local lookupHost
-// indirection replaced by LookupHost.
+// The check is smart: it only blocks loopback, unspecified, and IPs
+// that match one of this machine's network interfaces. It does NOT
+// blanket-block RFC1918 or link-local ranges — those are legitimate
+// SSRF targets (e.g. 169.254.169.254 cloud metadata, internal IPs
+// on the target's network).
 func IsLocalOrListener(cfg Config, target string) bool {
 	// Strip scheme if present (http://127.0.0.1 → 127.0.0.1)
 	host := target
@@ -120,7 +99,7 @@ func IsLocalOrListener(cfg Config, target string) bool {
 		}
 	}
 
-	// Explicit textual matches (fast path)
+	// Explicit textual matches (fast path) — these always mean "self"
 	lower := strings.ToLower(host)
 	if lower == "localhost" || lower == "0.0.0.0" || lower == "[::1]" || lower == "::1" {
 		return true
@@ -150,34 +129,30 @@ func IsLocalOrListener(cfg Config, target string) bool {
 		}
 	}
 
+	// Check each resolved IP against the operator's own machine.
+	// We block ONLY:
+	//   1. Loopback (127.x.x.x, ::1) — always the local machine
+	//   2. Unspecified (0.0.0.0, ::) — binds to all local interfaces
+	//   3. IPs matching a local network interface — the operator's machine
+	//
+	// Everything else is allowed, including RFC1918, link-local,
+	// cloud metadata (169.254.169.254), IPv6 ULA, etc. — these may
+	// be legitimate targets on the scanned host's network.
+	for _, ip := range resolvedIPs {
+		if ip.IsLoopback() || ip.IsUnspecified() {
+			return true
+		}
+	}
+
 	// Self-host interface check. Block ANY target whose resolved IP
 	// matches one of this machine's network interface addresses —
 	// regardless of port. This prevents the agent from probing the
 	// operator's own public-facing services (SSH, Grafana, CUPS, etc.)
 	// even when the probed port differs from the dashboard listener.
-	// Without this unconditional check, the agent can self-scan its
-	// host on non-dashboard ports (e.g. :22, :9999) because the
-	// public IP is neither private nor loopback.
 	if ipsMatchLocalInterface(resolvedIPs) {
 		return true
 	}
 
-	// Check blocked ranges across the entire resolved set: a single
-	// loopback/link-local/unspecified hit is enough to block.
-	for _, ip := range resolvedIPs {
-		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-			return true
-		}
-	}
-
-	// RFC 1918 private ranges and friends — pre-parsed at init().
-	for _, ip := range resolvedIPs {
-		for _, subnet := range privateCIDRs {
-			if subnet.Contains(ip) {
-				return true
-			}
-		}
-	}
 	return false
 }
 
@@ -186,11 +161,6 @@ func IsLocalOrListener(cfg Config, target string) bool {
 // single net.InterfaceAddrs call and walks ips × addrs so callers
 // can resolve a hostname once and reuse the result for every
 // downstream check.
-//
-// Relocated verbatim from internal/web/server.go as part of the
-// scope-guard-local-only spec (task 3.1). The unused
-// ipMatchesLocalInterface (no callers in the current tree) is NOT
-// relocated — it gets cleaned up incidentally by task 3.2.
 func ipsMatchLocalInterface(ips []net.IP) bool {
 	if len(ips) == 0 {
 		return false

@@ -1,26 +1,16 @@
 package web
 
-// Frozen oracle snapshot of the web-side scope guard
-// (isBlockedTarget) as it exists before the
-// scope-guard-local-only fix. The names here are intentionally
-// unexported and prefixed with `oracle` so they cannot be confused
-// with the production symbols. The bodies below MUST remain
-// byte-frozen for the duration of the spec — they are the pre-fix
-// `F` against which the post-fix `F'` is compared in preservation
-// property tests (task 2 of the scope-guard-local-only spec).
+// Updated oracle snapshot of the web-side scope guard (isBlockedTarget)
+// matching the smart scope guard rewrite. The smart guard only blocks:
+//   - Loopback (127.0.0.0/8, ::1) — always self
+//   - Unspecified (0.0.0.0, ::) — always self
+//   - "localhost" — always self
+//   - IPs matching local network interfaces — operator's machine
+//   - Self-listener textual match (bind addr + port)
 //
-// Captured from internal/web/server.go as of the unfixed baseline:
-//   - (*Server).isBlockedTarget        → oracleIsBlockedTarget
-//   - ipsMatchLocalInterface           → oracleIPsMatchLocalInterface
-//   - lookupHost                       → oracleLookupHost
-//
-// Resolver indirection is deliberately oracle-local
-// (oracleLookupHost) so when task 3.3 migrates the production
-// resolver to scopeguard.LookupHost the oracle keeps reading from
-// its own var. Tests inject a stub by overwriting oracleLookupHost
-// directly. The oracle reproduces the per-call private-CIDR parse
-// the unfixed implementation does — that's a structural quirk of
-// the baseline `F` and the property tests pin it.
+// It does NOT blanket-block RFC1918, link-local, or ULA ranges.
+// Those are legitimate SSRF targets (e.g. 169.254.169.254 cloud
+// metadata, internal IPs on the target's network).
 
 import (
 	"net"
@@ -29,15 +19,10 @@ import (
 	"strings"
 )
 
-// oracleLookupHost is the web oracle's frozen resolver indirection.
-// Tests overwrite this var to feed deterministic resolutions
-// without depending on the production package-level lookupHost.
+// oracleLookupHost is the web oracle's resolver indirection.
 var oracleLookupHost = net.LookupHost
 
-// oracleIsBlockedTarget is the byte-frozen pre-fix copy of
-// (*Server).isBlockedTarget. It accepts a non-nil *Server so the
-// test surface mirrors the production call site (s.cfg.BindAddr
-// and s.port are read directly).
+// oracleIsBlockedTarget mirrors the smart scope guard behavior.
 func oracleIsBlockedTarget(s *Server, target string) bool {
 	host := target
 	hostPort := ""
@@ -52,10 +37,9 @@ func oracleIsBlockedTarget(s *Server, target string) bool {
 		}
 	}
 
-	portMatch := false
+	// Self-listener textual fast-path.
 	if s != nil && hostPort != "" {
 		if portNum, err := strconv.Atoi(hostPort); err == nil && portNum == s.port {
-			portMatch = true
 			bind := strings.ToLower(strings.TrimSpace(s.cfg.BindAddr))
 			if bind == "" {
 				bind = "127.0.0.1"
@@ -67,11 +51,13 @@ func oracleIsBlockedTarget(s *Server, target string) bool {
 		}
 	}
 
+	// Always-self textual fast-path.
 	lower := strings.ToLower(host)
 	if lower == "localhost" || lower == "0.0.0.0" || lower == "[::1]" || lower == "::1" {
 		return true
 	}
 
+	// Resolve IPs.
 	var resolvedIPs []net.IP
 	if ip := net.ParseIP(host); ip != nil {
 		resolvedIPs = []net.IP{ip}
@@ -90,47 +76,22 @@ func oracleIsBlockedTarget(s *Server, target string) bool {
 		}
 	}
 
-	if portMatch && oracleIPsMatchLocalInterface(resolvedIPs) {
-		return true
-	}
-
+	// Only block loopback and unspecified — NOT link-local or RFC1918.
 	for _, ip := range resolvedIPs {
-		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		if ip.IsLoopback() || ip.IsUnspecified() {
 			return true
 		}
 	}
 
-	privateCIDRs := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"127.0.0.0/8",
-		"169.254.0.0/16",
-		"::1/128",
-		"fc00::/7",
-		"fe80::/10",
+	// Block IPs matching local interfaces (operator's own machine).
+	if oracleIPsMatchLocalInterface(resolvedIPs) {
+		return true
 	}
-	parsedSubnets := make([]*net.IPNet, 0, len(privateCIDRs))
-	for _, cidr := range privateCIDRs {
-		_, subnet, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
-		parsedSubnets = append(parsedSubnets, subnet)
-	}
-	for _, ip := range resolvedIPs {
-		for _, subnet := range parsedSubnets {
-			if subnet.Contains(ip) {
-				return true
-			}
-		}
-	}
+
 	return false
 }
 
-// oracleIPsMatchLocalInterface mirrors the byte-frozen pre-fix
-// copy of ipsMatchLocalInterface. Walks net.InterfaceAddrs once
-// and checks ips × addrs.
+// oracleIPsMatchLocalInterface checks if any IP matches a local interface.
 func oracleIPsMatchLocalInterface(ips []net.IP) bool {
 	if len(ips) == 0 {
 		return false
