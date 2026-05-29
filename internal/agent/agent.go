@@ -28,6 +28,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/tools/browser"
 	"github.com/xalgord/xalgorix/v4/internal/tools/fileedit"
 	"github.com/xalgord/xalgorix/v4/internal/tools/finish"
+	"github.com/xalgord/xalgorix/v4/internal/tools/httpclient"
 	"github.com/xalgord/xalgorix/v4/internal/tools/notes"
 	"github.com/xalgord/xalgorix/v4/internal/tools/pageagent"
 	"github.com/xalgord/xalgorix/v4/internal/tools/proxy"
@@ -199,6 +200,7 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	terminal.Register(reg)
 	fileedit.Register(reg)
 	proxy.Register(reg)
+	httpclient.Register(reg)
 	browser.Register(reg)
 	pageagent.Register(reg)
 	// NOTE: playwright.Register removed — it registered the same "browser_action" name

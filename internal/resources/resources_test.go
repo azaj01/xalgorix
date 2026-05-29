@@ -157,12 +157,20 @@ func TestToolCapacityHonorsCPUAndMemoryHeadroom(t *testing.T) {
 	oldCriticalRAM := ramCriticalMB
 	oldCPUCritical := cpuCriticalPct
 	oldHeavyCPU := heavyToolCPULoad
+	oldBudget := scanMemoryBudgetMB
+	oldOverhead := scanOverheadMB
 	t.Cleanup(func() {
 		HeavyToolMemLimitBytes = oldLimit
 		ramCriticalMB = oldCriticalRAM
 		cpuCriticalPct = oldCPUCritical
 		heavyToolCPULoad = oldHeavyCPU
+		scanMemoryBudgetMB = oldBudget
+		scanOverheadMB = oldOverhead
 	})
+	// Pin scanMemoryBudgetMB / scanOverheadMB so autoHeavyToolMemLimitMB
+	// returns a deterministic value regardless of the test host's RAM.
+	scanMemoryBudgetMB = 4096
+	scanOverheadMB = 512
 
 	HeavyToolMemLimitBytes = 1024 * 1024 * 1024
 	ramCriticalMB = 512
