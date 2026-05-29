@@ -67,7 +67,7 @@ func isLocalOrListenerRows() []isLocalOrListenerRow {
 
 	cfg := Config{BindAddr: "127.0.0.1", Port: listenerPort}
 
-	return []isLocalOrListenerRow{
+	rows := []isLocalOrListenerRow{
 		// ── Local_Or_Listener_Host literals ─────────────────────────
 		{cell: "local-literal", name: "loopback ipv4", cfg: cfg, target: "http://127.0.0.1/admin", wantBlocked: true, wantDNSCheckOn: true, wantDNSCalls: 0},
 		{cell: "local-literal", name: "loopback ipv4 with port", cfg: cfg, target: "http://127.0.0.1:9000/x", wantBlocked: true, wantDNSCheckOn: true, wantDNSCalls: 0},
@@ -209,6 +209,67 @@ func isLocalOrListenerRows() []isLocalOrListenerRow {
 			wantDNSCalls:   1,
 		},
 	}
+
+	// ── Self-host public IP regression (any port) ────────────────
+	// Dynamically discover a non-loopback interface IP so the test
+	// works on any machine. When the resolved IP matches one of the
+	// machine's interfaces, IsLocalOrListener must block regardless
+	// of port — this is the fix for the self-scanning bug where the
+	// agent probed its own SSH/Grafana/CUPS services.
+	if selfIP := firstNonLoopbackInterfaceIP(); selfIP != "" {
+		rows = append(rows,
+			isLocalOrListenerRow{
+				cell:   "self-host-public",
+				name:   "own public IP on SSH port 22 (no port match)",
+				cfg:    cfg,
+				target: "http://" + selfIP + ":22/",
+				stubLookup: func(host string) ([]string, error) {
+					return []string{selfIP}, nil
+				},
+				wantBlocked:    true,
+				wantDNSCheckOn: true,
+				wantDNSCalls:   0, // IP literal → no DNS
+			},
+			isLocalOrListenerRow{
+				cell:   "self-host-public",
+				name:   "own public IP on Grafana port 9999 (no port match)",
+				cfg:    cfg,
+				target: "http://" + selfIP + ":9999/api/users",
+				stubLookup: func(host string) ([]string, error) {
+					return []string{selfIP}, nil
+				},
+				wantBlocked:    true,
+				wantDNSCheckOn: true,
+				wantDNSCalls:   0,
+			},
+			isLocalOrListenerRow{
+				cell:   "self-host-public",
+				name:   "own public IP bare (no port)",
+				cfg:    cfg,
+				target: "http://" + selfIP + "/",
+				stubLookup: func(host string) ([]string, error) {
+					return []string{selfIP}, nil
+				},
+				wantBlocked:    true,
+				wantDNSCheckOn: true,
+				wantDNSCalls:   0,
+			},
+			isLocalOrListenerRow{
+				cell:   "self-host-public",
+				name:   "hostname resolving to own public IP blocks",
+				cfg:    cfg,
+				target: "https://my-server.example.com/",
+				stubLookup: func(host string) ([]string, error) {
+					return []string{selfIP}, nil
+				},
+				wantBlocked:    true,
+				wantDNSCheckOn: true,
+				wantDNSCalls:   1,
+			},
+		)
+	}
+
+	return rows
 }
 
 // TestIsLocalOrListener_Table is the unit test surface for
@@ -282,4 +343,30 @@ func TestIsLocalOrListener_SingleLookupAcrossTwoCalls(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("LookupHost call count after second call = %d, want 2", calls)
 	}
+}
+
+// firstNonLoopbackInterfaceIP returns the first non-loopback IPv4
+// address found among the machine's network interfaces, or "" if
+// none is available. Used by the self-host-public regression tests
+// so they dynamically adapt to whatever machine runs them.
+func firstNonLoopbackInterfaceIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		ipNet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip := ipNet.IP
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			continue
+		}
+		// Prefer IPv4 for simpler test URLs
+		if ip4 := ip.To4(); ip4 != nil {
+			return ip4.String()
+		}
+	}
+	return ""
 }

@@ -103,20 +103,12 @@ func IsLocalOrListener(cfg Config, target string) bool {
 		}
 	}
 
-	// Self-listener guard. Block if the target's port matches our own
-	// listening port AND the host either matches our bind address, is
-	// any local address, or resolves to one. This catches the case
-	// where XALGORIX_BIND=0.0.0.0 and the operator types the public IP
-	// back in — the previous loopback-only check missed it.
-	//
-	// We capture portMatch here but defer the interface-address
-	// comparison until after the single DNS resolution below, so the
-	// same resolved IP set feeds both the self-listener check and the
-	// private-range check.
-	portMatch := false
+	// Self-listener textual fast-path. Block if the target's port
+	// matches our own listening port AND the host textually matches
+	// our bind address (or 0.0.0.0 / ::). This fires before DNS
+	// resolution and catches the most common self-probe patterns.
 	if hostPort != "" {
 		if portNum, err := strconv.Atoi(hostPort); err == nil && portNum == cfg.Port {
-			portMatch = true
 			bind := strings.ToLower(strings.TrimSpace(cfg.BindAddr))
 			if bind == "" {
 				bind = "127.0.0.1"
@@ -158,11 +150,15 @@ func IsLocalOrListener(cfg Config, target string) bool {
 		}
 	}
 
-	// Self-listener interface check, gated by the port-match flag
-	// captured above. Uses the already-resolved IP set so we never
-	// issue a second DNS lookup. Covers the bind=0.0.0.0 +
-	// operator-types-public-IP loophole.
-	if portMatch && ipsMatchLocalInterface(resolvedIPs) {
+	// Self-host interface check. Block ANY target whose resolved IP
+	// matches one of this machine's network interface addresses —
+	// regardless of port. This prevents the agent from probing the
+	// operator's own public-facing services (SSH, Grafana, CUPS, etc.)
+	// even when the probed port differs from the dashboard listener.
+	// Without this unconditional check, the agent can self-scan its
+	// host on non-dashboard ports (e.g. :22, :9999) because the
+	// public IP is neither private nor loopback.
+	if ipsMatchLocalInterface(resolvedIPs) {
 		return true
 	}
 
