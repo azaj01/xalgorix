@@ -150,7 +150,7 @@ func load() *Config {
 	// pin a workspace path therefore keep working without change.
 	if originalWorkspaceEnv != "" && originalDataDirEnv == "" {
 		log.Printf("[config] WARN XALGORIX_WORKSPACE is deprecated; please use XALGORIX_DATA_DIR=%s", originalWorkspaceEnv)
-		os.Setenv("XALGORIX_DATA_DIR", originalWorkspaceEnv)
+		_ = os.Setenv("XALGORIX_DATA_DIR", originalWorkspaceEnv)
 	}
 	// Resolve the per-installation Data_Dir (R6.1–R6.3, R6.7). On failure we
 	// emit a non-fatal warning and fall back to $CWD so the binary doesn't
@@ -217,7 +217,7 @@ func load() *Config {
 		BindAddr: envOr("XALGORIX_BIND", "127.0.0.1"),
 
 		// Auto-install gates — default off for non-root; root sessions keep the
-		// historical behaviour so existing systemd deployments keep working.
+		// historical behavior so existing systemd deployments keep working.
 		AllowAutoInstall:     envOrBool("XALGORIX_ALLOW_AUTO_INSTALL", os.Getuid() == 0),
 		AllowAutoInstallSudo: envOrBool("XALGORIX_AUTO_INSTALL_SUDO", false),
 
@@ -253,7 +253,7 @@ func load() *Config {
 	}
 
 	// R6.7: announce the resolved Data_Dir / Workspace_Root once at startup
-	// so operators can see at a glance where artefacts will land.
+	// so operators can see at a glance where artifacts will land.
 	log.Printf("[config] Data_Dir=%s Workspace_Root=%s", cfg.DataDir, cfg.WorkspaceRoot)
 
 	// R7: emit the Migration_Warning when a legacy $CWD layout is detected.
@@ -281,7 +281,7 @@ func (c *Config) ResolveModel() string {
 // inputs and equals Data_Dir. Workspace remains as an alias for backwards
 // compatibility, but new resolution logic (and any code reading from this
 // helper) goes through WorkspaceRoot so the intent is explicit and the
-// behaviour stays correct if the two ever diverge.
+// behavior stays correct if the two ever diverge.
 func (c *Config) WorkspacePath(rel string) string {
 	if filepath.IsAbs(rel) {
 		return rel
@@ -376,7 +376,7 @@ func resolveDataDir(home string) (string, error) {
 	if err := os.MkdirAll(abs, 0o700); err != nil {
 		return "", fmt.Errorf("create data dir %q: %w", abs, err)
 	}
-	_ = os.Chmod(abs, 0o700)
+	_ = os.Chmod(abs, 0o700) //nolint:gosec // G302: directory needs the execute bit; 0700 is correct for a dir
 	return abs, nil
 }
 
@@ -500,7 +500,7 @@ func loadEnvFile(path string) {
 		// Strip surrounding quotes
 		value = strings.Trim(value, "\"'")
 		// Always set — later files override earlier ones
-		os.Setenv(key, value)
+		_ = os.Setenv(key, value)
 	}
 }
 

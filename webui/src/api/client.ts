@@ -20,6 +20,21 @@ import type {
   WSEvent,
 } from "@/types/api";
 
+/**
+ * Status of a single provider's API key as reported by
+ * GET /api/settings/llm/keys (mirrors Go's providerKeyStatus in
+ * internal/web/handlers_router.go). Credentials arrive masked from the
+ * server — `masked_key` is only present when a key is configured.
+ */
+export interface ProviderKeyStatus {
+  provider_id: string;
+  display_name: string;
+  has_key: boolean;
+  masked_key?: string;
+  base_url: string;
+  header_style: string;
+}
+
 // Auth session expiry handling. When any API call returns 401 we dispatch a
 // global event so the auth store (in store/auth.ts) can flip the user back
 // to the login screen without each component having to handle it.
@@ -294,6 +309,53 @@ export const api = {
   // ---------------------------------------------------------------
 
   listProviders: () => http<CatalogEntry[]>("/api/providers"),
+
+  // ---------------------------------------------------------------
+  // Multi-provider key store + model router (LiteLLM-style).
+  // Backed by /api/settings/llm/keys (GET/POST/DELETE) and
+  // /api/settings/llm/test-route (POST). Return shapes mirror the
+  // JSON written by internal/web/handlers_router.go.
+  // ---------------------------------------------------------------
+
+  providerKeys: () =>
+    http<{
+      providers: ProviderKeyStatus[];
+      configured_count: number;
+      router_enabled: boolean;
+      known_model_patterns: string[];
+    }>("/api/settings/llm/keys"),
+
+  saveProviderKeys: (
+    keys: {
+      provider_id: string;
+      api_key: string;
+      base_url?: string;
+      header_style?: string;
+    }[],
+  ) =>
+    http<{ status: string; saved: number; message: string }>(
+      "/api/settings/llm/keys",
+      { method: "POST", json: { keys } },
+    ),
+
+  deleteProviderKey: (providerId: string) =>
+    http<{ status: string; message: string }>("/api/settings/llm/keys", {
+      method: "DELETE",
+      json: { provider_id: providerId },
+    }),
+
+  testModelRoute: (model: string) =>
+    http<{
+      resolved: boolean;
+      provider_id?: string;
+      display_name?: string;
+      bare_model?: string;
+      base_url?: string;
+      header_style?: string;
+      has_key?: boolean;
+      model?: string;
+      error?: string;
+    }>("/api/settings/llm/test-route", { method: "POST", json: { model } }),
 
   listAuthProfiles: () => http<AuthProfile[]>("/api/auth/profiles"),
   createAPIKeyProfile: (req: {

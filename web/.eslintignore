@@ -1,0 +1,13 @@
+node_modules
+.next
+out
+dist
+build
+coverage
+playwright-report
+test-results
+.turbo
+*.config.js
+*.config.cjs
+*.config.mjs
+next-env.d.ts

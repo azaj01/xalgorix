@@ -6,10 +6,10 @@ import (
 
 func TestCollectReconReportSummary_DNSRecords(t *testing.T) {
 	tests := []struct {
-		name       string
-		events     []WSEvent
-		wantDNS    []string
-		wantNoDNS  bool
+		name      string
+		events    []WSEvent
+		wantDNS   []string
+		wantNoDNS bool
 	}{
 		{
 			name: "real dig output",
@@ -162,8 +162,8 @@ func TestCollectReconReportSummary_IPAddresses(t *testing.T) {
 			wantIPs: nil,
 		},
 		{
-			name:    "invalid octet rejected",
-			events:  []WSEvent{{Type: "tool_result", Output: "999.999.999.999 is not valid"}},
+			name:   "invalid octet rejected",
+			events: []WSEvent{{Type: "tool_result", Output: "999.999.999.999 is not valid"}},
 		},
 	}
 

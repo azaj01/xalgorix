@@ -3,8 +3,8 @@ package web
 import (
 	"fmt"
 	"image"
-	_ "image/jpeg"
-	_ "image/png"
+	_ "image/jpeg" // register JPEG decoder for image.Decode on uploaded logos
+	_ "image/png"  // register PNG decoder for image.Decode on uploaded logos
 	"math"
 	"net/url"
 	"os"
@@ -1092,7 +1092,7 @@ func (s *Server) generateReport(scan *ScanRecord) (string, error) {
 		pdf.SetFont("Helvetica", "", 8)
 		setColor(white)
 		pdf.SetX(10)
-		pdf.MultiCell(190, 4, "The following table summarises all findings with their security framework mappings (CWE, OWASP Top 10 2021). Detailed write-ups follow in the Vulnerability Details section.", "", "L", false)
+		pdf.MultiCell(190, 4, "The following table summarizes all findings with their security framework mappings (CWE, OWASP Top 10 2021). Detailed write-ups follow in the Vulnerability Details section.", "", "L", false)
 		pdf.Ln(4)
 
 		// Table header

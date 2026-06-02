@@ -156,7 +156,7 @@ func (s *noteStore) writeFile(data []byte, path string) {
 		log.Printf("[notes] Warning: refusing to save notes to %s: %v", path, err)
 		return
 	}
-	if err := os.WriteFile(canonical, data, 0644); err != nil {
+	if err := os.WriteFile(canonical, data, 0600); err != nil {
 		log.Printf("[notes] Warning: failed to save notes to %s: %v", canonical, err)
 	}
 }

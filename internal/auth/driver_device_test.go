@@ -81,11 +81,10 @@ func (f *fakeClock) Advance(d time.Duration) {
 // upstream response shape: status, body, and a recorded timestamp
 // from time.Now() at the moment the request was received.
 type tokenScript struct {
-	mu     sync.Mutex
-	steps  []tokenStep
-	calls  []time.Time // wall-clock at each request
-	idx    int
-	scopes []string // forwarded scope assertions
+	mu    sync.Mutex
+	steps []tokenStep
+	calls []time.Time // wall-clock at each request
+	idx   int
 }
 
 type tokenStep struct {

@@ -3,32 +3,32 @@
 //
 // The device authorization grant has a two-step shape:
 //
-//   1. Start: POST e.DeviceAuthorizationEndpoint with client_id and
-//      the joined scope list. The upstream returns
-//      {device_code, user_code, verification_uri, expires_in,
-//      interval}. The driver returns Mode="device" with the user-
-//      facing user_code + verification_uri so the dashboard can
-//      tell the operator "go to <uri> and enter <user_code>", and
-//      kicks off a background poller goroutine.
+//  1. Start: POST e.DeviceAuthorizationEndpoint with client_id and
+//     the joined scope list. The upstream returns
+//     {device_code, user_code, verification_uri, expires_in,
+//     interval}. The driver returns Mode="device" with the user-
+//     facing user_code + verification_uri so the dashboard can
+//     tell the operator "go to <uri> and enter <user_code>", and
+//     kicks off a background poller goroutine.
 //
-//   2. Poll: every `interval` seconds (default 5s when the upstream
-//      omits it — Requirement 7.2) the poller POSTs e.TokenEndpoint
-//      with grant_type=urn:ietf:params:oauth:grant-type:device_code
-//      and the device_code value. Three branches:
+//  2. Poll: every `interval` seconds (default 5s when the upstream
+//     omits it — Requirement 7.2) the poller POSTs e.TokenEndpoint
+//     with grant_type=urn:ietf:params:oauth:grant-type:device_code
+//     and the device_code value. Three branches:
 //
-//        - 2xx with access_token → build OAuth_Profile, persist
-//          via Store.Put (Requirement 7.4), signal done.
-//        - 4xx body.error == "authorization_pending" → wait
-//          interval and retry.
-//        - 4xx body.error == "slow_down" → bump interval += 5s
-//          and retry (Requirement 7.3).
-//        - any other error → signal done with the wrapped error.
+//     - 2xx with access_token → build OAuth_Profile, persist
+//     via Store.Put (Requirement 7.4), signal done.
+//     - 4xx body.error == "authorization_pending" → wait
+//     interval and retry.
+//     - 4xx body.error == "slow_down" → bump interval += 5s
+//     and retry (Requirement 7.3).
+//     - any other error → signal done with the wrapped error.
 //
-//      After expires_in elapses without a 2xx (per the catalog-
-//      anchored deadline computed from clock.Now() at Start), the
-//      poller stops and signals ErrFlowTimeout (Requirement 7.5).
-//      The HTTP layer maps that sentinel to 408 "oauth flow timed
-//      out".
+//     After expires_in elapses without a 2xx (per the catalog-
+//     anchored deadline computed from clock.Now() at Start), the
+//     poller stops and signals ErrFlowTimeout (Requirement 7.5).
+//     The HTTP layer maps that sentinel to 408 "oauth flow timed
+//     out".
 //
 // Cancellation: the poller honors ctx.Done() so a dashboard cancel
 // (the request scope tied to /api/auth/profiles/oauth/start) can
@@ -242,7 +242,7 @@ func (d *deviceCodeDriver) Name() string { return deviceCodeFlowName }
 //     7.1).
 //
 // Honors ctx (the request scope) by deriving a child cancel
-// context for the poller — when the request scope is cancelled
+// context for the poller — when the request scope is canceled
 // (dashboard cancel), the poller observes ctx.Done() on its
 // next tick and stops cleanly.
 //
@@ -294,7 +294,7 @@ func (d *deviceCodeDriver) Start(ctx context.Context, e providers.Entry, opts St
 	// observes both the request scope (ctx) AND its own
 	// internal cancel (driven by stopFlow). We do NOT inherit
 	// ctx directly because the request scope is typically the
-	// HTTP handler's scope, which is cancelled when the
+	// HTTP handler's scope, which is canceled when the
 	// response is flushed — the poller must outlive that.
 	// Instead the poller respects ctx.Done() at each tick so a
 	// long-lived dashboard scope can still cancel polling.
@@ -441,9 +441,9 @@ func (d *deviceCodeDriver) poll(pollerCtx, reqCtx context.Context, e providers.E
 		}
 
 		// Block until either the wait elapses, the request
-		// scope is cancelled (dashboard cancel — Requirement
+		// scope is canceled (dashboard cancel — Requirement
 		// 7.x cancellation clause), or the poller context is
-		// cancelled (stopFlow). time.NewTimer over time.After
+		// canceled (stopFlow). time.NewTimer over time.After
 		// so we can Stop() the timer on early exit and avoid
 		// leaking a goroutine when the test clock advances
 		// rapidly. M9: a tiny helper guarantees timer.Stop()
@@ -497,7 +497,7 @@ func (d *deviceCodeDriver) poll(pollerCtx, reqCtx context.Context, e providers.E
 			flow.interval += deviceCodeSlowDownDelta
 			continue
 		case devicePollExpired:
-			// Upstream signalled expired_token. Treat the
+			// Upstream signaled expired_token. Treat the
 			// same as the local deadline timeout so the
 			// HTTP layer surfaces a single 408 envelope.
 			d.finishFlow(flow, ErrFlowTimeout)
@@ -770,7 +770,10 @@ func (d *deviceCodeDriver) stopFlow(flowID string, reason error) {
 	if !ok {
 		return
 	}
-	flow := raw.(*deviceFlow)
+	flow, ok := raw.(*deviceFlow)
+	if !ok {
+		return
+	}
 	if flow.cancel != nil {
 		flow.cancel()
 	}
@@ -855,7 +858,7 @@ const (
 )
 
 // awaitDevicePollWait blocks for at most `wait` or until either
-// scope is cancelled, returning the outcome the caller can branch
+// scope is canceled, returning the outcome the caller can branch
 // on. The defer'd timer.Stop releases the timer even on the
 // elapsed branch.
 func awaitDevicePollWait(reqCtx, pollerCtx context.Context, wait time.Duration) devicePollWaitOutcome {

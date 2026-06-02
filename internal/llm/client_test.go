@@ -32,7 +32,7 @@ func newTestClient(t *testing.T) *Client {
 }
 
 // TestNewClient_DefaultContextBackground verifies that a freshly created
-// client always returns a non-nil, non-cancelled context from loadCtx
+// client always returns a non-nil, non-canceled context from loadCtx
 // before any SetContext call. This is the contract that lets ChatStream
 // run with no agent context wired up (e.g. from CLI tests).
 func TestNewClient_DefaultContextBackground(t *testing.T) {
@@ -42,7 +42,7 @@ func TestNewClient_DefaultContextBackground(t *testing.T) {
 		t.Fatal("loadCtx returned nil before SetContext")
 	}
 	if err := got.Err(); err != nil {
-		t.Fatalf("default context already cancelled: %v", err)
+		t.Fatalf("default context already canceled: %v", err)
 	}
 }
 
@@ -52,14 +52,15 @@ func TestNewClient_DefaultContextBackground(t *testing.T) {
 // type is unset). SetContext(nil) must produce a non-nil Background-equiv.
 func TestSetContext_NilFallsBackToBackground(t *testing.T) {
 	c := newTestClient(t)
-	//lint:ignore SA1012 intentional nil-context regression coverage
-	c.SetContext(nil)
+	// Intentional nil-context regression coverage: SetContext must not
+	// panic and must fall back to a Background-equivalent context.
+	c.SetContext(nil) //nolint:staticcheck // SA1012: deliberate nil-context test
 	got := c.loadCtx()
 	if got == nil {
 		t.Fatal("loadCtx returned nil after SetContext(nil)")
 	}
 	if err := got.Err(); err != nil {
-		t.Fatalf("context already cancelled: %v", err)
+		t.Fatalf("context already canceled: %v", err)
 	}
 }
 
@@ -78,7 +79,7 @@ func TestSetContext_StoresAndReturnsSame(t *testing.T) {
 	// Cancellation must propagate through the stored context.
 	cancel()
 	if err := got.Err(); err == nil {
-		t.Error("expected stored context to be cancelled after cancel()")
+		t.Error("expected stored context to be canceled after cancel()")
 	}
 }
 
@@ -118,12 +119,12 @@ func TestSetContext_ConcurrentReadersAndWriters(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 5000; j++ {
-				if got := c.loadCtx(); got == nil {
+				got := c.loadCtx()
+				if got == nil {
 					t.Error("loadCtx returned nil under contention")
 					return
-				} else {
-					_ = got.Err() // exercise the interface, ignore result
 				}
+				_ = got.Err() // exercise the interface, ignore result
 			}
 		}()
 	}
@@ -510,7 +511,6 @@ func jsonResponse(status int, body string) *http.Response {
 	}
 }
 
-
 // ---------------------------------------------------------------------------
 // Wave H — task 9.7 — composite Resolver decision matrix + header switch.
 //
@@ -572,7 +572,6 @@ func legacyExpectedHeaderStyle(slug string) string {
 type resolverFixture struct {
 	cat        *providers.Service
 	prof       *auth.Store
-	catPath    string
 	profileKey string
 }
 

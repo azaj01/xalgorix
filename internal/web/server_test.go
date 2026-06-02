@@ -2120,7 +2120,6 @@ func TestInstanceAction_GetAndStopSpecificInstance(t *testing.T) {
 	}
 }
 
-
 // withStubLookupHost swaps the package-level scopeguard.LookupHost
 // shim for the duration of a single test. Restoration runs via
 // t.Cleanup so every test exits with the original net.LookupHost
@@ -2236,7 +2235,6 @@ func TestIsBlockedTarget_DNSFailureAllows(t *testing.T) {
 	})
 }
 
-
 // ───────────────────────────────────────────────────────────────────
 // Preservation property tests (spec: scope-guard-local-only, task 2).
 //
@@ -2330,10 +2328,10 @@ func webPreservationRows() []webPreservationRow {
 			stubResolution: []string{"93.184.216.34"},
 		},
 		{
-			cell:           "public-host",
-			name:           "public IP literal",
-			target:         "http://203.0.113.10/",
-			wantDNS:        false,
+			cell:    "public-host",
+			name:    "public IP literal",
+			target:  "http://203.0.113.10/",
+			wantDNS: false,
 		},
 
 		// ── DNS edge: failing lookup falls back to allow ──────────

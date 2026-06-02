@@ -50,7 +50,7 @@ type Client struct {
 	ctx atomic.Value // context.Context
 	// rateLimiter enforces cfg.RateLimitRPS / cfg.RateLimitBurst against
 	// outbound LLM calls. Wait(ctx) blocks until a token is available
-	// (or ctx is cancelled), so the limiter cannot drop requests
+	// (or ctx is canceled), so the limiter cannot drop requests
 	// (R3.5). nil when the configured RPS is non-positive.
 	rateLimiter *rate.Limiter
 	// resolver, when non-nil, is consulted by Wave D to obtain the
@@ -535,9 +535,9 @@ func (c *Client) chatWithRetry(messages []Message) (string, error) {
 			time.Sleep(backoff)
 		}
 
-		// Check if context is cancelled before retrying
+		// Check if context is canceled before retrying
 		if ctx := c.loadCtx(); ctx.Err() != nil {
-			return "", fmt.Errorf("LLM request cancelled: %w", ctx.Err())
+			return "", fmt.Errorf("LLM request canceled: %w", ctx.Err())
 		}
 
 		result, err := c.doChat(messages)
@@ -681,7 +681,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 		if resp.StatusCode != http.StatusOK {
 			respBody, readErr := io.ReadAll(resp.Body)
 			if readErr != nil {
-				ch <- StreamChunk{Err: fmt.Errorf("API returned %d (failed to read body: %v)", resp.StatusCode, readErr)}
+				ch <- StreamChunk{Err: fmt.Errorf("API returned %d (failed to read body: %w)", resp.StatusCode, readErr)}
 				return
 			}
 			ch <- StreamChunk{Err: fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))}
@@ -795,7 +795,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 // doChat performs a single non-streaming API call.
 func (c *Client) doChat(messages []Message) (out string, err error) {
 	// Panic boundary (R1.5): any panic in the LLM client (JSON
-	// marshalling, header construction, HTTP transport panic) is
+	// marshaling, header construction, HTTP transport panic) is
 	// converted into a typed error so the caller can decide whether to
 	// retry. The recovered panic is logged exactly once and the
 	// PanicsRecovered counter is incremented by safe.Recover.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -418,7 +419,7 @@ func prepareRequestRateRuntime(workDir string, policy scanctx.RequestRatePolicy)
 		DelayMS:    delayMS,
 	}
 	for _, dir := range []string{rt.BinDir, rt.PythonPath, rt.LockDir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return requestRateRuntime{}, err
 		}
 	}
@@ -469,7 +470,10 @@ else
 fi
 exec %s "$@"
 `, shellQuote(realPath))
-	return os.WriteFile(wrapperPath, []byte(script), 0o755)
+	// The wrapper must be executable by the agent's subprocesses, so 0755
+	// is intentional; it contains no secrets (a rate-limiting shim around
+	// curl/wget).
+	return os.WriteFile(wrapperPath, []byte(script), 0o755) //nolint:gosec // G306: generated executable wrapper needs exec bit
 }
 
 func writePythonRateLimiter(pythonPath string) error {
@@ -569,7 +573,7 @@ try:
 except Exception:
     pass
 `
-	return os.WriteFile(siteCustomize, []byte(source), 0o644)
+	return os.WriteFile(siteCustomize, []byte(source), 0o600)
 }
 
 // setProcessLimits applies resource constraints to a child process:
@@ -596,7 +600,7 @@ func setProcessLimitsForPID(pid int, memoryLimited bool, memLimitBytes int64) {
 	// xalgorix protects itself with a negative score, so the kernel prefers
 	// killing children under memory pressure.
 	oomPath := fmt.Sprintf("/proc/%d/oom_score_adj", pid)
-	if err := os.WriteFile(oomPath, []byte("500"), 0644); err != nil {
+	if err := os.WriteFile(oomPath, []byte("500"), 0644); err != nil { //nolint:gosec // G306: procfs ignores the file mode
 		// Not fatal — best effort. Fails if not running as root.
 		log.Printf("[RESOURCES] Cannot set OOM score for PID %d: %v", pid, err)
 	}
@@ -610,12 +614,16 @@ func setProcessLimitsForPID(pid int, memoryLimited bool, memLimitBytes int64) {
 			Max: uint64(memLimitBytes),
 		}
 		// prlimit64(pid, resource, new_rlimit*, old_rlimit*)
+		// unsafe.Pointer is required by the syscall ABI to pass the
+		// rlimit struct; there is no safe stdlib wrapper for setting
+		// RLIMIT_AS on another PID. The pointer is to a local struct that
+		// outlives the call.
 		_, _, errno := syscall.RawSyscall6(
 			syscall.SYS_PRLIMIT64,
 			uintptr(pid),
 			uintptr(syscall.RLIMIT_AS),
-			uintptr(unsafe.Pointer(&newLimit)),
-			0, // old limit — don't need it
+			uintptr(unsafe.Pointer(&newLimit)), //nolint:gosec // G103: audited unsafe.Pointer for prlimit64 syscall ABI
+			0,                                  // old limit — don't need it
 			0, 0,
 		)
 		if errno != 0 {
@@ -829,7 +837,7 @@ func killTrackedProcess(cmd *exec.Cmd) {
 		}
 	}
 
-	if err := cmd.Process.Kill(); err != nil && err != os.ErrProcessDone {
+	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		log.Printf("[terminal] Failed to kill process pid %d: %v", pid, err)
 	}
 }
@@ -1175,7 +1183,7 @@ func effectiveWorkDirForContext(contextID string, cfg *config.Config) string {
 // This is the workspace-leak fix paired with the env-var routing in
 // commandEnv (R8.9).
 func prepareCommandWorkspace(workDir string) error {
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
+	if err := os.MkdirAll(workDir, 0o700); err != nil {
 		return err
 	}
 	for _, dir := range []string{
@@ -1184,7 +1192,7 @@ func prepareCommandWorkspace(workDir string) error {
 		filepath.Join(workDir, ".config"),
 		filepath.Join(workDir, ".local", "share"),
 	} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 	}
@@ -1351,7 +1359,7 @@ func runShellInternal(contextID string, command string) (string, int) {
 	waitCtx := commandWaitContext(contextID)
 	lease, err := resources.AcquireToolLeaseContext(waitCtx, heavy, toolLabel)
 	if err != nil {
-		return fmt.Sprintf("[CANCELLED] Tool launch cancelled before starting %q: %v", toolLabel, err), -1
+		return fmt.Sprintf("[CANCELED] Tool launch canceled before starting %q: %v", toolLabel, err), -1
 	}
 	defer lease.Release()
 	memLimitBytes := lease.MemoryLimitBytes()
@@ -1408,7 +1416,7 @@ func runShellInternal(contextID string, command string) (string, int) {
 		for {
 			n, err := stdoutPipe.Read(buf)
 			if n > 0 {
-				stdout.Write(buf[:n])
+				_, _ = stdout.Write(buf[:n])
 
 				// Stream partial output every 10 seconds.
 				cb := streamCallbackForContext(contextID)
@@ -1435,7 +1443,7 @@ func runShellInternal(contextID string, command string) (string, int) {
 		for {
 			n, err := stderrPipe.Read(buf)
 			if n > 0 {
-				stderr.Write(buf[:n])
+				_, _ = stderr.Write(buf[:n])
 			}
 			if err != nil {
 				break
@@ -1461,16 +1469,16 @@ func runShellInternal(contextID string, command string) (string, int) {
 
 	exitCode := 0
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		exitErr := &exec.ExitError{}
+		if errors.As(err, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		} else if ctx.Err() == context.DeadlineExceeded {
 			// Command was killed by timeout
 			return ratePolicyNotice + fmt.Sprintf("[TIMEOUT] Command killed after %s. Use more targeted scans (fewer ports, specific paths, smaller scope) to stay within the time limit.\nPartial stdout:\n%s\nPartial stderr:\n%s",
 				timeout.Round(time.Second), truncate(stdoutStr), truncate(stderrStr)), -1
-
 		} else if ctx.Err() == context.Canceled {
-			// Context was cancelled (Stop or watchdog kill)
-			return ratePolicyNotice + fmt.Sprintf("Command cancelled.\nPartial stdout:\n%s\nPartial stderr:\n%s",
+			// Context was canceled (Stop or watchdog kill)
+			return ratePolicyNotice + fmt.Sprintf("Command canceled.\nPartial stdout:\n%s\nPartial stderr:\n%s",
 				truncate(stdoutStr), truncate(stderrStr)), -1
 		}
 	}
@@ -1531,7 +1539,7 @@ func resolvePackage(cmd string) string {
 
 // sudoPrefix returns "sudo " when the process is non-root AND the operator
 // has explicitly opted in via XALGORIX_AUTO_INSTALL_SUDO=1. The previous
-// behaviour was to silently sudo any install attempt, which is a privilege
+// behavior was to silently sudo any install attempt, which is a privilege
 // escalation surface when xalgorix is launched by a user with passwordless
 // sudo (which the --start systemd flow encourages).
 func sudoPrefix() string {

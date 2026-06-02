@@ -42,7 +42,6 @@ func writeJSONStatus(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-
 // handleListProviders serves GET /api/providers, returning the
 // compiled-in catalog for the LLM Settings tab dropdown to
 // enumerate providers. v4.4.22 dropped the runtime-editable
@@ -70,11 +69,10 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 	writeJSONStatus(w, http.StatusOK, entries)
 }
 
-
 // writeCatalogError writes err to w as a generic catalog-lookup
 // error envelope. v4.4.22 collapsed the catalog to a read-only
 // compiled-in list, so the only remaining error path is "not
-// found" / "ctx cancelled" — both surfaced as 500 here. The shape
+// found" / "ctx canceled" — both surfaced as 500 here. The shape
 // matches the v4.4.21 envelope so the dashboard's error renderer
 // continues to consume {"error": <message>} unchanged.
 func writeCatalogError(w http.ResponseWriter, err error) {

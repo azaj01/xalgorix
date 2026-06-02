@@ -25,7 +25,7 @@ const maxBodyBytes = 50 * 1024 // 50 KB — keep context window manageable
 // Register adds the http_request tool to the registry.
 func Register(r *tools.Registry) {
 	r.Register(&tools.Tool{
-		Name: "http_request",
+		Name:        "http_request",
 		Description: "Make a structured HTTP request. Use this instead of terminal curl/wget for any HTTP call — it returns status code, response headers, and body in a clean format the agent can reason about. Perfect for: API testing, auth bypass attempts, JWT manipulation, SSRF probing, parameter fuzzing, cookie inspection, redirect chain analysis, and any HTTP-based recon.",
 		Parameters: []tools.Parameter{
 			{Name: "url", Description: "Target URL (include protocol, e.g. https://example.com/api/users)", Required: true},
@@ -145,7 +145,7 @@ func execute(args map[string]string) (tools.Result, error) {
 	isBinary := isBinaryContentType(contentType)
 
 	if isBinary {
-		out.WriteString(fmt.Sprintf("\n--- Response Body (binary) ---\n"))
+		out.WriteString("\n--- Response Body (binary) ---\n")
 		sizeNote := fmt.Sprintf("%d bytes", bodyLen)
 		if truncated {
 			sizeNote = fmt.Sprintf("50 KB+ (%d bytes before truncation)", bodyLen)
@@ -225,7 +225,12 @@ func isBinaryContentType(ct string) bool {
 var testTLSInsecure bool
 
 func buildClient(timeoutSec int, followRedirects bool, tlsSkipVerify bool) *http.Client {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr, ok := http.DefaultTransport.(*http.Transport)
+	if ok {
+		tr = tr.Clone()
+	} else {
+		tr = &http.Transport{}
+	}
 	if tlsSkipVerify || testTLSInsecure {
 		if tr.TLSClientConfig == nil {
 			tr.TLSClientConfig = &tls.Config{} //nolint:gosec

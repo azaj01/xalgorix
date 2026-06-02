@@ -1,0 +1,42 @@
+---
+# ExternalSecret: xalgorix-vapid
+#
+# VAPID keypair for Web Push notifications (PWA, Requirement 17).
+# The public key is also embedded in the marketing/app frontend bundle
+# at build time but the canonical source of truth lives here so a
+# rotation only needs one Secrets Manager update.
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: xalgorix-vapid
+  namespace: xalgorix
+  labels:
+    app.kubernetes.io/name: xalgorix-vapid
+    app.kubernetes.io/part-of: xalgorix
+    app.kubernetes.io/component: secret
+    xalgorix.com/secret-source: aws-secrets-manager
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: aws-secrets-manager
+  target:
+    name: xalgorix-vapid
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      metadata:
+        labels:
+          app.kubernetes.io/name: xalgorix-vapid
+          app.kubernetes.io/part-of: xalgorix
+          app.kubernetes.io/component: secret
+          xalgorix.com/secret-source: aws-secrets-manager
+  data:
+    - secretKey: VAPID_PUBLIC_KEY
+      remoteRef:
+        key: xalgorix/vapid
+        property: VAPID_PUBLIC_KEY
+    - secretKey: VAPID_PRIVATE_KEY
+      remoteRef:
+        key: xalgorix/vapid
+        property: VAPID_PRIVATE_KEY

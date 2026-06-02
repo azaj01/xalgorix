@@ -425,7 +425,7 @@ WORKFLOW:
 				}
 				timeout := 300 // 5 minutes default
 				if t, ok := args["timeout"]; ok && t != "" {
-					fmt.Sscanf(t, "%d", &timeout)
+					_, _ = fmt.Sscanf(t, "%d", &timeout)
 				}
 				msg, err := am.WaitForEmail(inboxID, subject, time.Duration(timeout)*time.Second)
 				if err != nil {

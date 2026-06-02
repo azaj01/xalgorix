@@ -272,9 +272,9 @@ func formatElement(b *strings.Builder, m map[string]interface{}, indent string) 
 		flags += fmt.Sprintf(" [popup=%s]", hasPopup)
 	}
 
-	b.WriteString(fmt.Sprintf("%s[@%s] %s(%s)", indent, id, tag, elemType))
+	fmt.Fprintf(b, "%s[@%s] %s(%s)", indent, id, tag, elemType)
 	if label != "" {
-		b.WriteString(fmt.Sprintf(" \"%s\"", label))
+		fmt.Fprintf(b, " \"%s\"", label)
 	}
 	b.WriteString(flags)
 	b.WriteString("\n")
@@ -292,7 +292,7 @@ func formatElement(b *strings.Builder, m map[string]interface{}, indent string) 
 
 	// Format panel (for dropdowns)
 	if panel, ok := m["panel"].(map[string]interface{}); ok {
-		b.WriteString(fmt.Sprintf("%s  └─ Panel:\n", indent))
+		fmt.Fprintf(b, "%s  └─ Panel:\n", indent)
 		formatElement(b, panel, indent+"    ")
 	}
 }
@@ -345,12 +345,12 @@ func interact(ctxID, id, action, text string) (tools.Result, error) {
 		return tools.Result{
 			Output: fmt.Sprintf("✓ [native] %s on @%s (%s) — isTrusted:true", action, xpaID, label),
 			Metadata: map[string]any{
-				"action":     action,
-				"elementId":  xpaID,
-				"isTrusted":  true,
-				"method":     "native_cdp_input",
-				"label":      label,
-				"url":        getCurrentURL(page),
+				"action":    action,
+				"elementId": xpaID,
+				"isTrusted": true,
+				"method":    "native_cdp_input",
+				"label":     label,
+				"url":       getCurrentURL(page),
 			},
 		}, nil
 	}
@@ -585,9 +585,9 @@ func formatMenuNode(b *strings.Builder, m map[string]interface{}, indent string)
 	label, _ := m["label"].(string)
 	href, _ := m["href"].(string)
 
-	b.WriteString(fmt.Sprintf("%s[%s] %s", indent, id, label))
+	fmt.Fprintf(b, "%s[%s] %s", indent, id, label)
 	if href != "" {
-		b.WriteString(fmt.Sprintf(" → %s", href))
+		fmt.Fprintf(b, " → %s", href)
 	}
 	b.WriteString("\n")
 
@@ -709,7 +709,7 @@ func waitElement(ctxID, selector, timeoutStr string) (tools.Result, error) {
 	timeoutMs := 10000
 	if timeoutStr != "" {
 		var secs int
-		fmt.Sscanf(timeoutStr, "%d", &secs)
+		_, _ = fmt.Sscanf(timeoutStr, "%d", &secs)
 		if secs > 0 {
 			timeoutMs = secs * 1000
 		}

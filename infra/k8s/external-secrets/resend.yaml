@@ -1,0 +1,37 @@
+---
+# ExternalSecret: xalgorix-resend
+#
+# Resend is the transactional-email provider for verification emails,
+# password resets, billing receipts, and webhook-failure notifications.
+# Only one key is needed.
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: xalgorix-resend
+  namespace: xalgorix
+  labels:
+    app.kubernetes.io/name: xalgorix-resend
+    app.kubernetes.io/part-of: xalgorix
+    app.kubernetes.io/component: secret
+    xalgorix.com/secret-source: aws-secrets-manager
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: aws-secrets-manager
+  target:
+    name: xalgorix-resend
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      metadata:
+        labels:
+          app.kubernetes.io/name: xalgorix-resend
+          app.kubernetes.io/part-of: xalgorix
+          app.kubernetes.io/component: secret
+          xalgorix.com/secret-source: aws-secrets-manager
+  data:
+    - secretKey: RESEND_API_KEY
+      remoteRef:
+        key: xalgorix/resend
+        property: RESEND_API_KEY

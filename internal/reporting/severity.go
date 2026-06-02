@@ -1,0 +1,56 @@
+package reporting
+
+import "strings"
+
+// SeverityCounts is the per-severity rollup the cover page and the
+// executive-summary stat cards consume. It mirrors the inline counter
+// previously embedded in [Generate], extracted into a named type so the
+// Worker_Pool, the cloud API surface, and unit tests can compute it
+// without re-implementing the case-folding rules.
+//
+// The field shapes intentionally match the cover-page card order
+// (Critical, High, Medium, Low, Info) so callers iterating in that
+// order produce stable output. Total is a precomputed convenience —
+// it is always equal to the sum of the per-severity buckets.
+//
+// Validates: Requirements 6.5.
+type SeverityCounts struct {
+	Critical int
+	High     int
+	Medium   int
+	Low      int
+	// Info captures every finding whose Severity does not match one
+	// of the four named bands. This includes empty severities, the
+	// canonical "informational" / "info" labels, and any custom
+	// severity an upstream classifier emits.
+	Info  int
+	Total int
+}
+
+// RollupSeverities computes the [SeverityCounts] for a slice of
+// findings. Severity matching is case-insensitive ("Critical",
+// "CRITICAL", "critical" all roll up the same bucket).
+//
+// A nil or empty input returns the zero value, which is safe to embed
+// directly in a cover-page render.
+//
+// Validates: Requirements 6.5.
+func RollupSeverities(vulns []Vuln) SeverityCounts {
+	var counts SeverityCounts
+	for _, v := range vulns {
+		switch strings.ToLower(v.Severity) {
+		case "critical":
+			counts.Critical++
+		case "high":
+			counts.High++
+		case "medium":
+			counts.Medium++
+		case "low":
+			counts.Low++
+		default:
+			counts.Info++
+		}
+	}
+	counts.Total = len(vulns)
+	return counts
+}

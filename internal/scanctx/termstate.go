@@ -2,6 +2,7 @@ package scanctx
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"os/exec"
@@ -134,7 +135,7 @@ func killTrackedProcess(cmd *exec.Cmd) {
 		}
 	}
 
-	if err := cmd.Process.Kill(); err != nil && err != os.ErrProcessDone {
+	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		log.Printf("[termstate] Failed to kill process pid %d: %v", pid, err)
 	}
 }

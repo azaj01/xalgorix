@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "xalgorix-cloud.fullname" . }}
+  labels:
+    {{- include "xalgorix-cloud.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "xalgorix-cloud.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "xalgorix-cloud.selectorLabels" . | nindent 8 }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: api-server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--mode", "all"]
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          # The API_Server reads CLAMAV_SOCKET_PATH at startup and
+          # constructs `internal/cloud/storage.ClamAVScanner` against it.
+          # Every upload that lands in `S3Storage.Put` is forwarded to
+          # the sidecar via the INSTREAM protocol BEFORE persistence —
+          # see Requirement 20.8.
+          env:
+            - name: CLAMAV_SOCKET_PATH
+              value: {{ .Values.clamav.socketPath | quote }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            {{- if .Values.clamav.enabled }}
+            {{- include "xalgorix-cloud.clamav.volumeMount" . | nindent 12 }}
+            {{- end }}
+        {{- if .Values.clamav.enabled }}
+        {{- include "xalgorix-cloud.clamav.container" . | nindent 8 }}
+        {{- end }}
+      volumes:
+        {{- if .Values.clamav.enabled }}
+        {{- include "xalgorix-cloud.clamav.volume" . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

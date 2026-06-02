@@ -1,0 +1,22 @@
+# Dodo Payments product IDs for the eu-west-1 region.
+#
+# Loaded at boot by internal/cloud/billing.LoadPlans (task 4.3 of the
+# xalgorix-saas spec). The keys mirror the Plan / Period enums declared
+# in internal/cloud/billing/plans.go and the plan list in
+# requirements.md → "Pricing and Plans".
+#
+# Region pinning is enforced by the platform: cross-region data is never
+# replicated, and EU-residency Organizations only ever read this overlay.
+# See design.md → "High-level component diagram" for the symmetric stack.
+#
+# The Free plan is intentionally absent: Free has no Dodo product because
+# it has no monthly bill. Resolve PlanFree in code, not here.
+pro:
+  monthly: prod_pro_monthly_eu_west_1_placeholder
+  annual:  prod_pro_annual_eu_west_1_placeholder
+team:
+  monthly: prod_team_monthly_eu_west_1_placeholder
+  annual:  prod_team_annual_eu_west_1_placeholder
+enterprise:
+  monthly: prod_enterprise_monthly_eu_west_1_placeholder
+  annual:  prod_enterprise_annual_eu_west_1_placeholder

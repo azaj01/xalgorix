@@ -2,7 +2,7 @@
 // and OAuth profile HTTP surface.
 //
 // This file is the single home for the redaction policy applied to
-// any credential field returned to the dashboard. Centralising the
+// any credential field returned to the dashboard. Centralizing the
 // helper here lets handlers_providers.go and (in Wave E task 5.2)
 // handlers_profiles.go share the exact same masking semantics, and
 // it lets the test suite assert one canonical algorithm rather than
@@ -11,13 +11,13 @@
 // The shape mirrors maskAgentMailKey in server.go (~6303–6311) so
 // operators see consistent redaction across the dashboard:
 //
-//   • empty input          → "" (so the UI can render
-//                            `hasApiKey === false` without juggling a
-//                            "****" placeholder)
-//   • short input (≤8 chr) → "****"
-//   • long input  (>8 chr) → "****" + last 8 characters
+//   - empty input          → "" (so the UI can render
+//     `hasApiKey === false` without juggling a
+//     "****" placeholder)
+//   - short input (≤8 chr) → "****"
+//   - long input  (>8 chr) → "****" + last 8 characters
 //
-// The "last 8" tail is wide enough for an operator to recognise
+// The "last 8" tail is wide enough for an operator to recognize
 // which key they pasted while still hiding the entropy a leak would
 // need to be exploitable. Validates: Requirements 5.1, 5.2, 5.4.
 package web
@@ -48,7 +48,7 @@ func maskAuthCredential(v string) string {
 // profileId, type, expiresAt, scopes, tokenType, requiresReauth,
 // apiBaseOverride, updatedAt — is copied through untouched.
 //
-// Centralising the redaction in one helper keeps the mask policy
+// Centralizing the redaction in one helper keeps the mask policy
 // consistent across every handler in handlers_profiles.go (Wave E
 // task 5.2) and gives the test suite a single function to assert
 // against. The Profile value type means callers receive a defensive

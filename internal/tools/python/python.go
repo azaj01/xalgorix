@@ -3,6 +3,7 @@ package python
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -76,7 +77,7 @@ func executePythonForContext(contextID string, args map[string]string) (tools.Re
 	waitCtx := pythonWaitContext(contextID)
 	lease, err := resources.AcquireToolLeaseContext(waitCtx, false, "python_action")
 	if err != nil {
-		return tools.Result{Output: fmt.Sprintf("[CANCELLED] python_action launch cancelled before starting: %v", err)}, nil
+		return tools.Result{Output: fmt.Sprintf("[CANCELED] python_action launch canceled before starting: %v", err)}, nil
 	}
 	defer lease.Release()
 
@@ -163,8 +164,11 @@ func executePythonForContext(contextID string, args map[string]string) (tools.Re
 	if waitErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			b.WriteString(fmt.Sprintf("\n[TIMEOUT: exceeded %ds]", timeoutSec))
-		} else if exitErr, ok := waitErr.(*exec.ExitError); ok {
-			b.WriteString(fmt.Sprintf("\n[exit code: %d]", exitErr.ExitCode()))
+		} else {
+			exitErr := &exec.ExitError{}
+			if errors.As(waitErr, &exitErr) {
+				b.WriteString(fmt.Sprintf("\n[exit code: %d]", exitErr.ExitCode()))
+			}
 		}
 	}
 
@@ -188,10 +192,10 @@ func pythonWaitContext(contextID string) context.Context {
 // (sc.ScanDir or cfg.WorkspaceRoot per R8.7, R8.10); this function does not
 // validate the path itself and would otherwise leak directories into $CWD.
 func preparePythonWorkspace(workDir string) {
-	_ = os.MkdirAll(filepath.Join(workDir, ".tmp"), 0o755)
-	_ = os.MkdirAll(filepath.Join(workDir, ".cache"), 0o755)
-	_ = os.MkdirAll(filepath.Join(workDir, ".config"), 0o755)
-	_ = os.MkdirAll(filepath.Join(workDir, ".local", "share"), 0o755)
+	_ = os.MkdirAll(filepath.Join(workDir, ".tmp"), 0o700)
+	_ = os.MkdirAll(filepath.Join(workDir, ".cache"), 0o700)
+	_ = os.MkdirAll(filepath.Join(workDir, ".config"), 0o700)
+	_ = os.MkdirAll(filepath.Join(workDir, ".local", "share"), 0o700)
 }
 
 func pythonWorkspaceEnv(workDir string) []string {

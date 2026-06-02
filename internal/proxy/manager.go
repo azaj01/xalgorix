@@ -8,7 +8,7 @@ import (
 )
 
 // Manager is the central proxy manager used by the rest of the application.
-// It is initialised once via Init() and then accessed through the package-level
+// It is initialized once via Init() and then accessed through the package-level
 // helpers GetClient() / GetProxy().
 //
 // FIX (Gemini HIGH): the Manager now holds a single shared *http.Client per
@@ -18,21 +18,21 @@ import (
 type Manager struct {
 	enabled  bool
 	pool     *Pool
-	rotation string        // "roundrobin" | "random"
+	rotation string // "roundrobin" | "random"
 	timeout  time.Duration
-	client   *http.Client  // shared client used when proxy routing is disabled
+	client   *http.Client // shared client used when proxy routing is disabled
 }
 
 var defaultManager *Manager
 
-// Init initialises the package-level Manager from explicit parameters.
+// Init initializes the package-level Manager from explicit parameters.
 // Call this once at startup (e.g. from main or server init).
 //
-//	  useProxy   – enable proxy routing
-//	  proxyURL   – single proxy string (takes precedence over proxyFile)
-//	  proxyFile  – path to a file with one proxy per line
-//	  rotation   – "roundrobin" or "random"
-//	  timeout    – per-request timeout
+//	useProxy   – enable proxy routing
+//	proxyURL   – single proxy string (takes precedence over proxyFile)
+//	proxyFile  – path to a file with one proxy per line
+//	rotation   – "roundrobin" or "random"
+//	timeout    – per-request timeout
 func Init(useProxy bool, proxyURL, proxyFile, rotation string, timeout time.Duration) error {
 	m := &Manager{
 		enabled:  useProxy,
@@ -62,7 +62,7 @@ func Init(useProxy bool, proxyURL, proxyFile, rotation string, timeout time.Dura
 	}
 
 	// Pre-build a shared no-proxy client (inherits DefaultTransport).
-	// Used when proxy routing is disabled so behaviour is truly zero-impact.
+	// Used when proxy routing is disabled so behavior is truly zero-impact.
 	noProxyTransport, _ := NewTransport(nil)
 	m.client = &http.Client{
 		Transport: noProxyTransport,

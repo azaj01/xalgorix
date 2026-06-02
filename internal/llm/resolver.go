@@ -64,7 +64,7 @@ var legacyProviderBases = map[string]string{
 
 // LegacyProviderBaseURL returns the canonical legacy API base URL
 // for the supplied provider slug (case-insensitive) and reports
-// whether the slug is recognised.
+// whether the slug is recognized.
 func LegacyProviderBaseURL(provider string) (string, bool) {
 	v, ok := legacyProviderBases[strings.ToLower(strings.TrimSpace(provider))]
 	return v, ok
@@ -151,7 +151,7 @@ func NewCompositeResolver(opts ...ResolverOption) Resolver {
 // defaultCatalogPick reads cfg.LLMProfile, splits it into
 // "<provider>:<profileId>", looks the matching profile up in the
 // store, and looks the matching catalog entry up in Builtin(). An
-// empty cfg.LLMProfile is signalled via *ConfigError so the
+// empty cfg.LLMProfile is signaled via *ConfigError so the
 // composite falls through to the legacy branch.
 func defaultCatalogPick(c *compositeResolver) func(ctx context.Context) (catalogPick, error) {
 	return func(ctx context.Context) (catalogPick, error) {

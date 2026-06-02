@@ -33,9 +33,9 @@ func TestParseSelector_PlainCSS(t *testing.T) {
 
 func TestTruncate(t *testing.T) {
 	tests := []struct {
-		in     string
-		max    int
-		want   string
+		in   string
+		max  int
+		want string
 	}{
 		{"hello", 10, "hello"},
 		{"hello", 5, "hello"},

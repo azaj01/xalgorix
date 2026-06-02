@@ -25,7 +25,7 @@ package agent
 // and event types mirror the corresponding lines in agent.go's
 // dispatch path (see internal/agent/agent.go ~line 1465: the
 // shouldBlockForOutOfScope branch). What we lose is the LLM
-// round-trip itself; what we keep is every observable behaviour
+// round-trip itself; what we keep is every observable behavior
 // the spec's requirements pin: gate verdict, args byte-identity at
 // the registered tool handler, OUT-OF-SCOPE message on the event
 // channel, agent loop continues (modeled as: harness returns
@@ -48,11 +48,9 @@ import (
 // was never invoked), and every event the harness emitted on the
 // agent's event channel.
 type dispatchOutcome struct {
-	blocked    bool
-	reason     string
-	handlerHit bool
-	handlerGot map[string]string
-	events     []Event
+	blocked bool
+	reason  string
+	events  []Event
 }
 
 // dispatchToolCall replays the (*Agent).Run gate-and-dispatch path
@@ -215,7 +213,7 @@ func containsRejectionMessage(events []Event) bool {
 //   - No OUT-OF-SCOPE TARGET BLOCKED event appears on the event
 //     channel.
 //
-// This is the inverted successor to the pre-fix behaviour where
+// This is the inverted successor to the pre-fix behavior where
 // terminal_execute against `oos.example` was rejected as `not in
 // scope`.
 //
@@ -355,12 +353,12 @@ func TestIntegration_EmptyScopeLocalBlock(t *testing.T) {
 // post-fix end-to-end contract for `add_note` carrying OOS-host
 // text in `key` / `value`:
 //
-//   1. The gate is non-gated for add_note → the call passes through.
-//   2. The registered add_note handler receives `key` / `value`
-//      byte-identical to the LLM-provided input (no redaction).
-//   3. On the next "iteration" — modeled as a follow-up
-//      `read_notes` dispatch on the same agent — the persisted
-//      text is byte-identical to what was stored.
+//  1. The gate is non-gated for add_note → the call passes through.
+//  2. The registered add_note handler receives `key` / `value`
+//     byte-identical to the LLM-provided input (no redaction).
+//  3. On the next "iteration" — modeled as a follow-up
+//     `read_notes` dispatch on the same agent — the persisted
+//     text is byte-identical to what was stored.
 //
 // The first add_note → read_notes round-trip exercises the same
 // notes-store the production tool uses (per-scanctx note store

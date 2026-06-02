@@ -87,12 +87,12 @@ type StartOptions struct {
 // renders differently:
 //
 //   - "" (empty)       — claude_cli_reuse: confirm-and-import UI
-//                        (no input field, the credential file is
-//                        already on disk).
+//     (no input field, the credential file is
+//     already on disk).
 //   - "paste_code"     — PKCE paste fallback: textarea for the
-//                        authorization code returned through OOB.
+//     authorization code returned through OOB.
 //   - "setup_token"    — setup_token driver: textarea for the
-//                        one-time vendor-issued token.
+//     one-time vendor-issued token.
 //
 // The dashboard previously inferred this from "mode == paste &&
 // !authURL", which conflated setup_token with claude_cli_reuse.
@@ -368,7 +368,7 @@ func refreshWithSink(
 			// error wrapped so log readers can see why
 			// the persistence failed.
 			if perr := store.Put(ctx, current); perr != nil {
-				return current, fmt.Errorf("auth: persist requires_reauth: %w (after %v)", perr, ErrReauthRequired)
+				return current, fmt.Errorf("auth: persist requires_reauth: %w (after %w)", perr, ErrReauthRequired)
 			}
 			return current, ErrReauthRequired
 		}

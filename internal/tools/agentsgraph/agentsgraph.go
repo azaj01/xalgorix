@@ -387,7 +387,7 @@ func waitAgent(args map[string]string) (tools.Result, error) {
 
 	timeout := 600 // 10 minutes default
 	if t := args["timeout"]; t != "" {
-		fmt.Sscanf(t, "%d", &timeout)
+		_, _ = fmt.Sscanf(t, "%d", &timeout)
 	}
 
 	state, exists := snapshotAgent(agentID)

@@ -1,0 +1,85 @@
+# Default values for the xalgorix-cloud chart.
+# Override with `helm install -f values-<env>.yaml ...` in the per-region overlay.
+
+image:
+  repository: ghcr.io/xalgord/xalgorix-cloud
+  tag: ""               # empty => fall back to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+# Pod-level toggles. The API_Server runs as a non-root user; the
+# clamav sidecar mounts its scratch volume read-write but the rest of
+# the filesystem stays read-only.
+podSecurityContext:
+  runAsNonRoot: true
+  fsGroup: 65532
+
+service:
+  type: ClusterIP
+  port: 8080
+
+# ClamAV sidecar.
+#
+# The sidecar is the antivirus engine for every multipart upload
+# accepted by the API_Server (logos, target lists, anywhere
+# `multipart/form-data` is received). It exposes a Unix-domain socket
+# inside the pod at `clamav.socketPath`; the API_Server connects to that
+# socket via `internal/cloud/storage.ClamAVScanner` and refuses to
+# persist any upload that returns `FOUND`.
+#
+# Validates: Requirements 6.11, 20.8.
+clamav:
+  enabled: true
+  image:
+    repository: clamav/clamav
+    tag: "1.3"
+    pullPolicy: IfNotPresent
+  # Path of the Unix socket the API_Server connects to. The sidecar's
+  # `clamd.conf` is patched at startup to bind LocalSocket here; the
+  # API_Server reads `CLAMAV_SOCKET_PATH` from the same value.
+  socketPath: /run/clamd/clamd.sock
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  # `clamdcheck.sh` is the upstream-recommended liveness probe; it
+  # PINGs the daemon over the same socket the API_Server uses.
+  livenessProbe:
+    exec:
+      command: ["clamdcheck.sh"]
+    initialDelaySeconds: 120
+    periodSeconds: 30
+    timeoutSeconds: 10
+    failureThreshold: 6
+  readinessProbe:
+    exec:
+      command: ["clamdcheck.sh"]
+    initialDelaySeconds: 90
+    periodSeconds: 30
+    timeoutSeconds: 10
+    failureThreshold: 3
+  # Tunable for first-boot signature download. Set to 240s in regions
+  # with slow egress; the default matches docker-compose.dev.yml.
+  startupProbe:
+    exec:
+      command: ["clamdcheck.sh"]
+    initialDelaySeconds: 30
+    periodSeconds: 15
+    timeoutSeconds: 10
+    failureThreshold: 60
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

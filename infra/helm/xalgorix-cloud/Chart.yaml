@@ -1,0 +1,26 @@
+apiVersion: v2
+name: xalgorix-cloud
+description: |
+  Xalgorix Cloud_Platform Helm chart. Packages the API_Server +
+  Worker_Pool deployment together with the supporting in-pod sidecars
+  (currently just `clamav`, which exposes a Unix socket at
+  `/run/clamd/clamd.sock` for upload virus scanning per design.md
+  "Security Hardening → ClamAV").
+type: application
+# Chart version is bumped on every chart change. The application version
+# is the Cloud_Platform release tag; both are stamped into pod labels by
+# `templates/_helpers.tpl` once that helper lands.
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.28.0-0"
+keywords:
+  - xalgorix
+  - security
+  - cloud-platform
+  - clamav
+home: https://xalgorix.com
+sources:
+  - https://github.com/xalgord/xalgorix
+maintainers:
+  - name: Xalgorix Cloud Platform
+    email: cloud-platform@xalgorix.com

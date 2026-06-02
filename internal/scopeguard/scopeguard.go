@@ -109,7 +109,7 @@ func IsLocalOrListener(cfg Config, target string) bool {
 	// remainder of this call. IP literals skip DNS entirely; otherwise
 	// a single LookupHost feeds every downstream check. An empty or
 	// failing resolution falls back to "allow" (matching prior
-	// behaviour) so unreachable hostnames are not blocked solely on
+	// behavior) so unreachable hostnames are not blocked solely on
 	// lookup failure — the request will fail naturally further down.
 	var resolvedIPs []net.IP
 	if ip := net.ParseIP(host); ip != nil {

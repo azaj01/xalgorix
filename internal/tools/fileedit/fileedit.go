@@ -231,11 +231,11 @@ func viewFile(path, viewRange string) (tools.Result, error) {
 
 func createFile(path, content string) (tools.Result, error) {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return tools.Result{}, fmt.Errorf("cannot create directory: %w", err)
 	}
 
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		return tools.Result{}, fmt.Errorf("cannot write file: %w", err)
 	}
 
@@ -260,7 +260,7 @@ func replaceInFile(path, oldStr, newStr string) (tools.Result, error) {
 
 	newContent := strings.Replace(content, oldStr, newStr, 1)
 
-	if err := os.WriteFile(path, []byte(newContent), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(newContent), 0o600); err != nil {
 		return tools.Result{}, fmt.Errorf("cannot write file: %w", err)
 	}
 
@@ -289,7 +289,7 @@ func insertInFile(path, newStr, insertLineStr string) (tools.Result, error) {
 	result = append(result, newLines...)
 	result = append(result, lines[insertLine:]...)
 
-	if err := os.WriteFile(path, []byte(strings.Join(result, "\n")), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(strings.Join(result, "\n")), 0o600); err != nil {
 		return tools.Result{}, fmt.Errorf("cannot write file: %w", err)
 	}
 

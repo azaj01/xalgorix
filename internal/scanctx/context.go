@@ -120,7 +120,7 @@ func New(id, scanDir string) *ScanContext {
 // recovered-closure structure above is what carries this guarantee:
 //
 //   - The Cancel sub-step releases the scan's root context.WithCancel
-//     funds — it never holds a Tool_Lease, but cancelling here lets the
+//     funds — it never holds a Tool_Lease, but canceling here lets the
 //     downstream subprocesses tracked by Terminal observe their context's
 //     Done channel and exit cleanly before KillAll runs.
 //

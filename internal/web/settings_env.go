@@ -43,18 +43,18 @@ type environmentSettingsResponse struct {
 }
 
 type llmSettingsResponse struct {
-	Model                     string                `json:"model"`
-	APIBase                   string                `json:"apiBase"`
-	APIKey                    string                `json:"apiKey"`
-	HasAPIKey                 bool                  `json:"hasApiKey"`
-	ReasoningEffort           string                `json:"reasoningEffort"`
-	LLMMaxRetries             int                   `json:"llmMaxRetries"`
-	MemoryCompressorTimeout   int                   `json:"memoryCompressorTimeout"`
-	MaxIterations             int                   `json:"maxIterations"`
-	GeminiAPIKey              string                `json:"geminiApiKey"`
-	HasGeminiAPIKey           bool                  `json:"hasGeminiApiKey"`
-	EnvFile                   string                `json:"envFile"`
-	EnvironmentRestartWarning bool                  `json:"environmentRestartWarning"`
+	Model                     string `json:"model"`
+	APIBase                   string `json:"apiBase"`
+	APIKey                    string `json:"apiKey"`
+	HasAPIKey                 bool   `json:"hasApiKey"`
+	ReasoningEffort           string `json:"reasoningEffort"`
+	LLMMaxRetries             int    `json:"llmMaxRetries"`
+	MemoryCompressorTimeout   int    `json:"memoryCompressorTimeout"`
+	MaxIterations             int    `json:"maxIterations"`
+	GeminiAPIKey              string `json:"geminiApiKey"`
+	HasGeminiAPIKey           bool   `json:"hasGeminiApiKey"`
+	EnvFile                   string `json:"envFile"`
+	EnvironmentRestartWarning bool   `json:"environmentRestartWarning"`
 	// v4.4.22: catalog-aware fields driving the new LLM Settings
 	// tab. Provider mirrors the active provider id derived from
 	// LLMProfile (or the legacy XALGORIX_LLM "<provider>/<model>"
@@ -62,9 +62,9 @@ type llmSettingsResponse struct {
 	// branch the resolver currently dispatches through. Profiles
 	// is the masked list of saved profiles for the active
 	// provider only — see handleLLMSettings GET for filtering.
-	Provider         string             `json:"provider"`
-	AuthMethod       string             `json:"authMethod"`
-	ActiveProfileKey string             `json:"activeProfileKey"`
+	Provider         string              `json:"provider"`
+	AuthMethod       string              `json:"authMethod"`
+	ActiveProfileKey string              `json:"activeProfileKey"`
 	Profiles         []llmProfileSummary `json:"profiles"`
 }
 

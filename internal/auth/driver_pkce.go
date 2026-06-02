@@ -3,23 +3,23 @@
 //
 // The driver supports two completion paths from a single Start:
 //
-//   1. Loopback (default): bind a one-shot HTTP listener on
-//      127.0.0.1:<ephemeral>, return the authorization URL to the
-//      dashboard so the operator can complete consent in their
-//      browser, and finalize the flow inside the loopback callback
-//      handler. This is the happy path described by Requirements
-//      6.1–6.5.
+//  1. Loopback (default): bind a one-shot HTTP listener on
+//     127.0.0.1:<ephemeral>, return the authorization URL to the
+//     dashboard so the operator can complete consent in their
+//     browser, and finalize the flow inside the loopback callback
+//     handler. This is the happy path described by Requirements
+//     6.1–6.5.
 //
-//   2. Paste fallback: when the operator has set XALGORIX_BIND to a
-//      non-loopback address (Requirement 13.2), or when the
-//      dashboard explicitly requests paste mode (operator on a
-//      headless host without browser automation), the driver
-//      refuses to bind a listener and returns Mode="paste" with an
-//      authorization URL using the OOB redirect_uri. The operator
-//      pastes the resulting authorization code through
-//      POST /api/auth/profiles/oauth/complete (Requirement 6.6),
-//      which routes back to Driver.Complete with FlowID +
-//      AuthorizationCode + State.
+//  2. Paste fallback: when the operator has set XALGORIX_BIND to a
+//     non-loopback address (Requirement 13.2), or when the
+//     dashboard explicitly requests paste mode (operator on a
+//     headless host without browser automation), the driver
+//     refuses to bind a listener and returns Mode="paste" with an
+//     authorization URL using the OOB redirect_uri. The operator
+//     pastes the resulting authorization code through
+//     POST /api/auth/profiles/oauth/complete (Requirement 6.6),
+//     which routes back to Driver.Complete with FlowID +
+//     AuthorizationCode + State.
 //
 // Both paths share the same code-exchange helper (exchange) so the
 // resulting OAuth_Profile is byte-identical regardless of whether
@@ -164,14 +164,14 @@ type pkceFlow struct {
 	// the timeout test. Holding mu across the assignment in
 	// Start and the read in cleanup establishes the missing
 	// happens-before edge.
-	mu        sync.Mutex
-	listener  net.Listener
-	server    *http.Server
-	timer     *time.Timer
-	redirect  string
-	done      chan error
-	cleanup   sync.Once
-	flowID    string
+	mu       sync.Mutex
+	listener net.Listener
+	server   *http.Server
+	timer    *time.Timer
+	redirect string
+	done     chan error
+	cleanup  sync.Once
+	flowID   string
 }
 
 // pkceTokenResponse models the OAuth 2.0 token-endpoint response
@@ -313,7 +313,12 @@ func (d *pkceDriver) Start(ctx context.Context, e providers.Entry, opts StartOpt
 	if err != nil {
 		return StartResult{}, fmt.Errorf("auth/pkce: bind loopback: %w", err)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
+	tcpAddr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = listener.Close()
+		return StartResult{}, fmt.Errorf("auth/pkce: unexpected listener address type %T", listener.Addr())
+	}
+	port := tcpAddr.Port
 	redirect := fmt.Sprintf("http://127.0.0.1:%d%s", port, pkceCallbackPath)
 	flow.listener = listener
 	flow.redirect = redirect
@@ -371,7 +376,10 @@ func (d *pkceDriver) Complete(ctx context.Context, e providers.Entry, in Complet
 	if !ok {
 		return Profile{}, fmt.Errorf("%w: flow %q not found or expired", ErrFlowTimeout, in.FlowID)
 	}
-	flow := raw.(*pkceFlow)
+	flow, ok := raw.(*pkceFlow)
+	if !ok {
+		return Profile{}, fmt.Errorf("auth/pkce: internal type error for flow %q", in.FlowID)
+	}
 	if in.State == "" || in.State != flow.state {
 		return Profile{}, fmt.Errorf("auth/pkce: state mismatch")
 	}
@@ -747,7 +755,10 @@ func (d *pkceDriver) expireFlow(flowID string, err error) {
 	if !ok {
 		return
 	}
-	flow := raw.(*pkceFlow)
+	flow, ok := raw.(*pkceFlow)
+	if !ok {
+		return
+	}
 	flow.cleanup.Do(func() {
 		// Snapshot the per-flow resources under flow.mu so the
 		// AfterFunc-spawned cleanup observes the same fields

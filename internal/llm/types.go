@@ -17,11 +17,11 @@ const (
 	// AuthAPIKey selects the legacy API-key header style — Bearer for
 	// OpenAI-compatible endpoints, x-api-key for Anthropic, and
 	// x-goog-api-key for Gemini.
-	AuthAPIKey AuthMethod = "api_key"
+	AuthAPIKey AuthMethod = "api_key" //nolint:gosec // G101 false positive: enum value naming an auth method, not a credential
 
 	// AuthOAuthBearer selects the OAuth Bearer header style on every
 	// header style: `Authorization: Bearer <accessToken>`.
-	AuthOAuthBearer AuthMethod = "oauth_bearer"
+	AuthOAuthBearer AuthMethod = "oauth_bearer" //nolint:gosec // G101 false positive: enum value naming an auth method, not a credential
 )
 
 // Endpoint is the resolved outbound target for a single chat /
@@ -89,7 +89,7 @@ type fixedResolver struct {
 }
 
 // Resolve returns the baked endpoint and a nil error. Honors a
-// cancelled context so callers that pass a cancellable scope still
+// canceled context so callers that pass a cancellable scope still
 // observe cancellation at the resolver boundary.
 func (f fixedResolver) Resolve(ctx context.Context) (Endpoint, error) {
 	if err := ctx.Err(); err != nil {

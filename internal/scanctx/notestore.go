@@ -183,7 +183,7 @@ func (ns *NoteStore) writeFile(data []byte, path string) {
 	}
 	ns.writeMu.Lock()
 	defer ns.writeMu.Unlock()
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		log.Printf("[notestore] Warning: failed to save notes to %s: %v", path, err)
 	}
 }

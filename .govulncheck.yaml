@@ -1,0 +1,39 @@
+# govulncheck configuration for xalgorix.
+#
+# Implements task 0.3 of the xalgorix-saas spec (Requirement 20.11).
+# govulncheck (golang.org/x/vuln/cmd/govulncheck) does not yet support a
+# native config file; this YAML is read by the `make sec` target and the
+# security CI workflow as a declarative source of truth for:
+#   - which patterns to scan,
+#   - which advisories are temporarily acknowledged (with a sunset date),
+#   - which Go toolchain version the scan must pin to.
+#
+# Format owned by this repository.
+
+# Go toolchain to use when invoking govulncheck. Must stay in sync with
+# go.mod's `toolchain` directive.
+toolchain: "1.24"
+
+# Patterns scanned by `make sec`. `./...` keeps every package in scope.
+patterns:
+  - "./..."
+
+# Output mode passed to govulncheck. CI uses `json` so the workflow can
+# upload the result as an artifact and gate on severity.
+modes:
+  local: text
+  ci: json
+
+# Temporarily acknowledged vulnerabilities. Each entry MUST have:
+#   id:      the GO-YYYY-NNNN identifier from pkg.go.dev/vuln,
+#   reason:  why we cannot upgrade right now,
+#   sunset:  ISO-8601 date by which the entry must be removed.
+#
+# The list is empty by default. Add entries with care; the daily
+# security workflow opens a tracked issue when a high/critical advisory
+# appears that is not in this list.
+ignore: []
+
+# Severity threshold above which the CI workflow fails the build.
+# Allowed values: low | medium | high | critical.
+fail_on: "high"

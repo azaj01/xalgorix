@@ -121,7 +121,7 @@ func TestActivityPolicyBlocksPassiveReconFullScanUntilPassiveLookup(t *testing.T
 	if msg := a.maybeCompletePassiveReconGuardAtIterationStart(1); msg != "" {
 		t.Fatalf("single passive lookup should not complete recon guard: %s", msg)
 	}
-	blocked, reason = a.shouldBlockForActivityPolicy("terminal_execute", map[string]string{
+	blocked, _ = a.shouldBlockForActivityPolicy("terminal_execute", map[string]string{
 		"command": "curl -sk https://example.com/login",
 	})
 	if !blocked {

@@ -1,0 +1,67 @@
+{
+  "name": "@xalgorix/ui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared shadcn/ui registry, Tailwind preset, and Framer Motion primitives for Xalgorix SaaS frontends. Implements design.md `web/packages/ui`.",
+  "type": "module",
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./components/*": {
+      "types": "./src/components/*.tsx",
+      "import": "./src/components/*.tsx"
+    },
+    "./tailwind-preset": {
+      "types": "./tailwind-preset.ts",
+      "import": "./tailwind-preset.ts",
+      "require": "./tailwind-preset.cjs"
+    },
+    "./globals.css": "./src/globals.css",
+    "./lib/cn": {
+      "types": "./src/lib/cn.ts",
+      "import": "./src/lib/cn.ts"
+    },
+    "./motion": {
+      "types": "./src/motion/index.ts",
+      "import": "./src/motion/index.ts"
+    },
+    "./motion/MotionProvider": {
+      "types": "./src/motion/MotionProvider.tsx",
+      "import": "./src/motion/MotionProvider.tsx"
+    },
+    "./registry": "./registry.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint . --max-warnings=0",
+    "test": "echo \"@xalgorix/ui has no tests yet\" && exit 0",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.1.1",
+    "framer-motion": "^11.5.4",
+    "lucide-react": "^0.451.0",
+    "tailwind-merge": "^2.5.2",
+    "tailwindcss-animate": "^1.0.7"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwindcss": "^3.4.13"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@xalgorix/eslint-config": "workspace:*",
+    "@xalgorix/tsconfig": "workspace:*",
+    "tailwindcss": "^3.4.13",
+    "typescript": "^5.5.4"
+  }
+}

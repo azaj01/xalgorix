@@ -67,7 +67,7 @@ func TestReset(t *testing.T) {
 
 // TestWaitReturnsWithinReasonableTime verifies Wait does not block forever.
 func TestWaitReturnsWithinReasonableTime(t *testing.T) {
-	l := ratelimit.New(100, 1) // 100 rps — each token arrives in ~10 ms
+	l := ratelimit.New(100, 1)     // 100 rps — each token arrives in ~10 ms
 	l.Allow("https://example.com") // exhaust burst=1
 
 	done := make(chan struct{})

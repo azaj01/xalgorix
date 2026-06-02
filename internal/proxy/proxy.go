@@ -164,7 +164,7 @@ func parsePlain(raw string) (*Proxy, error) {
 		}, nil
 	}
 
-	return nil, fmt.Errorf("proxy: unrecognised format %q (want ip:port or ip:port:user:pass)", raw)
+	return nil, fmt.Errorf("proxy: unrecognized format %q (want ip:port or ip:port:user:pass)", raw)
 }
 
 // NewTransport creates an *http.Transport configured to use the given proxy.
@@ -177,17 +177,28 @@ func NewTransport(p *Proxy) (*http.Transport, error) {
 	if p == nil {
 		// Return the default transport cast; callers that need a writable copy
 		// should Clone() themselves, but for read-only use this is safe.
-		return http.DefaultTransport.(*http.Transport).Clone(), nil
+		return clonedDefaultTransport(), nil
 	}
 	proxyURL, err := p.URL()
 	if err != nil {
 		return nil, err
 	}
-	// Clone DefaultTransport to inherit all optimised settings, then
+	// Clone DefaultTransport to inherit all optimized settings, then
 	// only override the Proxy field.
-	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr := clonedDefaultTransport()
 	tr.Proxy = http.ProxyURL(proxyURL)
 	return tr, nil
+}
+
+// clonedDefaultTransport returns a writable clone of the stdlib default
+// transport. http.DefaultTransport is documented to be a *http.Transport;
+// the comma-ok guard falls back to a zero-value transport if a future
+// runtime ever changes that, so the assertion can never panic.
+func clonedDefaultTransport() *http.Transport {
+	if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+		return dt.Clone()
+	}
+	return &http.Transport{}
 }
 
 // NewClient returns an *http.Client configured with the given proxy and timeout.
@@ -205,7 +216,7 @@ func NewClient(p *Proxy, timeout time.Duration) (*http.Client, error) {
 // NewDirectClient returns a direct HTTP client using Go's tuned default
 // transport, optionally disabling TLS verification for explicit testing cases.
 func NewDirectClient(tlsSkipVerify bool) *http.Client {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr := clonedDefaultTransport()
 	if tlsSkipVerify {
 		if tr.TLSClientConfig == nil {
 			tr.TLSClientConfig = &tls.Config{} //nolint:gosec // caller explicitly requested insecure TLS

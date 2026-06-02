@@ -11,28 +11,28 @@
 //
 // Locking model — why a sentinel lockfile:
 //
-//   The natural approach of flocking auth-profiles.json directly
-//   races against storage.WriteAtomic, which renames a temp file
-//   over the destination. After a rename the destination's inode
-//   has changed, so any flock held by a concurrent writer was on
-//   the now-detached inode and excludes nothing from the new file.
-//   Sample race:
+//	The natural approach of flocking auth-profiles.json directly
+//	races against storage.WriteAtomic, which renames a temp file
+//	over the destination. After a rename the destination's inode
+//	has changed, so any flock held by a concurrent writer was on
+//	the now-detached inode and excludes nothing from the new file.
+//	Sample race:
 //
-//     A: open auth-profiles.json   (inode X)
-//     A: flock(X, LOCK_EX)         (held)
-//     A: WriteAtomic               (rename → inode Y at the path)
-//     A: close                     (releases flock on detached X)
-//     B: open auth-profiles.json   (gets inode Y — never locked)
-//     B: flock(Y, LOCK_EX)         (succeeds immediately)
-//     B: writes blow away A's data
+//	  A: open auth-profiles.json   (inode X)
+//	  A: flock(X, LOCK_EX)         (held)
+//	  A: WriteAtomic               (rename → inode Y at the path)
+//	  A: close                     (releases flock on detached X)
+//	  B: open auth-profiles.json   (gets inode Y — never locked)
+//	  B: flock(Y, LOCK_EX)         (succeeds immediately)
+//	  B: writes blow away A's data
 //
-//   The fix — used here — is to flock a sentinel file
-//   "auth-profiles.json.lock" whose inode is stable (never renamed).
-//   Every writer flocks the sentinel; the data file rename happens
-//   inside that critical section. On Linux flock serializes both
-//   across processes AND across file descriptors within the same
-//   process, so the sentinel covers both correctness boundaries
-//   without an additional sync.Mutex.
+//	The fix — used here — is to flock a sentinel file
+//	"auth-profiles.json.lock" whose inode is stable (never renamed).
+//	Every writer flocks the sentinel; the data file rename happens
+//	inside that critical section. On Linux flock serializes both
+//	across processes AND across file descriptors within the same
+//	process, so the sentinel covers both correctness boundaries
+//	without an additional sync.Mutex.
 //
 // Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8.
 package auth

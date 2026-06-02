@@ -58,7 +58,7 @@ func initLLMSemaphore() {
 }
 
 // AcquireLLMSlot reserves one in-flight LLM slot, blocking until a slot is
-// available or ctx is cancelled.
+// available or ctx is canceled.
 //
 // On success it returns a release function that callers MUST invoke exactly
 // once (typically via defer) after the LLM call returns, freeing the slot for

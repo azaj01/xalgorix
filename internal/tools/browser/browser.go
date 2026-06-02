@@ -100,11 +100,6 @@ func getBrowserStoreByID(id string) *browserStore {
 	return s
 }
 
-// getBrowserStore returns the browser store for the default (CLI) scan context.
-func getBrowserStore() *browserStore {
-	return getBrowserStoreByID(scanctx.Default().ID)
-}
-
 // savedCookieEntry is a JSON-serializable cookie for disk persistence.
 type savedCookieEntry struct {
 	Name     string `json:"name"`
@@ -312,7 +307,7 @@ func getChromiumPath(ctxID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("browser cache dir rejected by path policy: %w", err)
 	}
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 		return "", fmt.Errorf("failed to create browser cache dir: %w", err)
 	}
 
@@ -362,7 +357,7 @@ func extractExtension(ctxID string) (string, error) {
 	}
 
 	// Extract all files
-	if err := os.MkdirAll(extDir, 0o755); err != nil {
+	if err := os.MkdirAll(extDir, 0o700); err != nil {
 		return "", fmt.Errorf("mkdir extension dir: %w", err)
 	}
 
@@ -384,7 +379,7 @@ func extractExtension(ctxID string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("extension file %s rejected by path policy: %w", entry.Name(), err)
 		}
-		if err := os.WriteFile(dst, data, 0o644); err != nil {
+		if err := os.WriteFile(dst, data, 0o600); err != nil {
 			return "", fmt.Errorf("write %s: %w", entry.Name(), err)
 		}
 	}
@@ -462,7 +457,7 @@ func ensureBrowser(ctxID, proxy string) error {
 	if bs == nil || bs.Lease() == nil {
 		l, err := resources.AcquireToolLeaseContext(browserWaitContext(ctxID), false, "browser_action")
 		if err != nil {
-			return fmt.Errorf("browser launch cancelled while waiting for resource capacity: %w", err)
+			return fmt.Errorf("browser launch canceled while waiting for resource capacity: %w", err)
 		}
 		lease = l
 		leaseAcquired = true
@@ -640,7 +635,7 @@ func launchBrowser(ctxID, rawURL, proxy string) (tools.Result, error) {
 	if rawURL != "" {
 		err := p.Timeout(20 * time.Second).Navigate(rawURL)
 		if err == nil {
-			p.Timeout(10 * time.Second).WaitStable(time.Second)
+			_ = p.Timeout(10 * time.Second).WaitStable(time.Second)
 		}
 	}
 
@@ -656,7 +651,7 @@ func navigateTo(ctxID, rawURL string) (tools.Result, error) {
 	err := s.page.Timeout(20 * time.Second).Navigate(rawURL)
 	if err == nil {
 		// Wait for both DOM and network to become stable natively
-		s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
+		_ = s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
 	}
 	return pageState(ctxID, "Navigated", s.currentTab)
 }
@@ -685,7 +680,7 @@ func clickElement(ctxID, selector string) (tools.Result, error) {
 	el.MustClick()
 	// Wait for any navigation or AJAX that results from the click
 	time.Sleep(500 * time.Millisecond)
-	s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
+	_ = s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
 	return pageState(ctxID, fmt.Sprintf("Clicked: %s", selector), s.currentTab)
 }
 
@@ -743,13 +738,13 @@ func submitForm(ctxID, selector string) (tools.Result, error) {
 		}
 		if !clicked {
 			// Fallback: press Enter on the active element
-			s.page.Keyboard.Press(input.Enter)
+			_ = s.page.Keyboard.Press(input.Enter)
 		}
 	}
 
 	// Wait for navigation/AJAX after form submission
 	time.Sleep(1 * time.Second)
-	s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
+	_ = s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
 	return pageState(ctxID, "Form submitted", s.currentTab)
 }
 
@@ -1062,7 +1057,7 @@ func waitFor(ctxID, selector, waitType, timeoutStr string) (tools.Result, error)
 	timeout := 10 * time.Second
 	if timeoutStr != "" {
 		var secs int
-		fmt.Sscanf(timeoutStr, "%d", &secs)
+		_, _ = fmt.Sscanf(timeoutStr, "%d", &secs)
 		if secs > 0 {
 			timeout = time.Duration(secs) * time.Second
 		}
@@ -1081,7 +1076,7 @@ func waitFor(ctxID, selector, waitType, timeoutStr string) (tools.Result, error)
 			time.Sleep(500 * time.Millisecond)
 			info, _ = s.page.Info()
 			if info != nil && info.URL != oldURL {
-				s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
+				_ = s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
 				return pageState(ctxID, "Navigation detected", s.currentTab)
 			}
 		}
@@ -1098,7 +1093,7 @@ func waitFor(ctxID, selector, waitType, timeoutStr string) (tools.Result, error)
 	}
 
 	// Default: just wait for page to stabilize
-	s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
+	_ = s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
 	return pageState(ctxID, "Page stabilized", s.currentTab)
 }
 
@@ -1177,7 +1172,7 @@ func fillForm(ctxID, fields string) (tools.Result, error) {
 			if err == nil {
 				tag, _ := el.Eval(`() => this.tagName.toLowerCase()`)
 				if tag != nil && tag.Value.String() == "select" {
-					el.Select([]string{fieldValue}, true, rod.SelectorTypeText)
+					_ = el.Select([]string{fieldValue}, true, rod.SelectorTypeText)
 				} else {
 					el.MustScrollIntoView()
 					el.MustSelectAllText().MustInput(fieldValue)
@@ -1514,7 +1509,7 @@ func newTab(ctxID, rawURL string) (tools.Result, error) {
 	if rawURL != "" {
 		err := p.Timeout(20 * time.Second).Navigate(rawURL)
 		if err == nil {
-			p.Timeout(10 * time.Second).WaitStable(1 * time.Second)
+			_ = p.Timeout(10 * time.Second).WaitStable(1 * time.Second)
 		}
 	}
 

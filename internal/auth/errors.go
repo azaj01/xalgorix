@@ -48,6 +48,7 @@ var ErrProviderRequired = errors.New("provider is required")
 // ErrProfileTypeInvalid is returned from Store.Put when
 // Profile.Type is neither APIKey nor OAuth.
 var ErrProfileTypeInvalid = errors.New("profile type must be api_key or oauth")
+
 // ErrReauthRequired is returned from Driver.Refresh when the
 // upstream token endpoint refused the stored refresh_token with
 // invalid_grant. The driver's refresh helper sets
@@ -75,9 +76,9 @@ var ErrNotFound = errors.New("claude cli credentials not found")
 // responded with the OAuth 2.0 invalid_grant error. The shared
 // helper translates this into:
 //
-//   1. Profile.RequiresReauth = true
-//   2. Persist the marked profile via Store.Put
-//   3. Return ErrReauthRequired to the caller
+//  1. Profile.RequiresReauth = true
+//  2. Persist the marked profile via Store.Put
+//  3. Return ErrReauthRequired to the caller
 //
 // per Requirement 10.4. Drivers do not return ErrInvalidGrant
 // directly to their callers — refreshWithSink owns the translation

@@ -53,8 +53,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "\n%s\n", crashMsg)
 
 			// Also log to a file so it survives systemd journal rotation
-			if f, err := os.OpenFile("/tmp/xalgorix-crash.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
-				fmt.Fprintf(f, "\n=== CRASH @ %s ===\n%s\n", time.Now().Format(time.RFC3339), crashMsg)
+			if f, err := os.OpenFile("/tmp/xalgorix-crash.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); err == nil {
+				_, _ = fmt.Fprintf(f, "\n=== CRASH @ %s ===\n%s\n", time.Now().Format(time.RFC3339), crashMsg)
 				f.Close()
 			}
 
@@ -132,7 +132,7 @@ func main() {
 			fmt.Println("✅ Updated successfully!")
 			verCmd := exec.Command(installPath, "--version")
 			verCmd.Stdout = os.Stdout
-			verCmd.Run()
+			_ = verCmd.Run()
 			os.Exit(0)
 		}
 
@@ -168,7 +168,7 @@ func main() {
 			if _, err := os.Stat(goBinPath); err == nil {
 				// On Linux, you can't overwrite a running binary ("text file busy").
 				// Remove the old binary first, then move the new one in place.
-				os.Remove(installPath) // ignore error if not exists
+				_ = os.Remove(installPath) // ignore error if not exists
 				mvCmd := exec.Command("mv", goBinPath, installPath)
 				if mvErr := mvCmd.Run(); mvErr != nil {
 					// Fall back to sudo
@@ -178,14 +178,14 @@ func main() {
 						fmt.Fprintf(os.Stderr, "   New binary is at: %s\n", goBinPath)
 					}
 				}
-				os.Chmod(installPath, 0755)
+				_ = os.Chmod(installPath, 0755) //nolint:gosec // G302: installed binary must be executable
 			}
 		}
 
 		fmt.Println("✅ Updated successfully!")
 		verCmd := exec.Command(installPath, "--version")
 		verCmd.Stdout = os.Stdout
-		verCmd.Run()
+		_ = verCmd.Run()
 		os.Exit(0)
 	}
 
@@ -197,7 +197,7 @@ func main() {
 	// Reads XALGORIX_USE_PROXY, XALGORIX_PROXY_URL, XALGORIX_PROXY_FILE and
 	// XALGORIX_PROXY_ROTATION from the already-loaded config.
 	// When USE_PROXY is false (the default) this is a no-op and all existing
-	// behaviour is preserved.
+	// behavior is preserved.
 	// -------------------------------------------------------------------------
 	if err := proxy.Init(
 		cfg.UseProxy,
@@ -225,7 +225,6 @@ func main() {
 
 	// Web UI mode — no target or API config required at launch
 	if args.webUI {
-
 		port := args.port
 		if port == 0 {
 			port = defaultWebPort
@@ -339,7 +338,7 @@ func parseArgs() cliArgs {
 			} else if strings.HasPrefix(osArgs[i], "--model=") {
 				args.model = strings.TrimPrefix(osArgs[i], "--model=")
 			} else if strings.HasPrefix(osArgs[i], "--port=") {
-				fmt.Sscanf(strings.TrimPrefix(osArgs[i], "--port="), "%d", &args.port)
+				_, _ = fmt.Sscanf(strings.TrimPrefix(osArgs[i], "--port="), "%d", &args.port)
 			} else if strings.HasPrefix(osArgs[i], "--bind=") {
 				args.bind = strings.TrimPrefix(osArgs[i], "--bind=")
 			}
@@ -420,11 +419,11 @@ func handleStart() {
 	}
 
 	// Kill any existing xalgorix processes first (ignore if none running)
-	exec.Command("pkill", "-f", "xalgorix.*--web").Run()
+	_ = exec.Command("pkill", "-f", "xalgorix.*--web").Run()
 	time.Sleep(1 * time.Second)
 
 	// Also kill anything using the default web port (ignore if port is free)
-	exec.Command("fuser", "-k", fmt.Sprintf("%d/tcp", defaultWebPort)).Run()
+	_ = exec.Command("fuser", "-k", fmt.Sprintf("%d/tcp", defaultWebPort)).Run()
 	time.Sleep(1 * time.Second)
 
 	// Create systemd service file
@@ -440,7 +439,9 @@ func handleStart() {
 	serviceContent := serviceUnitContent(home, installPath)
 	// Try to write service file (requires sudo)
 	servicePath := "/etc/systemd/system/xalgorix.service"
-	err := os.WriteFile(servicePath, []byte(serviceContent), 0644)
+	// systemd unit files are conventionally world-readable (0644) and
+	// contain no secrets; secrets come from the referenced env file.
+	err := os.WriteFile(servicePath, []byte(serviceContent), 0644) //nolint:gosec // G306: systemd unit file is conventionally 0644
 
 	if err != nil {
 		// Try with sudo
@@ -505,7 +506,7 @@ WantedBy=multi-user.target
 }
 
 func startBackground() {
-	logFile, err := os.OpenFile("/tmp/xalgorix.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	logFile, err := os.OpenFile("/tmp/xalgorix.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Failed to open log file: %v\n", err)
 		os.Exit(1)
@@ -560,7 +561,7 @@ func handleStop() {
 	if err != nil {
 		// Fallback: pkill (exclude the current --stop process)
 		cmd = exec.Command("pkill", "-f", "xalgorix.*--web")
-		cmd.Run()
+		_ = cmd.Run()
 	}
 
 	fmt.Println("✅ Xalgorix stopped!")
@@ -638,7 +639,7 @@ func handleUninstall() {
 
 	// Stop the service first
 	cmd := exec.Command("pkill", "-f", "xalgorix")
-	cmd.Run()
+	_ = cmd.Run()
 
 	// Determine install path — use the same resolver as --update
 	installPath := resolveInstallPath()
@@ -681,7 +682,7 @@ func autoUpdateCheckPath() string {
 		home = "/root"
 	}
 	dir := filepath.Join(home, ".xalgorix")
-	_ = os.MkdirAll(dir, 0o755)
+	_ = os.MkdirAll(dir, 0o700)
 	return filepath.Join(dir, "last_update_check")
 }
 
@@ -757,7 +758,7 @@ func autoUpdate() {
 		goBinPath := filepath.Join(goPath, "bin", "xalgorix")
 		if goBinPath != installPath {
 			if _, statErr := os.Stat(goBinPath); statErr == nil {
-				os.Remove(installPath)
+				_ = os.Remove(installPath)
 				mvCmd := exec.Command("mv", goBinPath, installPath)
 				if mvErr := mvCmd.Run(); mvErr != nil {
 					cpCmd := exec.Command("sudo", "sh", "-c", fmt.Sprintf("rm -f %s && mv %s %s", installPath, goBinPath, installPath))
@@ -766,7 +767,7 @@ func autoUpdate() {
 						fmt.Fprintf(os.Stderr, "      New binary is at: %s\n", goBinPath)
 					}
 				}
-				os.Chmod(installPath, 0755)
+				_ = os.Chmod(installPath, 0755) //nolint:gosec // G302: installed binary must be executable
 			}
 		}
 	}
@@ -929,7 +930,7 @@ func resolveInstallPath() string {
 // installBinary downloads a binary from url and installs it to destPath.
 func installBinary(url, destPath string) error {
 	tmpPath := destPath + ".new"
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Get(url)
@@ -942,7 +943,7 @@ func installBinary(url, destPath string) error {
 		return fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
 
-	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755) //nolint:gosec // G302: downloaded binary must be executable
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -964,6 +965,6 @@ func installBinary(url, destPath string) error {
 		}
 	}
 
-	os.Chmod(destPath, 0755)
+	_ = os.Chmod(destPath, 0755) //nolint:gosec // G302: installed binary must be executable
 	return nil
 }

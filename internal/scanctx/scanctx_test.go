@@ -205,7 +205,7 @@ func TestCloseIdempotent(t *testing.T) {
 	sc.Close() // must not panic
 	sc.Close()
 
-	// Context should be cancelled
+	// Context should be canceled
 	if err := sc.Ctx.Err(); err != context.Canceled {
 		t.Fatalf("context err = %v, want Canceled", err)
 	}
@@ -852,7 +852,7 @@ func TestCloseReleasesEveryLeaseUnderPanic(t *testing.T) {
 		t.Fatal("Browser.Close did not clear session path after KillAll panic")
 	}
 	if err := sc.Ctx.Err(); err != context.Canceled {
-		t.Fatalf("scan context not cancelled after Close: err=%v", err)
+		t.Fatalf("scan context not canceled after Close: err=%v", err)
 	}
 
 	// Idempotency: a second Close must not panic and must keep the lease

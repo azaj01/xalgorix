@@ -216,8 +216,8 @@ func GetStats() SystemStats {
 	stats.ProcessRSSMB = readProcessRSSMB()
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
-	stats.GoHeapAllocMB = int64(mem.HeapAlloc / 1024 / 1024)
-	stats.GoHeapSysMB = int64(mem.HeapSys / 1024 / 1024)
+	stats.GoHeapAllocMB = int64(mem.HeapAlloc / 1024 / 1024) //nolint:gosec // G115: MB-scaled heap size cannot overflow int64
+	stats.GoHeapSysMB = int64(mem.HeapSys / 1024 / 1024)     //nolint:gosec // G115: MB-scaled heap size cannot overflow int64
 	stats.Goroutines = runtime.NumGoroutine()
 
 	return stats
@@ -553,7 +553,7 @@ func AcquireToolLease(isHeavy bool, maxWait time.Duration, toolName string) (*To
 // AcquireToolLeaseContext reserves live CPU/RAM headroom for one subprocess.
 // Unlike the legacy maxWait API, this never refuses purely because the system
 // stayed busy for a fixed number of seconds. It blocks until capacity is
-// available or until the caller's context is cancelled.
+// available or until the caller's context is canceled.
 func AcquireToolLeaseContext(ctx context.Context, isHeavy bool, toolName string) (*ToolLease, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -593,7 +593,7 @@ func acquireToolLeaseWithContext(ctx context.Context, isHeavy bool, toolName str
 
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("cancelled while waiting to launch %s after %s: %w (last resource state: %s)",
+			return nil, fmt.Errorf("canceled while waiting to launch %s after %s: %w (last resource state: %s)",
 				toolLabel, time.Since(startedWaiting).Round(time.Second), ctx.Err(), lastReason)
 		case <-time.After(pollInterval):
 		}
@@ -920,7 +920,7 @@ func ProtectCurrentProcess() {
 	if runtime.GOOS != "linux" {
 		return
 	}
-	if err := os.WriteFile("/proc/self/oom_score_adj", []byte("-500"), 0644); err != nil {
+	if err := os.WriteFile("/proc/self/oom_score_adj", []byte("-500"), 0644); err != nil { //nolint:gosec // G306: procfs ignores the file mode
 		if !os.IsPermission(err) {
 			log.Printf("[RESOURCES] Cannot protect xalgorix from OOM killer: %v", err)
 		}
@@ -1006,8 +1006,11 @@ func readDiskFree() int64 {
 		log.Printf("[RESOURCES] Cannot statfs /: %v", err)
 		return 0
 	}
-	// Available blocks * block size → bytes → MB
-	return int64(stat.Bavail) * int64(stat.Bsize) / (1024 * 1024)
+	// Available blocks * block size → bytes → MB. Compute in uint64 to
+	// match the statfs field types, then convert the MB-scaled result
+	// (which always fits int64) once.
+	freeMB := stat.Bavail * uint64(stat.Bsize) / (1024 * 1024) //nolint:gosec // G115: filesystem block size is small and non-negative
+	return int64(freeMB)                                       //nolint:gosec // G115: MB-scaled free space fits int64
 }
 
 // ── Env var helpers ──

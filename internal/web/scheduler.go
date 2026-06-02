@@ -51,7 +51,7 @@ func calculateNextRun(interval string, from time.Time) time.Time {
 // loadSchedulesFromDisk reads schedules directory and loads them into memory.
 func (s *Server) loadSchedulesFromDisk() {
 	dir := filepath.Join(s.dataDir, "_schedules")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		log.Printf("[SCHEDULER] Error creating schedules dir: %v", err)
 		return
 	}
@@ -86,7 +86,7 @@ func (s *Server) loadSchedulesFromDisk() {
 // saveScheduleToDisk writes a schedule to disk.
 func (s *Server) saveScheduleToDisk(sch *ScanSchedule) error {
 	dir := filepath.Join(s.dataDir, "_schedules")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 	data, err := json.MarshalIndent(sch, "", "  ")
@@ -95,11 +95,11 @@ func (s *Server) saveScheduleToDisk(sch *ScanSchedule) error {
 	}
 	path := filepath.Join(dir, sch.ID+".json")
 	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
 		return fmt.Errorf("write: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath) // best-effort cleanup
+		_ = os.Remove(tmpPath) // best-effort cleanup
 		return fmt.Errorf("rename: %w", err)
 	}
 	return nil

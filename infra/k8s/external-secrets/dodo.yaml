@@ -1,0 +1,45 @@
+---
+# ExternalSecret: xalgorix-dodo
+#
+# Pulls Dodo Payments credentials out of AWS Secrets Manager
+# (`xalgorix/dodo`) and materialises them as a Kubernetes Secret named
+# `xalgorix-dodo` inside the `xalgorix` namespace, ready to be mounted
+# as files into API_Server pods. Variable names mirror the keys used in
+# `BugReportly/lib/dodoPayments.js` (DODO_PAYMENTS_API_KEY,
+# DODO_PAYMENTS_WEBHOOK_KEY) so the same Dodo SDK pattern can be reused
+# verbatim by `internal/cloud/billing`.
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: xalgorix-dodo
+  namespace: xalgorix
+  labels:
+    app.kubernetes.io/name: xalgorix-dodo
+    app.kubernetes.io/part-of: xalgorix
+    app.kubernetes.io/component: secret
+    xalgorix.com/secret-source: aws-secrets-manager
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: aws-secrets-manager
+  target:
+    name: xalgorix-dodo
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      metadata:
+        labels:
+          app.kubernetes.io/name: xalgorix-dodo
+          app.kubernetes.io/part-of: xalgorix
+          app.kubernetes.io/component: secret
+          xalgorix.com/secret-source: aws-secrets-manager
+  data:
+    - secretKey: DODO_PAYMENTS_API_KEY
+      remoteRef:
+        key: xalgorix/dodo
+        property: DODO_PAYMENTS_API_KEY
+    - secretKey: DODO_PAYMENTS_WEBHOOK_KEY
+      remoteRef:
+        key: xalgorix/dodo
+        property: DODO_PAYMENTS_WEBHOOK_KEY

@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+.yarn/
+
+# Build artifacts
+dist/
+build/
+out/
+.next/
+.turbo/
+.vercel/
+
+# Test artifacts
+coverage/
+playwright-report/
+test-results/
+playwright/.cache/
+.axe-ci-report/
+.lighthouseci/
+
+# TypeScript
+*.tsbuildinfo
+
+# Logs / env
+*.log
+.env
+.env.local
+.env.*.local

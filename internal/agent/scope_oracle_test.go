@@ -1,19 +1,33 @@
 package agent
 
-// Frozen oracle snapshot of the agent-side scope guard as it exists
-// before the scope-guard-local-only fix. The names here are
-// intentionally unexported and prefixed with `oracle` so they cannot
-// be confused with the production symbols. The bodies below MUST
-// remain byte-frozen for the duration of the spec — they are the
-// pre-fix `F` against which the post-fix `F'` is compared in
-// preservation property tests (task 2 of the
-// scope-guard-local-only spec).
+// Updated oracle snapshot of the agent-side scope guard matching the
+// scope-guard-local-only rewrite. The names here are intentionally
+// unexported and prefixed with `oracle` so they cannot be confused
+// with the production symbols. The oracle is an INDEPENDENT
+// reimplementation of the post-fix rule (not a call into production)
+// so the preservation property tests compare two separate code paths.
 //
-// Captured from internal/agent/agent.go as of the unfixed baseline:
-//   - shouldBlockForOutOfScope        → oracleShouldBlockForOutOfScope
+// Post-fix rule (mirrors scopeguard.IsLocalOrListener): a Gated_Tool
+// call is blocked only when one of its argument hosts is a
+// Local_Or_Listener_Host — loopback, unspecified, the operator's
+// configured listener, or an IP literal that matches one of this
+// machine's interface addresses. RFC1918, link-local (including the
+// 169.254.169.254 cloud-metadata address), and arbitrary public OOS
+// hostnames are NOT blocked — those are legitimate scan targets.
+//
+// DNS semantics: like the pre-fix oracle, this oracle performs NO DNS
+// resolution itself. It classifies IP literals and textual locals
+// only; any host that would require resolution is treated as
+// not-local (allow). Production resolves hostnames via
+// scopeguard.LookupHost, but no preservation row exercises a public
+// hostname that secretly resolves to a local address, so the two
+// paths agree across the whole preservation matrix. The
+// oracleLookupHost var is retained purely so the DNS-lookup-count
+// sub-property can wrap it and assert it is never called.
+//
+// Captured tokenizer helpers (still byte-faithful to production):
 //   - extractHostsFromArgs            → oracleExtractHostsFromArgs
 //   - extractHostFromTokenForScope    → oracleExtractHostFromTokenForScope
-//   - hostInScope                     → oracleHostInScope
 //   - looksLikeFilename               → oracleLooksLikeFilename
 //   - isVersionLike                   → oracleIsVersionLike
 //   - scopeHostTokenSplit             → oracleScopeHostTokenSplit
@@ -21,37 +35,35 @@ package agent
 //   - extractEmbeddedURLs             → oracleExtractEmbeddedURLs
 //   - argScanLimitBytes               → oracleArgScanLimitBytes
 //   - truncateForScopeScan            → oracleTruncateForScopeScan
-//
-// Resolver indirection is deliberately oracle-local
-// (oracleLookupHost) so that when task 3.3 swaps the production
-// resolver to scopeguard.LookupHost the oracle keeps reading from
-// its own var. Tests inject a stub by overwriting oracleLookupHost
-// directly. The oracle body never calls oracleLookupHost today —
-// the unfixed agent guard does no DNS itself — but the variable is
-// declared so the helper test infrastructure can wrap it for the
-// DNS-lookup-count sub-property without touching production code.
 
 import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 )
 
-// oracleLookupHost is the agent oracle's frozen resolver indirection.
-// The unfixed agent guard does not perform DNS itself (only the
-// web-side isBlockedTarget did), but the variable is declared so
+// oracleLookupHost is the agent oracle's resolver indirection. The
+// oracle does not perform DNS itself; the variable is declared so
 // preservation tests can wrap it with a counter when exercising the
 // DNS-lookup-count sub-property without touching production code.
 var oracleLookupHost = net.LookupHost
 
 const oracleArgScanLimitBytes = 8192
 
-// oracleShouldBlockForOutOfScope is the byte-frozen pre-fix copy of
+// oracleShouldBlockForOutOfScope is the independent post-fix copy of
 // (*Agent).shouldBlockForOutOfScope. It accepts a non-nil *Agent so
 // the test surface mirrors the production call site (a.activityHosts
-// is read directly).
+// and a.localGuard are read directly).
+//
+// The empty-scope short-circuit is retained deliberately: it pins the
+// Requirement 3.7 asymmetry exercised by the preservation matrix
+// (oracle allows on empty-scope-+-Local; production blocks). Every
+// non-empty-scope row is compared strictly against production.
 func oracleShouldBlockForOutOfScope(a *Agent, toolName string, toolArgs map[string]string) (bool, string) {
 	if len(a.activityHosts) == 0 {
 		return false, ""
@@ -67,40 +79,120 @@ func oracleShouldBlockForOutOfScope(a *Agent, toolName string, toolArgs map[stri
 	}
 
 	hosts := oracleExtractHostsFromArgs(toolArgs)
-	if len(hosts) == 0 {
-		return false, ""
-	}
-
 	for _, h := range hosts {
-		if !oracleHostInScope(h, a.activityHosts) {
+		if oracleIsLocalOrListener(a.localGuard, h) {
 			return true, fmt.Sprintf(
-				"%q is not in scope. Configured target hosts: %s. Stay on the configured target — do NOT pivot to discovered third-party hosts, related infrastructure, or sibling services. If the agent thinks the host is part of the engagement, it must be added to the scan request, not probed implicitly.",
-				h, strings.Join(a.activityHosts, ", "),
+				"%q points at the operator's machine or local network. "+
+					"Refusing to probe localhost / RFC1918 / the dashboard's "+
+					"listener from a Gated_Tool.", h,
 			)
 		}
 	}
 
 	if lowerTool == "report_vulnerability" {
-		rawTarget := strings.ToLower(strings.TrimSpace(toolArgs["target"]))
-		rawEndpoint := strings.ToLower(strings.TrimSpace(toolArgs["endpoint"]))
+		rawTarget := strings.TrimSpace(toolArgs["target"])
+		rawEndpoint := strings.TrimSpace(toolArgs["endpoint"])
 		for _, raw := range []string{rawTarget, rawEndpoint} {
 			if raw == "" {
 				continue
 			}
-			h := oracleExtractHostFromTokenForScope(raw)
-			if h == "" {
-				continue
-			}
-			if !oracleHostInScope(h, a.activityHosts) {
+			if oracleIsLocalOrListener(a.localGuard, raw) {
 				return true, fmt.Sprintf(
-					"report_vulnerability target %q is out of scope. Configured target hosts: %s. Refusing to file a finding against a host the operator did not authorize. Re-target the report to one of the configured hosts, or drop the finding.",
-					h, strings.Join(a.activityHosts, ", "),
+					"report_vulnerability target/endpoint %q points at the operator's machine or local network. "+
+						"Refusing to probe localhost / RFC1918 / the dashboard's "+
+						"listener from a Gated_Tool.", raw,
 				)
 			}
 		}
 	}
 
 	return false, ""
+}
+
+// oracleIsLocalOrListener is the oracle's DNS-free reimplementation of
+// scopeguard.IsLocalOrListener. It blocks only provable self-references
+// expressible without DNS: textual loopback/unspecified, the
+// configured listener bind:port, and IP literals that are
+// loopback/unspecified or match a local interface. Anything requiring
+// name resolution (and every RFC1918/link-local/public host) is
+// treated as not-local.
+func oracleIsLocalOrListener(cfg scopeguard.Config, target string) bool {
+	host := target
+	hostPort := ""
+	if u, err := url.Parse(target); err == nil && u.Host != "" {
+		host = u.Hostname()
+		hostPort = u.Port()
+	}
+	if h, p, err := net.SplitHostPort(host); err == nil {
+		host = h
+		if hostPort == "" {
+			hostPort = p
+		}
+	}
+
+	if hostPort != "" {
+		if portNum, err := strconv.Atoi(hostPort); err == nil && portNum == cfg.Port {
+			bind := strings.ToLower(strings.TrimSpace(cfg.BindAddr))
+			if bind == "" {
+				bind = "127.0.0.1"
+			}
+			lowerHost := strings.ToLower(strings.TrimSpace(host))
+			if lowerHost == bind || lowerHost == "0.0.0.0" || lowerHost == "::" {
+				return true
+			}
+		}
+	}
+
+	lower := strings.ToLower(host)
+	if lower == "localhost" || lower == "0.0.0.0" || lower == "[::1]" || lower == "::1" {
+		return true
+	}
+
+	// IP literals only — the oracle performs no DNS.
+	ip := net.ParseIP(host)
+	if ip == nil {
+		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			ip = net.ParseIP(host[1 : len(host)-1])
+		}
+	}
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsUnspecified() {
+		return true
+	}
+	return oracleIPsMatchLocalInterface([]net.IP{ip})
+}
+
+// oracleIPsMatchLocalInterface mirrors scopeguard.ipsMatchLocalInterface:
+// it returns true if any supplied IP equals one of this machine's
+// interface addresses. No DNS is performed.
+func oracleIPsMatchLocalInterface(ips []net.IP) bool {
+	if len(ips) == 0 {
+		return false
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, ip := range ips {
+		if ip == nil {
+			continue
+		}
+		for _, a := range addrs {
+			var aIP net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				aIP = v.IP
+			case *net.IPAddr:
+				aIP = v.IP
+			}
+			if aIP != nil && aIP.Equal(ip) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func oracleExtractHostsFromArgs(toolArgs map[string]string) []string {
@@ -202,31 +294,11 @@ func oracleIsVersionLike(s string) bool {
 		return false
 	}
 	for _, r := range s {
-		if !(r == '.' || (r >= '0' && r <= '9')) {
+		if r != '.' && (r < '0' || r > '9') {
 			return false
 		}
 	}
 	return strings.Contains(s, ".")
-}
-
-func oracleHostInScope(host string, scopeHosts []string) bool {
-	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
-	if host == "" {
-		return true
-	}
-	for _, s := range scopeHosts {
-		s = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s), "."))
-		if s == "" {
-			continue
-		}
-		if host == s {
-			return true
-		}
-		if strings.HasSuffix(host, "."+s) {
-			return true
-		}
-	}
-	return false
 }
 
 func oracleTruncateForScopeScan(v string) string {

@@ -1,0 +1,6 @@
+packages:
+  - "web/marketing"
+  - "web/app"
+  - "web/admin"
+  - "web/e2e"
+  - "web/packages/*"

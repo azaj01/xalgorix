@@ -17,7 +17,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 )
 
-// globalLimiter is initialised once from config when the package is loaded.
+// globalLimiter is initialized once from config when the package is loaded.
 // It is replaced by initLimiter() so tests can override it cleanly.
 var globalLimiter *ratelimit.Limiter
 
@@ -64,7 +64,7 @@ func Register(r *tools.Registry) {
 }
 
 // httpClient returns the best available *http.Client in priority order:
-//  1. The shared proxy-pool client from internal/proxy (honours
+//  1. The shared proxy-pool client from internal/proxy (honors
 //     XALGORIX_USE_PROXY and all rotation settings from PR #13).
 //  2. A plain direct client as fallback when the proxy pool is disabled
 //     or returns an error.

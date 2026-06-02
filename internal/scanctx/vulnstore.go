@@ -9,7 +9,6 @@ import (
 // VulnStore provides per-session vulnerability storage,
 // replacing the global vulnerabilities slice in reporting.go.
 
-
 type VulnStore struct {
 	mu    sync.RWMutex
 	vulns []map[string]interface{}

@@ -1,0 +1,151 @@
+version: "2"
+run:
+  go: "1.25"
+  modules-download-mode: readonly
+  tests: true
+output:
+  formats:
+    text:
+      path: stdout
+      print-linter-name: true
+      print-issued-lines: true
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - errcheck
+    - errorlint
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    # nilerr is intentionally NOT enabled. This codebase has two deliberate
+    # patterns it flags as false positives: (1) tool handlers surface errors
+    # to the LLM via tools.Result{Output/Error} and return a nil Go error so
+    # the agent loop treats them as normal results, and (2) filepath.WalkDir
+    # callbacks return nil on a per-entry error to skip and keep walking.
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - unconvert
+    - unused
+    - whitespace
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      # Best-effort calls whose error is intentionally ignored across the
+      # codebase: writing to an HTTP ResponseWriter (the status/headers are
+      # already committed), closing readers/connections in cleanup paths, and
+      # setting socket deadlines. Excluding them keeps errcheck focused on
+      # error returns that callers can actually act on.
+      exclude-functions:
+        - (net/http.ResponseWriter).Write
+        - (*encoding/json.Encoder).Encode
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*github.com/gorilla/websocket.Conn).Close
+        - (*github.com/gorilla/websocket.Conn).WriteMessage
+        - (*github.com/gorilla/websocket.Conn).SetWriteDeadline
+        - (*github.com/gorilla/websocket.Conn).SetReadDeadline
+    gosec:
+      excludes:
+        - G104 # audited error returns are checked by errcheck
+        - G304 # file path joins reviewed in storage/* directly
+        - G404 # weak RNG: scanner uses math/rand for non-crypto paths
+        # G204 (subprocess with variable input) is inherent to this tool:
+        # xalgorix is an LLM-driven pentest agent whose core function is
+        # running the security tools/commands the model constructs. Command
+        # construction is reviewed in the terminal/python tool packages and
+        # gated by the scope guard, not by static analysis here.
+        - G204
+    govet:
+      disable:
+        - fieldalignment
+        # 'shadow' is intentionally disabled. It is not part of the
+        # default `go vet` suite because it is noisy on idiomatic Go —
+        # most findings are harmless `err`/`s` re-declarations in nested
+        # scopes. Re-enable selectively if a real shadowing bug appears.
+        - shadow
+      enable-all: true
+    misspell:
+      locale: US
+    revive:
+      severity: warning
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+          arguments:
+            - checkPrivateReceivers
+            - disableStutteringCheck
+        - name: indent-error-flow
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: var-declaration
+    staticcheck:
+      checks:
+        - all
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - bodyclose
+          - errcheck
+          - gosec
+        path: _test\.go
+      - linters:
+          - all
+        path: \.pb\.go$
+      - linters:
+          - all
+        path: _gen\.go$
+      - linters:
+          - revive
+        text: should have comment
+    paths:
+      # WIP multi-tenant SaaS surface. It is not part of the shipped
+      # self-hosted binary (cmd/xalgorix) and carries a large pre-existing
+      # lint backlog; lint it separately once it stabilizes. The rest of the
+      # module is held lint-clean.
+      - internal/cloud
+      - cmd/xalgorix-cloud
+      - webui/node_modules
+      - webui/dist
+      - webui/build
+      - internal/web/static
+      - build
+      - assets/webui
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - internal/cloud
+      - cmd/xalgorix-cloud
+      - webui/node_modules
+      - webui/dist
+      - webui/build
+      - internal/web/static
+      - build
+      - assets/webui
+      - third_party$
+      - builtin$
+      - examples$

@@ -4,24 +4,24 @@
 // effective llm.Endpoint the scan will POST to, applying the four
 // precedence rules from Requirement 11:
 //
-//   1. R11.2: When ScanRequest.ProviderProfile is non-empty, look up
-//      the matching Auth_Profile in Profile_Store and the matching
-//      Catalog_Entry in Catalog_Service, build the URL via
-//      buildEndpoint, and populate (Auth, APIKey | AccessToken)
-//      from the profile.
-//   2. R11.3: When ProviderProfile is empty, defer to
-//      legacyOrCatalogDefaultEndpoint, which mirrors the existing
-//      Settings free-text path (legacy resolver when the catalog is
-//      empty AND XALGORIX_LLM matches Legacy_Provider_Shape;
-//      otherwise the catalog's first-entry / first-profile default).
-//   3. R11.4: Ad-hoc Model / APIKey / APIBase overrides take
-//      precedence over whatever step 1 or 2 produced. APIKey
-//      additionally forces Auth=AuthAPIKey so a pasted key never
-//      gets sent as an OAuth bearer token by mistake.
-//   4. R11.6: An unknown ProviderProfile (or profile referencing a
-//      missing catalog entry, or an uninitialized store) returns
-//      errUnknownProviderProfile so the /api/scan handler can map
-//      it to HTTP 400 BEFORE any scan goroutine spawns.
+//  1. R11.2: When ScanRequest.ProviderProfile is non-empty, look up
+//     the matching Auth_Profile in Profile_Store and the matching
+//     Catalog_Entry in Catalog_Service, build the URL via
+//     buildEndpoint, and populate (Auth, APIKey | AccessToken)
+//     from the profile.
+//  2. R11.3: When ProviderProfile is empty, defer to
+//     legacyOrCatalogDefaultEndpoint, which mirrors the existing
+//     Settings free-text path (legacy resolver when the catalog is
+//     empty AND XALGORIX_LLM matches Legacy_Provider_Shape;
+//     otherwise the catalog's first-entry / first-profile default).
+//  3. R11.4: Ad-hoc Model / APIKey / APIBase overrides take
+//     precedence over whatever step 1 or 2 produced. APIKey
+//     additionally forces Auth=AuthAPIKey so a pasted key never
+//     gets sent as an OAuth bearer token by mistake.
+//  4. R11.6: An unknown ProviderProfile (or profile referencing a
+//     missing catalog entry, or an uninitialized store) returns
+//     errUnknownProviderProfile so the /api/scan handler can map
+//     it to HTTP 400 BEFORE any scan goroutine spawns.
 //
 // The /api/scan handler calls resolveScanCredentials early as a
 // precondition check; the actual scan goroutine resolves through
@@ -221,6 +221,20 @@ func isZeroEndpoint(ep llm.Endpoint) bool {
 	return ep.URL == "" && ep.Model == "" && ep.APIKey == "" && ep.AccessToken == ""
 }
 
+// bareModelFromConfigLLM strips an optional "<provider>/" prefix from
+// the configured XALGORIX_LLM value, returning the bare model name.
+// Mirrors the legacy resolver's model derivation
+// (internal/llm/resolver.go) so the active-profile path and the
+// legacy path agree on the outbound model string. Returns "" when
+// cfg.LLM is empty so callers fall back to the catalog default.
+func bareModelFromConfigLLM(llmValue string) string {
+	model := strings.TrimSpace(llmValue)
+	if idx := strings.Index(model, "/"); idx >= 0 {
+		model = model[idx+1:]
+	}
+	return strings.TrimSpace(model)
+}
+
 // buildEndpoint assembles the (url, model, headerStyle) tuple for a
 // single (Catalog_Entry, Auth_Profile) pair. The URL builder mirrors
 // the three header-style branches in internal/llm/resolver.go's
@@ -235,13 +249,26 @@ func isZeroEndpoint(ep llm.Endpoint) bool {
 //
 // Validates: Requirements 2.3 (preserved endpoint shape), 11.2.
 func buildEndpoint(entry providers.Entry, prof auth.Profile) (url, model, headerStyle string) {
+	return buildEndpointWithModel(entry, prof, "")
+}
+
+// buildEndpointWithModel is buildEndpoint with an explicit preferred
+// model. When preferModel is non-empty it overrides the catalog
+// entry's default model (entry.Models[0]) — used by the active-
+// profile path so the operator's typed model (cfg.LLM bare form)
+// wins over the catalog default while still borrowing the profile's
+// provider routing + credentials. An empty preferModel preserves the
+// historical "first catalog model" behavior.
+func buildEndpointWithModel(entry providers.Entry, prof auth.Profile, preferModel string) (url, model, headerStyle string) {
 	base := entry.BaseURL
 	if prof.Type == auth.APIKey && prof.APIBaseOverride != "" {
 		base = prof.APIBaseOverride
 	}
 	base = strings.TrimRight(base, "/")
 	headerStyle = entry.HeaderStyle
-	if len(entry.Models) > 0 {
+	if strings.TrimSpace(preferModel) != "" {
+		model = strings.TrimSpace(preferModel)
+	} else if len(entry.Models) > 0 {
 		model = entry.Models[0]
 	}
 
@@ -297,6 +324,44 @@ func buildEndpoint(entry providers.Entry, prof auth.Profile) (url, model, header
 //
 // Validates: Requirements 2.1, 2.2, 2.3, 11.3.
 func (s *Server) legacyOrCatalogDefaultEndpoint(ctx context.Context, cfg *config.Config) llm.Endpoint {
+	// Branch 0 — active credential pointer (cfg.LLMProfile) wins.
+	// This mirrors the composite resolver's defaultCatalogPick
+	// (internal/llm/resolver.go): when XALGORIX_LLM_PROFILE names a
+	// "<provider>:<profileId>" that resolves to a live
+	// (Auth_Profile, Catalog_Entry) pair, that profile's endpoint
+	// is used directly rather than the catalog's first-entry
+	// default. Without this branch a scan with no per-request
+	// ProviderProfile but a configured active profile would
+	// silently fall through to entries[0] (or the legacy path) and
+	// drop the operator's chosen credentials.
+	if cfg != nil && strings.TrimSpace(cfg.LLMProfile) != "" && s.catalog != nil && s.profiles != nil {
+		key := strings.TrimSpace(cfg.LLMProfile)
+		if prof, ok, err := s.profiles.Get(ctx, key); err == nil && ok {
+			if entry, ok, err := s.catalog.Get(ctx, prof.Provider); err == nil && ok {
+				// The operator's typed model (cfg.LLM, stripped of
+				// any "<provider>/" prefix) wins over the catalog
+				// default so XALGORIX_LLM=google/gemini-test-model
+				// routes to gemini-test-model rather than the
+				// catalog's first listed model.
+				preferModel := bareModelFromConfigLLM(cfg.LLM)
+				url, model, headerStyle := buildEndpointWithModel(entry, prof, preferModel)
+				ep := llm.Endpoint{
+					URL:         url,
+					Model:       model,
+					HeaderStyle: headerStyle,
+				}
+				if prof.Type == auth.OAuth {
+					ep.Auth = llm.AuthOAuthBearer
+					ep.AccessToken = prof.AccessToken
+				} else {
+					ep.Auth = llm.AuthAPIKey
+					ep.APIKey = prof.APIKey
+				}
+				return ep
+			}
+		}
+	}
+
 	// Branch 1 — catalog default pick.
 	if s.catalog != nil && !s.catalog.IsEmpty() {
 		entries, err := s.catalog.List(ctx)

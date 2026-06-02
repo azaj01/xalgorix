@@ -1,5 +1,6 @@
 # Binaries
 /xalgorix
+/xalgorix-cloud
 xalgorix-linux-amd64
 antigravity-kit
 build/
@@ -62,3 +63,4 @@ webui/.turbo/
 # Local-only spec/design docs (Kiro). Internal authoring scratch space —
 # not part of the published source.
 .kiro/
+node_modules

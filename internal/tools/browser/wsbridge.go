@@ -90,6 +90,9 @@ func (b *WSBridge) Start() error {
 	b.server = &http.Server{
 		Addr:    b.addr,
 		Handler: mux,
+		// Bound header-read time to avoid a Slowloris-style hang on this
+		// loopback control channel.
+		ReadHeaderTimeout: 15 * time.Second,
 	}
 
 	go func() {
@@ -118,7 +121,7 @@ func (b *WSBridge) Stop() {
 	}
 
 	if b.server != nil {
-		b.server.Close()
+		_ = b.server.Close()
 	}
 
 	// Cancel all pending requests

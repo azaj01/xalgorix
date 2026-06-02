@@ -15,20 +15,31 @@
 // Status-code mapping (Requirements 4.5–4.8, 5.1–5.4, 6.x, 7.x,
 // 8.x, 9.x, 10.4, 12.3):
 //
-//   • Profile_Store
-//     - auth.ErrUnknownProvider     → 400 (catalog miss on Put)
-//     - auth.ErrProfileIDInvalid    → 400 (regex miss)
-//     - auth.ErrProviderRequired    → 400 (empty provider)
-//     - auth.ErrProfileTypeInvalid  → 400 (bad type)
-//     - auth.ErrLockTimeout         → 503 (5s flock deadline hit)
-//     - auth.ErrProfileNotFound     → 404 (Get/Delete miss)
+//   - Profile_Store
 //
-//   • Driver path
-//     - auth.ErrFlowTimeout         → 408 ("oauth flow timed out")
-//     - auth.ErrReauthRequired      → 401 ("oauth refresh required")
-//     - auth.ErrNotFound            → 404 (claude cli credentials)
-//     - providers.ErrUpstream{S,B}  → 502 with {statusCode, body}
-//     - any other driver error      → 500
+//   - auth.ErrUnknownProvider     → 400 (catalog miss on Put)
+//
+//   - auth.ErrProfileIDInvalid    → 400 (regex miss)
+//
+//   - auth.ErrProviderRequired    → 400 (empty provider)
+//
+//   - auth.ErrProfileTypeInvalid  → 400 (bad type)
+//
+//   - auth.ErrLockTimeout         → 503 (5s flock deadline hit)
+//
+//   - auth.ErrProfileNotFound     → 404 (Get/Delete miss)
+//
+//   - Driver path
+//
+//   - auth.ErrFlowTimeout         → 408 ("oauth flow timed out")
+//
+//   - auth.ErrReauthRequired      → 401 ("oauth refresh required")
+//
+//   - auth.ErrNotFound            → 404 (claude cli credentials)
+//
+//   - providers.ErrUpstream{S,B}  → 502 with {statusCode, body}
+//
+//   - any other driver error      → 500
 //
 // Routes are NOT registered in this file — Wave E task 5.4 mounts
 // them under authMw → rlMiddleware → CSRF in NewServer.Start. This
@@ -117,7 +128,7 @@ func profileErrorStatus(err error) int {
 }
 
 // writeProfileError writes err to w using the documented status-code
-// mapping, falling back to 500 for unrecognised errors. The body
+// mapping, falling back to 500 for unrecognized errors. The body
 // shape matches writeCatalogError so the dashboard error renderer
 // can consume both surfaces with a single shape.
 //
@@ -163,8 +174,8 @@ func writeProfileError(w http.ResponseWriter, err error) {
 // profileKeyFromPath extracts the "<provider>:<profileId>" key
 // segment from URL paths of the form
 //
-//   /api/auth/profiles/{key}/refresh   (suffix == "/refresh")
-//   /api/auth/profiles/{key}           (suffix == "")
+//	/api/auth/profiles/{key}/refresh   (suffix == "/refresh")
+//	/api/auth/profiles/{key}           (suffix == "")
 //
 // Returns "" when the path has no key (caller should reject 400).
 // The function is deliberately strict: the key must not contain a
@@ -193,7 +204,7 @@ func profileKeyFromPath(p, suffix string) string {
 //
 // The response body is a JSON array of auth.Profile values with
 // every credential field passed through maskProfile so the operator
-// can recognise the stored value without leaking the secret. The
+// can recognize the stored value without leaking the secret. The
 // catalog-empty / store-uninitialized case maps to 503; an empty
 // store returns "[]" not "null".
 //
@@ -222,8 +233,8 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 //
 // Body shape (from the design):
 //
-//   {"provider": "openai", "profileId": "default",
-//    "apiKey": "sk-...", "apiBaseOverride": ""}
+//	{"provider": "openai", "profileId": "default",
+//	 "apiKey": "sk-...", "apiBaseOverride": ""}
 //
 // Builds a Profile{Type: APIKey, ...} and persists via
 // Store.Put. Returns 201 + masked profile on success. Validation

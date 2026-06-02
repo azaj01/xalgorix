@@ -52,6 +52,12 @@ var toolHardTimeout = map[string]time.Duration{
 // tool not explicitly listed in toolHardTimeout.
 const defaultToolHardTimeout = 15 * time.Minute
 
+// maxCumulativeRateLimitWait bounds the total time the agent loop may spend
+// parked in the provider-rate-limit backoff. A persistently 429'd provider
+// would otherwise stall the scan indefinitely because touchActivity() keeps
+// the idle watchdog alive during the wait. Set to 0 to disable the ceiling.
+const maxCumulativeRateLimitWait = 6 * time.Hour
+
 // hardTimeoutFor returns the configured hard-timeout ceiling for the given
 // tool name, falling back to defaultToolHardTimeout when the tool is not
 // listed in toolHardTimeout.
@@ -108,8 +114,8 @@ type Agent struct {
 	passiveReconPassiveLookups int
 	passiveReconBlockedActive  int
 	passiveReconSourceKeys     map[string]bool
-	hooks                      *HookRegistry // extensible lifecycle hooks
-	state                      *ScanState    // shared mutable scan state for hooks
+	hooks                      *HookRegistry     // extensible lifecycle hooks
+	state                      *ScanState        // shared mutable scan state for hooks
 	localGuard                 scopeguard.Config // operator's listener identity, consulted by shouldBlockForOutOfScope to detect Local_Or_Listener_Host references in Gated_Tool args
 }
 
@@ -154,6 +160,7 @@ func WithLLMClient(c *llm.Client) AgentOption {
 //   - a single *scanctx.ScanContext (existing web-server call site),
 //   - one or more AgentOption (new B1 path), or
 //   - a *scanctx.ScanContext followed by one or more AgentOption.
+//
 // Mixing both flavors keeps every old call site working while
 // letting the per-scan resolver injection skip building a separate
 // constructor.
@@ -760,7 +767,7 @@ func (a *Agent) executeToolAsync(toolName string, toolArgs map[string]string) (r
 
 		case <-tcCtx.Done():
 			// Distinguish hard-timeout from parent cancellation. When the
-			// parent (a.ctx) is cancelled, tcCtx.Err() is context.Canceled;
+			// parent (a.ctx) is canceled, tcCtx.Err() is context.Canceled;
 			// when our own deadline elapses it is context.DeadlineExceeded.
 			if tcCtx.Err() == context.DeadlineExceeded {
 				a.emit(Event{Type: "error", Content: fmt.Sprintf("⛔ Tool '%s' timed out after %s. Force-returning to prevent infinite hang.", toolName, hardTimeoutDuration)})
@@ -772,8 +779,8 @@ func (a *Agent) executeToolAsync(toolName string, toolArgs map[string]string) (r
 				}
 				return tools.Result{Error: fmt.Sprintf("[TIMEOUT exceeded %s]", hardTimeoutDuration)}, nil
 			}
-			// Parent cancelled (agent stopped).
-			return tools.Result{Error: "Agent stopped during tool execution"}, fmt.Errorf("agent cancelled")
+			// Parent canceled (agent stopped).
+			return tools.Result{Error: "Agent stopped during tool execution"}, fmt.Errorf("agent canceled")
 		}
 	}
 }
@@ -1079,7 +1086,7 @@ func isVersionLike(s string) bool {
 		return false
 	}
 	for _, r := range s {
-		if !(r == '.' || (r >= '0' && r <= '9')) {
+		if r != '.' && (r < '0' || r > '9') {
 			return false
 		}
 	}
@@ -1354,7 +1361,19 @@ func (a *Agent) Run(targets []string, instruction string) {
 			a.pruneMessages()
 		}
 
-		response, err := a.client.Chat(a.messages)
+		// Snapshot the message buffer under msgMu before handing it to the
+		// LLM client. Chat() ranges over the slice to serialize the request
+		// while SendMessage() (called from the web chat handler on another
+		// goroutine) may append concurrently. Reading a.messages directly
+		// here is a data race: a concurrent append can reallocate the backing
+		// array mid-serialization. Copying under the lock gives Chat a stable
+		// view; messages that arrive during the call are picked up next iter.
+		a.msgMu.Lock()
+		msgsSnapshot := make([]llm.Message, len(a.messages))
+		copy(msgsSnapshot, a.messages)
+		a.msgMu.Unlock()
+
+		response, err := a.client.Chat(msgsSnapshot)
 		// Update activity after LLM response
 		a.touchActivity()
 
@@ -1392,6 +1411,16 @@ func (a *Agent) Run(targets []string, instruction string) {
 				if a.state.ConsecutiveErrors < 0 {
 					a.state.ConsecutiveErrors = 0
 				}
+				// Bound the total time the scan may spend parked on provider
+				// rate limits. Without a ceiling a persistently 429'd provider
+				// keeps the scan alive forever (touchActivity defeats the idle
+				// watchdog on purpose during the wait). Once the cumulative
+				// wait exceeds maxCumulativeRateLimitWait, fail the scan cleanly.
+				if maxCumulativeRateLimitWait > 0 && a.state.CumulativeRateLimitWait >= maxCumulativeRateLimitWait {
+					a.emit(Event{Type: "error", Content: fmt.Sprintf("⛔ Agent stopped: LLM provider rate limited for a cumulative %s without recovering.", a.state.CumulativeRateLimitWait), TotalTokens: tokenCount()})
+					a.emit(Event{Type: "finished", Content: fmt.Sprintf("Agent stopped: provider rate limited for a cumulative %s without recovering.", a.state.CumulativeRateLimitWait), TotalTokens: tokenCount()})
+					return
+				}
 				a.emit(Event{Type: "error", Content: "⏳ Rate limited by LLM provider — waiting 30 minutes before retrying (will NOT skip this target)", TotalTokens: tokenCount()})
 				// Sleep in 1-minute chunks so we can bail out if the agent is stopped
 				for waited := 0; waited < 30; waited++ {
@@ -1399,6 +1428,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 						break
 					}
 					time.Sleep(1 * time.Minute)
+					a.state.CumulativeRateLimitWait += 1 * time.Minute
 				}
 				a.touchActivity() // keep watchdog alive during long wait
 				continue
@@ -1634,10 +1664,15 @@ func (a *Agent) Stop() {
 	// user-initiated "Stop All" operations.
 }
 
-// SendMessage allows sending additional messages to the agent during a scan.
-// The message is injected into the conversation history and will be processed
-// on the agent's next iteration. This avoids concurrent LLM calls which would
-// corrupt the conversation history.
+// SendMessage injects an operator message into the running scan's
+// conversation history so the agent picks it up on its next iteration.
+// Routing it through the message buffer (instead of issuing a separate
+// LLM call) avoids concurrent Chat() calls that would corrupt history.
+//
+// This is fire-and-forget: the returned string is an acknowledgement
+// that the message was queued, NOT the agent's reply. The agent's
+// response to the message surfaces later as normal scan events on the
+// live feed. The error is non-nil only when the agent is already stopped.
 func (a *Agent) SendMessage(message string) (string, error) {
 	if a.stopped.Load() {
 		return "", fmt.Errorf("agent is not running")
@@ -1686,8 +1721,8 @@ func getToolSuggestion(toolName, errorMsg string) string {
 		if strings.Contains(lower, "permission denied") || strings.Contains(lower, "access denied") {
 			return "Suggestion: Permission denied. Try running with elevated privileges or use a different method.\n"
 		}
-		if strings.Contains(lower, "cancelled") || strings.Contains(lower, "canceled") {
-			return "Suggestion: Command was cancelled. The agent may have been stopped or the command was taking too long.\n"
+		if strings.Contains(lower, "cancel") {
+			return "Suggestion: Command was canceled. The agent may have been stopped or the command was taking too long.\n"
 		}
 		if strings.Contains(lower, "connection") || strings.Contains(lower, "network") {
 			return "Suggestion: Network error. Check the target URL and try again.\n"
@@ -1747,7 +1782,7 @@ func alignPruneCutoff(messages []llm.Message, start int) int {
 // pruneThresholdBytes is the serialized message-buffer ceiling used by
 // shouldPruneBeforeLLM. ~800 KiB ≈ ~200K tokens at ~4 bytes per token,
 // safely below the smallest provider context window we target while
-// leaving headroom for the system prompt + a multi-turn tool dialogue.
+// leaving headroom for the system prompt + a multi-turn tool dialog.
 const pruneThresholdBytes = 800 * 1024
 
 // perMessageOverheadBytes accounts for role tags, JSON delimiters, and
@@ -2019,9 +2054,10 @@ func (a *Agent) emit(evt Event) {
 				log.Printf("⚠️ CRITICAL: Failed sending %s event (channel closed or full for 10s)", evt.Type)
 			}
 		} else {
-			if !safeSend(a.events, evt, 0) {
-				// Channel closed or full — silently drop non-critical events
-			}
+			// Non-critical event: best-effort non-blocking send. A closed or
+			// full channel simply drops the event, so the boolean result is
+			// intentionally ignored.
+			_ = safeSend(a.events, evt, 0)
 		}
 	}
 }

@@ -1,0 +1,38 @@
+---
+# ExternalSecret: xalgorix-jwt
+#
+# Ed25519 PEM-encoded private key used to sign session JWTs and signed
+# S3 report URLs (Requirement 20.7). Rotated every 90 days alongside the
+# protecting KMS CMK; old signatures are honoured for 14 days post-rotation
+# (see Decisions and Defaults #1).
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: xalgorix-jwt
+  namespace: xalgorix
+  labels:
+    app.kubernetes.io/name: xalgorix-jwt
+    app.kubernetes.io/part-of: xalgorix
+    app.kubernetes.io/component: secret
+    xalgorix.com/secret-source: aws-secrets-manager
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: aws-secrets-manager
+  target:
+    name: xalgorix-jwt
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      metadata:
+        labels:
+          app.kubernetes.io/name: xalgorix-jwt
+          app.kubernetes.io/part-of: xalgorix
+          app.kubernetes.io/component: secret
+          xalgorix.com/secret-source: aws-secrets-manager
+  data:
+    - secretKey: JWT_SIGNING_KEY
+      remoteRef:
+        key: xalgorix/jwt
+        property: JWT_SIGNING_KEY

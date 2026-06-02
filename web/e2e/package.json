@@ -1,0 +1,25 @@
+{
+  "name": "@xalgorix/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Playwright end-to-end suite for the Xalgorix SaaS web apps. Real specs land in Phase 20.2.",
+  "license": "UNLICENSED",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "test:visual": "playwright test --project=marketing-mobile --project=marketing-desktop",
+    "test:visual:update": "playwright test --project=marketing-mobile --project=marketing-desktop --update-snapshots",
+    "report": "playwright show-report playwright-report",
+    "lint": "eslint . --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.45.0",
+    "@types/node": "^20.14.0",
+    "@xalgorix/eslint-config": "workspace:*",
+    "@xalgorix/tsconfig": "workspace:*",
+    "eslint": "^8.57.0",
+    "typescript": "^5.5.0"
+  }
+}

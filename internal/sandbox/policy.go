@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -265,7 +266,8 @@ func (p *Policy) CheckResolve(sc *scanctx.ScanContext, toolName, raw string) (st
 		// Promote into a fully-populated PathRejectError, count it,
 		// and emit the WARN log line described by R5.6 / R9.1.
 		var rej *PathRejectError
-		if pre, ok := err.(*PathRejectError); ok {
+		pre := &PathRejectError{}
+		if errors.As(err, &pre) {
 			rej = pre
 		} else {
 			rej = &PathRejectError{Path: canonical, Roots: p.Roots()}
@@ -305,7 +307,8 @@ func (p *Policy) CheckRead(sc *scanctx.ScanContext, toolName, raw string) (strin
 	}
 	if err := p.CheckReadCanonical(canonical); err != nil {
 		var rej *PathRejectError
-		if pre, ok := err.(*PathRejectError); ok {
+		pre := &PathRejectError{}
+		if errors.As(err, &pre) {
 			rej = pre
 		} else {
 			rej = &PathRejectError{Path: canonical, Roots: p.ReadDenyRoots()}
@@ -354,7 +357,7 @@ func (p *Policy) CheckReadCanonical(canonical string) error {
 }
 
 // resolutionBase picks the directory relative paths resolve against.
-// Prefers the active scan context's ScanDir (so per-scan artefacts
+// Prefers the active scan context's ScanDir (so per-scan artifacts
 // stay isolated), falling back to cfg.Workspace which mirrors
 // Workspace_Root / Data_Dir.
 func resolutionBase(sc *scanctx.ScanContext) string {

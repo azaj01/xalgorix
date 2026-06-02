@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // ── Hook Events ──────────────────────────────────────────────────────────────
@@ -54,6 +55,14 @@ type ScanState struct {
 	ConsecutiveErrors  int
 	EmptyResponseCount int
 	NoToolCount        int
+
+	// CumulativeRateLimitWait tracks the total time spent parked in the
+	// provider-rate-limit backoff loop across the whole scan. It bounds an
+	// otherwise-indefinite stall: a persistently 429'd provider would
+	// otherwise keep the scan alive forever (the idle watchdog is kept
+	// alive on purpose during the wait), so we cap the total wait and fail
+	// the scan cleanly once the ceiling is reached.
+	CumulativeRateLimitWait time.Duration
 
 	// New enrichment hooks
 	WAFDetected          bool
@@ -235,7 +244,8 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 func hookStuckTracker(state *ScanState, args map[string]string) HookResult {
 	toolName := args["tool_name"]
 
-	if toolName == "browser_action" {
+	switch toolName {
+	case "browser_action":
 		state.ConsecutiveBrowser++
 		state.ConsecutiveSearch = 0
 
@@ -257,7 +267,7 @@ func hookStuckTracker(state *ScanState, args map[string]string) HookResult {
 			// No URL arg (snapshot, click, etc.) — still on same domain
 			state.StuckIterations++
 		}
-	} else if toolName == "web_search" {
+	case "web_search":
 		state.ConsecutiveSearch++
 		q := strings.ToLower(args["query"])
 		// If searching for bypass/cloudflare/captcha/WAF, it's a stuck signal
@@ -267,7 +277,7 @@ func hookStuckTracker(state *ScanState, args map[string]string) HookResult {
 			strings.Contains(q, "403 forbidden") || strings.Contains(q, "access denied") {
 			state.StuckIterations++
 		}
-	} else {
+	default:
 		// A non-browser, non-search tool call = real progress, reset counters
 		if toolName != "add_note" && toolName != "read_notes" {
 			state.ConsecutiveBrowser = 0

@@ -1,0 +1,268 @@
+# Daily security scans for xalgorix.
+#
+# Implements task 14.4 of the xalgorix-saas spec (Requirement 20.11):
+# every day at 07:00 UTC we run `govulncheck ./...` against the Go module
+# and `pnpm audit --audit-level=high` against the web monorepo. When either
+# job finds a high/critical advisory it (a) fails the job and (b) opens a
+# GitHub Issue tagged `security,automated` with the failing report attached.
+#
+# Pinned tooling per design.md:
+#   - Go    1.24.13
+#   - Node  20
+#   - pnpm  9
+#
+# Lockfile-aware: each job checks for its lockfile up front and skips the
+# remaining steps with a logged notice when the lockfile is missing (e.g.
+# the web monorepo has not yet generated `pnpm-lock.yaml`). The job still
+# completes successfully so the schedule keeps running once the lockfile
+# lands.
+#
+# The dedicated daily security gate is intentionally separate from
+# `ci.yml` (per-PR fast feedback) so it can run on its own schedule and
+# carry the elevated `issues: write` permission without leaking it onto
+# pull-request runs.
+
+name: security-daily
+
+on:
+  schedule:
+    # 07:00 UTC every day. Matches the design "Daily security scan" cadence.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: security-daily-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  govulncheck:
+    name: govulncheck (Go module)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Detect go.mod
+        id: gomod
+        shell: bash
+        run: |
+          if [ -f go.mod ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=govulncheck skipped::go.mod not found at repo root; nothing to scan."
+          fi
+
+      - name: Set up Go
+        if: steps.gomod.outputs.present == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.13"
+          cache: true
+
+      - name: Install govulncheck
+        if: steps.gomod.outputs.present == 'true'
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck (text report)
+        if: steps.gomod.outputs.present == 'true'
+        shell: bash
+        run: |
+          set +e
+          govulncheck ./... | tee govulncheck-report.txt
+          # Capture exit code from govulncheck (PIPESTATUS[0]); we do not fail the
+          # step here so the json step can also run and the artifact upload can
+          # always include both reports.
+          echo "rc=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Run govulncheck (JSON for gating)
+        if: steps.gomod.outputs.present == 'true'
+        id: vuln
+        shell: bash
+        run: |
+          set +e
+          govulncheck -json ./... > govulncheck-report.json
+          # govulncheck does not assign CVSS severities itself; per
+          # `.govulncheck.yaml` (`fail_on: high`) we treat any reported finding
+          # — i.e. a vulnerability the project actually calls into — as
+          # high-severity and gate the build on it. This satisfies Requirement
+          # 20.11's "high/critical" threshold for the Go side of the scan.
+          if grep -q '"finding"' govulncheck-report.json; then
+            echo "vulns=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "vulns=false" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
+
+      - name: Upload govulncheck artifacts
+        if: always() && steps.gomod.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: govulncheck-${{ github.run_id }}
+          path: |
+            govulncheck-report.txt
+            govulncheck-report.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Compose issue body
+        if: steps.gomod.outputs.present == 'true' && steps.vuln.outputs.vulns == 'true'
+        shell: bash
+        run: |
+          {
+            echo "## govulncheck — daily scan failure"
+            echo
+            echo "Workflow run: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo "Commit: \`${{ github.sha }}\`"
+            echo
+            echo "_Requirements: 20.11_"
+            echo
+            echo "### Findings"
+            echo
+            echo '```text'
+            head -c 60000 govulncheck-report.txt || true
+            echo '```'
+            echo
+            echo "Full JSON report attached as the \`govulncheck-${{ github.run_id }}\` artifact."
+          } > issue-body.md
+
+      - name: Open issue on vulnerability detection
+        if: steps.gomod.outputs.present == 'true' && steps.vuln.outputs.vulns == 'true'
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: "[security-daily] govulncheck found Go vulnerabilities (run ${{ github.run_id }})"
+          content-filepath: issue-body.md
+          labels: |
+            security
+            automated
+
+      - name: Fail job on vulnerability detection
+        if: steps.gomod.outputs.present == 'true' && steps.vuln.outputs.vulns == 'true'
+        run: |
+          echo "::error title=govulncheck::Vulnerabilities detected; tracking issue opened."
+          exit 1
+
+  npm-audit:
+    name: pnpm audit (web monorepo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Detect pnpm lockfile
+        id: lock
+        shell: bash
+        run: |
+          # The pnpm workspace root lockfile lives at the repo root once
+          # `pnpm install` has been run against `pnpm-workspace.yaml`, but the
+          # task spec also calls out `web/pnpm-lock.yaml` as a permitted
+          # location. Accept either; skip the job (with a logged notice) when
+          # neither exists so the daily schedule keeps running until the web
+          # monorepo's lockfile is committed.
+          if [ -f pnpm-lock.yaml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          elif [ -f web/pnpm-lock.yaml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "dir=web" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=pnpm audit skipped::No pnpm-lock.yaml at repo root or under web/; nothing to audit."
+          fi
+
+      - name: Set up Node
+        if: steps.lock.outputs.present == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up pnpm
+        if: steps.lock.outputs.present == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: "9"
+          run_install: false
+
+      - name: Install dependencies (frozen lockfile)
+        if: steps.lock.outputs.present == 'true'
+        working-directory: ${{ steps.lock.outputs.dir }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Run pnpm audit (--audit-level=high)
+        if: steps.lock.outputs.present == 'true'
+        id: audit
+        working-directory: ${{ steps.lock.outputs.dir }}
+        shell: bash
+        run: |
+          set +e
+          # `pnpm audit --audit-level=high` exits non-zero if any high or
+          # critical advisory is found, which is exactly the gate Requirement
+          # 20.11 calls for. We capture the report regardless so the upload
+          # step always has something to attach.
+          pnpm audit --audit-level=high | tee pnpm-audit-report.txt
+          rc=${PIPESTATUS[0]}
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -ne 0 ]; then
+            echo "vulns=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "vulns=false" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
+
+      - name: Upload pnpm audit artifact
+        if: always() && steps.lock.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pnpm-audit-${{ github.run_id }}
+          path: ${{ steps.lock.outputs.dir }}/pnpm-audit-report.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Compose issue body
+        if: steps.lock.outputs.present == 'true' && steps.audit.outputs.vulns == 'true'
+        shell: bash
+        run: |
+          {
+            echo "## pnpm audit — daily scan failure (high/critical)"
+            echo
+            echo "Workflow run: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo "Commit: \`${{ github.sha }}\`"
+            echo "Lockfile dir: \`${{ steps.lock.outputs.dir }}\`"
+            echo
+            echo "_Requirements: 20.11_"
+            echo
+            echo "### Findings"
+            echo
+            echo '```text'
+            head -c 60000 "${{ steps.lock.outputs.dir }}/pnpm-audit-report.txt" || true
+            echo '```'
+            echo
+            echo "Full report attached as the \`pnpm-audit-${{ github.run_id }}\` artifact."
+          } > issue-body.md
+
+      - name: Open issue on vulnerability detection
+        if: steps.lock.outputs.present == 'true' && steps.audit.outputs.vulns == 'true'
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: "[security-daily] pnpm audit found high/critical advisories (run ${{ github.run_id }})"
+          content-filepath: issue-body.md
+          labels: |
+            security
+            automated
+
+      - name: Fail job on vulnerability detection
+        if: steps.lock.outputs.present == 'true' && steps.audit.outputs.vulns == 'true'
+        run: |
+          echo "::error title=pnpm audit::High/critical advisories detected; tracking issue opened."
+          exit 1

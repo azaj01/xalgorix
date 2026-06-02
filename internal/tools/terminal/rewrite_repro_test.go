@@ -5,7 +5,9 @@ import (
 )
 
 // TestRewriteShellSegments_MultiBytePanic reproduces the panic:
-//   runtime error: slice bounds out of range [414:413]
+//
+//	runtime error: slice bounds out of range [414:413]
+//
 // when a command contains multi-byte UTF-8 characters (e.g. em-dash,
 // curly quotes, non-ASCII domain characters) before a shell delimiter.
 //

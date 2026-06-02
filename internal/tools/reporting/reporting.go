@@ -51,8 +51,8 @@ type Vulnerability struct {
 	Endpoint           string  `json:"endpoint"`
 	Method             string  `json:"method"`
 	CVE                string  `json:"cve"`
-	CWE                string  `json:"cwe_id,omitempty"`         // e.g. "CWE-79"
-	OWASP              string  `json:"owasp,omitempty"`          // e.g. "A03"
+	CWE                string  `json:"cwe_id,omitempty"` // e.g. "CWE-79"
+	OWASP              string  `json:"owasp,omitempty"`  // e.g. "A03"
 	CVSS               float64 `json:"cvss"`
 	CVSSVector         string  `json:"cvss_vector,omitempty"` // CVSS 3.1 vector string
 	TechnicalAnalysis  string  `json:"technical_analysis"`
@@ -144,8 +144,8 @@ func getStore() *vulnStore {
 	return getStoreByID(scanctx.Default().ID)
 }
 
-// GetStoreForContext returns the vulnerability store for a specific context ID.
-func GetStoreForContext(contextID string) *vulnStore {
+// getStoreForContext returns the vulnerability store for a specific context ID.
+func getStoreForContext(contextID string) *vulnStore {
 	storesMu.RLock()
 	s, ok := stores[contextID]
 	storesMu.RUnlock()
@@ -293,7 +293,7 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 
 	var cvss float64
 	if c := args["cvss"]; c != "" {
-		fmt.Sscanf(c, "%f", &cvss)
+		_, _ = fmt.Sscanf(c, "%f", &cvss)
 	}
 	cvssVector := strings.TrimSpace(args["cvss_vector"])
 
@@ -734,7 +734,7 @@ func GetVulnerabilities() []Vulnerability {
 
 // GetVulnerabilitiesForContext returns vulns for a specific context ID.
 func GetVulnerabilitiesForContext(contextID string) []Vulnerability {
-	store := GetStoreForContext(contextID)
+	store := getStoreForContext(contextID)
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	result := make([]Vulnerability, len(store.vulns))
@@ -752,7 +752,7 @@ func ResetVulnerabilities() {
 
 // ResetVulnerabilitiesForContext clears vulns for a specific context ID.
 func ResetVulnerabilitiesForContext(contextID string) {
-	store := GetStoreForContext(contextID)
+	store := getStoreForContext(contextID)
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.vulns = nil
@@ -839,7 +839,7 @@ func MergeVulnsToContext(srcContextID, dstContextID string) int {
 	}
 
 	// Read source vulns
-	srcStore := GetStoreForContext(srcContextID)
+	srcStore := getStoreForContext(srcContextID)
 	srcStore.mu.RLock()
 	srcVulns := make([]Vulnerability, len(srcStore.vulns))
 	copy(srcVulns, srcStore.vulns)
@@ -850,7 +850,7 @@ func MergeVulnsToContext(srcContextID, dstContextID string) int {
 	}
 
 	// Merge into destination, skipping duplicates
-	dstStore := GetStoreForContext(dstContextID)
+	dstStore := getStoreForContext(dstContextID)
 	dstStore.mu.Lock()
 	defer dstStore.mu.Unlock()
 

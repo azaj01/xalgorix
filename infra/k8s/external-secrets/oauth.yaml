@@ -1,0 +1,50 @@
+---
+# ExternalSecret: xalgorix-oauth
+#
+# OAuth client credentials for Google and GitHub identity providers used
+# by the Authentication subsystem (Requirement 3). Stored together in
+# `xalgorix/oauth` so credential rotation for either IdP is a single
+# Secrets Manager `PutSecretValue` call.
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: xalgorix-oauth
+  namespace: xalgorix
+  labels:
+    app.kubernetes.io/name: xalgorix-oauth
+    app.kubernetes.io/part-of: xalgorix
+    app.kubernetes.io/component: secret
+    xalgorix.com/secret-source: aws-secrets-manager
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: aws-secrets-manager
+  target:
+    name: xalgorix-oauth
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      metadata:
+        labels:
+          app.kubernetes.io/name: xalgorix-oauth
+          app.kubernetes.io/part-of: xalgorix
+          app.kubernetes.io/component: secret
+          xalgorix.com/secret-source: aws-secrets-manager
+  data:
+    - secretKey: GOOGLE_CLIENT_ID
+      remoteRef:
+        key: xalgorix/oauth
+        property: GOOGLE_CLIENT_ID
+    - secretKey: GOOGLE_CLIENT_SECRET
+      remoteRef:
+        key: xalgorix/oauth
+        property: GOOGLE_CLIENT_SECRET
+    - secretKey: GITHUB_CLIENT_ID
+      remoteRef:
+        key: xalgorix/oauth
+        property: GITHUB_CLIENT_ID
+    - secretKey: GITHUB_CLIENT_SECRET
+      remoteRef:
+        key: xalgorix/oauth
+        property: GITHUB_CLIENT_SECRET

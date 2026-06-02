@@ -149,7 +149,7 @@ func TestShouldBlockForOutOfScope_AllowsHostlessCommands(t *testing.T) {
 }
 
 // TestShouldBlockForOutOfScope_AllowsAnywhereWhenNoScope confirms
-// the gate's behaviour when no activity hosts are configured. The
+// the gate's behavior when no activity hosts are configured. The
 // guard is no longer "disabled" on empty scope; it just has no
 // Public_OOS_Host rule left to fire (engagement scope is not
 // consulted at all post-fix). Public_OOS_Host references therefore
@@ -311,7 +311,7 @@ func TestExtractHostsFromArgs_QueryParamRedirect(t *testing.T) {
 	// sub-cases above keep — the tokenizer still surfaces every
 	// embedded host — but the gating verdict on the wrapped OOS
 	// host flips from "blocked" to "allowed". The Local_Or_Listener
-	// behaviour for wrapped local IPs is exercised separately by
+	// behavior for wrapped local IPs is exercised separately by
 	// TestProperty_LocalOrListenerInvarianceUnderTokenizationShape.
 	t.Run("gated tool allowed on wrapped OOS host", func(t *testing.T) {
 		a := &Agent{}
@@ -1038,7 +1038,6 @@ func TestBugCondition_PublicOOSHostPassThrough(t *testing.T) {
 	}
 }
 
-
 // ───────────────────────────────────────────────────────────────────
 // Preservation property tests (spec: scope-guard-local-only, task 2).
 // Property 2 from design.md → "Correctness Properties":
@@ -1072,32 +1071,6 @@ func TestBugCondition_PublicOOSHostPassThrough(t *testing.T) {
 // oracle = allow (unchanged across the spec) and lets task 3.11
 // reconcile the production divergence post-fix.
 
-// preservationCounterResolver wraps a stub resolver with a per-host
-// call counter so the DNS-lookup-count sub-property can assert
-// exactly one resolution per host-shaped argument. Today the agent
-// guard does no DNS (only the web guard does), so this counter is
-// observed via the agent oracle's own oracleLookupHost var. After
-// task 3 migrates the agent guard to scopeguard.LookupHost the same
-// counter shape is reused via that var.
-type preservationCounterResolver struct {
-	calls   int
-	perHost map[string]int
-	stub    func(string) ([]string, error)
-}
-
-func newPreservationCounterResolver(stub func(string) ([]string, error)) *preservationCounterResolver {
-	return &preservationCounterResolver{
-		perHost: make(map[string]int),
-		stub:    stub,
-	}
-}
-
-func (r *preservationCounterResolver) lookup(host string) ([]string, error) {
-	r.calls++
-	r.perHost[host]++
-	return r.stub(host)
-}
-
 // withOracleLookupHost swaps oracleLookupHost (the agent oracle's
 // frozen resolver indirection) for the duration of a single test.
 // Restoration runs via t.Cleanup so the original binding is
@@ -1127,10 +1100,8 @@ type preservationRow struct {
 func preservationRows() []preservationRow {
 	return []preservationRow{
 		// ── Cell 1: Local_Or_Listener_Host ────────────────────────
-		// Literal locals. Both oracle and production today reject
-		// because the host is not in Activity_Hosts (oracle's OOS
-		// rule). Post-fix production rejects because the host is
-		// Local_Or_Listener_Host. blocked bool matches in both eras.
+		// Literal locals. Both oracle and production reject because
+		// the host is a Local_Or_Listener_Host (loopback / localhost).
 		{
 			cell:  "local-or-listener",
 			name:  "loopback literal in curl",
@@ -1145,37 +1116,44 @@ func preservationRows() []preservationRow {
 			tool:  "terminal_execute",
 			args:  map[string]string{"command": "curl http://localhost/admin"},
 		},
+
+		// ── Cell 1b: Non-local private/link-local hosts ───────────
+		// Under the scope-guard-local-only rule these are NOT blocked:
+		// RFC1918 and link-local (including 169.254.169.254 cloud
+		// metadata) are legitimate scan targets on the target's
+		// network, not the operator's own machine. Both oracle and
+		// production allow — the rows pin allow==allow so a future
+		// regression that re-introduces blanket private-range
+		// blocking fails here.
 		{
-			cell:  "local-or-listener",
-			name:  "rfc1918 ipv4 in browser_action",
+			cell:  "non-local-private",
+			name:  "rfc1918 ipv4 in browser_action (allowed)",
 			scope: []string{"https://pentest-ground.com"},
 			tool:  "browser_action",
 			args:  map[string]string{"url": "http://10.0.0.1:8080/"},
 		},
 		{
-			cell:  "local-or-listener",
-			name:  "rfc1918 ipv4 192.168 in python_action",
+			cell:  "non-local-private",
+			name:  "rfc1918 ipv4 192.168 in python_action (allowed)",
 			scope: []string{"https://pentest-ground.com"},
 			tool:  "python_action",
 			args:  map[string]string{"code": "import requests; requests.get('http://192.168.1.1/')"},
 		},
 		{
-			cell:  "local-or-listener",
-			name:  "link-local 169.254 in curl",
+			cell:  "non-local-private",
+			name:  "link-local 169.254 cloud metadata in curl (allowed)",
 			scope: []string{"https://pentest-ground.com"},
 			tool:  "terminal_execute",
 			args:  map[string]string{"command": "curl http://169.254.169.254/latest/meta-data/"},
 		},
 
 		// ── Cell 2: Self-listener ─────────────────────────────────
-		// Today the unfixed agent guard rejects these because the
-		// host literal isn't in Activity_Hosts. Post-fix production
-		// rejects because the (host, port) pair matches the operator's
-		// listener via scopeguard.IsLocalOrListener. blocked bool
-		// matches in both eras.
+		// Post-fix both oracle and production reject because the
+		// host is loopback (caught by the Local_Or_Listener_Host
+		// loopback fast-path regardless of port).
 		{
 			cell:  "self-listener",
-			name:  "127.0.0.1:8080 (default bind+port)",
+			name:  "127.0.0.1:8080 (loopback, any port)",
 			scope: []string{"https://pentest-ground.com"},
 			tool:  "terminal_execute",
 			args:  map[string]string{"command": "curl http://127.0.0.1:8080/admin"},
@@ -1439,11 +1417,14 @@ func TestPreservation_LocalOrListenerInvarianceUnderTokenizationShape(t *testing
 	a := &Agent{}
 	a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
 
+	// Only Local_Or_Listener_Hosts are exercised here. Under the
+	// scope-guard-local-only rule, RFC1918/link-local literals
+	// (10.0.0.1, 192.168.1.1, 169.254.169.254) are NOT local and are
+	// allowed, so they no longer belong to this reject-invariance
+	// property. 127.0.0.1 is the representative literal local; its
+	// rejection must be invariant across every tokenization shape.
 	hosts := []string{
 		"127.0.0.1",
-		"10.0.0.1",
-		"192.168.1.1",
-		"169.254.169.254",
 	}
 	shapeBuilders := map[string]func(string) string{
 		"bare host":      func(h string) string { return "curl " + h },
@@ -1510,8 +1491,6 @@ func TestPreservation_AgentOracleStableAcrossLookupSwap(t *testing.T) {
 		_, _ = oracleShouldBlockForOutOfScope(oracleA, row.tool, args)
 	}
 }
-
-
 
 // ───────────────────────────────────────────────────────────────────
 // Bucket D — new coverage for the narrowed Local_Or_Listener_Host
@@ -1608,18 +1587,14 @@ func TestShouldBlockForOutOfScope_BlocksLocalOrListener(t *testing.T) {
 		// The classifier itself (scopeguard.IsLocalOrListener) handles
 		// every IPv6 literal shape and is independently covered by
 		// internal/scopeguard/scopeguard_test.go.
-		{name: "rfc1918 10.x", command: "curl http://10.0.0.1/"},
-		{name: "rfc1918 192.168.x", command: "curl http://192.168.1.1/"},
-		{name: "link-local 169.254", command: "curl http://169.254.169.254/latest/meta-data/"},
+		//
+		// NOTE: RFC1918 (10.x, 192.168.x) and link-local (169.254.x)
+		// literals are deliberately NOT in this block-list. Under the
+		// scope-guard-local-only rule they are legitimate scan targets
+		// and must be ALLOWED — that is asserted by the companion test
+		// TestShouldBlockForOutOfScope_AllowsNonLocalPrivateHosts.
 		{name: "0.0.0.0 paired with listener port", command: "curl http://0.0.0.0:9000/"},
 		{name: "configured bind:port", command: "curl http://127.0.0.1:9000/"},
-		{
-			name:    "hostname resolves to private IP via scopeguard.LookupHost",
-			command: "curl http://internal.example/",
-			stubLookup: func(host string) ([]string, error) {
-				return []string{"10.0.0.5"}, nil
-			},
-		},
 		{
 			name:    "hostname resolves to ipv6 loopback via scopeguard.LookupHost",
 			command: "curl http://lb6.example/",
@@ -1673,6 +1648,69 @@ func TestShouldBlockForOutOfScope_BlocksLocalOrListener(t *testing.T) {
 	}
 }
 
+// TestShouldBlockForOutOfScope_AllowsNonLocalPrivateHosts is the
+// companion to TestShouldBlockForOutOfScope_BlocksLocalOrListener. It
+// pins the scope-guard-local-only rule that RFC1918, link-local
+// (including the 169.254.169.254 cloud-metadata address), and
+// arbitrary public OOS hostnames are NOT blocked from a Gated_Tool —
+// they are legitimate targets on the scanned host's network, not the
+// operator's own machine. Each row asserts blocked == false.
+//
+// This guards against a regression that re-introduces blanket
+// private-range blocking (the behavior removed in commit b6f8f4f).
+func TestShouldBlockForOutOfScope_AllowsNonLocalPrivateHosts(t *testing.T) {
+	const listenerPort = 9000
+	const bindAddr = "127.0.0.1"
+
+	makeAgent := func() *Agent {
+		a := &Agent{
+			localGuard: scopeguard.Config{BindAddr: bindAddr, Port: listenerPort},
+		}
+		a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
+		return a
+	}
+
+	type row struct {
+		name       string
+		command    string
+		stubLookup func(string) ([]string, error)
+	}
+
+	rows := []row{
+		{name: "rfc1918 10.x literal", command: "curl http://10.0.0.1/"},
+		{name: "rfc1918 192.168.x literal", command: "curl http://192.168.1.1/"},
+		{name: "rfc1918 172.16.x literal", command: "curl http://172.16.5.4/"},
+		{name: "link-local 169.254 cloud metadata", command: "curl http://169.254.169.254/latest/meta-data/"},
+		{name: "public OOS hostname", command: "curl http://anywhere.example/"},
+		{
+			name:    "hostname resolves to private IP via scopeguard.LookupHost",
+			command: "curl http://internal.example/",
+			stubLookup: func(host string) ([]string, error) {
+				return []string{"10.0.0.5"}, nil
+			},
+		},
+	}
+
+	for _, tc := range rows {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.stubLookup != nil {
+				withScopeguardLookupHost(t, tc.stubLookup)
+			}
+			a := makeAgent()
+			args := map[string]string{"command": tc.command}
+			before := cloneArgs(args)
+			blocked, reason := a.shouldBlockForOutOfScope("terminal_execute", args)
+			if blocked {
+				t.Fatalf("non-local host row %q must be allowed, got block (reason=%q)", tc.name, reason)
+			}
+			if !argsEqual(args, before) {
+				t.Errorf("args mutated: before=%v after=%v", before, args)
+			}
+		})
+	}
+}
+
 // TestShouldBlockForOutOfScope_LocalGuardActiveWithEmptyScope pins
 // Requirement 3.7's parenthetical: the Local_Or_Listener_Host block
 // path remains active independent of Activity_Hosts being populated.
@@ -1704,7 +1742,7 @@ func TestShouldBlockForOutOfScope_LocalGuardActiveWithEmptyScope(t *testing.T) {
 // scoped deterministic case 4 from design.md → "Exploratory Bug
 // Condition Checking → Test Cases" — an add_note call carrying
 // OOS-host text in `key` and `value` reaches the gate, the gate
-// recognises add_note as non-gated, and `key` / `value` reach the
+// recognizes add_note as non-gated, and `key` / `value` reach the
 // handler byte-identical.
 //
 // Validates: Requirements 2.4, 3.9.
@@ -1820,7 +1858,7 @@ func TestShouldBlockForOutOfScope_ReportVulnerabilityLocalOrListener(t *testing.
 // ways (bare host / host:port / scheme://host / userinfo URL /
 // inside redirect query parameters) MUST reject identically.
 //
-// NOTE: This is the post-fix rejection-side analogue of
+// NOTE: This is the post-fix rejection-side analog of
 // TestPreservation_LocalOrListenerInvarianceUnderTokenizationShape
 // (task 2). The preservation version asserts oracle-vs-production
 // agreement on shape invariance; this version asserts the
@@ -1837,11 +1875,13 @@ func TestProperty_LocalOrListenerInvarianceUnderTokenizationShape(t *testing.T) 
 	}
 	a.SetActivityPolicy("active", "active", []string{"https://pentest-ground.com"})
 
+	// Only Local_Or_Listener_Hosts are exercised here. Post the
+	// scope-guard-local-only fix, RFC1918/link-local literals are
+	// legitimate scan targets (allowed), so the reject-invariance
+	// property applies only to true locals — represented by the
+	// loopback literal.
 	hosts := []string{
 		"127.0.0.1",
-		"10.0.0.1",
-		"192.168.1.1",
-		"169.254.169.254",
 	}
 	shapeBuilders := map[string]func(string) string{
 		"bare host":      func(h string) string { return "curl " + h },

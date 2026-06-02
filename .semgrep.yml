@@ -1,0 +1,117 @@
+# Semgrep configuration for xalgorix.
+#
+# Implements task 0.3 of the xalgorix-saas spec (Requirement 20.11).
+# Consumed by `make sec` and by the security CI workflow.
+#
+# Conventions:
+# - Public registry rulesets are pulled by their `p/<name>` shortcuts when
+#   `make sec` is invoked with network access.
+# - The `rules:` section below holds first-party rules tailored to the
+#   xalgorix codebase. Keep these scoped to genuine smells: noisy rules
+#   should live in `p/*` registry packs, not here.
+#
+# Schema reference: https://semgrep.dev/docs/writing-rules/rule-syntax
+
+# Registry packs to apply on top of the in-repo rules. The CI workflow
+# passes these through `--config` flags so this file only needs the
+# project-specific rules; the packs are documented here for traceability.
+#
+# Used packs (kept in sync with .github/workflows/ci.yml):
+#   - p/golang
+#   - p/security-audit
+#   - p/secrets
+#   - p/owasp-top-ten
+
+rules:
+  - id: xalgorix-no-fmt-printf-in-cloud
+    message: >-
+      Avoid `fmt.Printf` / `fmt.Println` in internal/cloud/*; the cloud
+      surface uses the structured zerolog logger from
+      internal/cloud/observability so log lines stay JSON-shaped for Loki.
+    severity: WARNING
+    languages: [go]
+    paths:
+      include:
+        - internal/cloud
+      exclude:
+        - "**/*_test.go"
+    pattern-either:
+      - pattern: fmt.Printf(...)
+      - pattern: fmt.Println(...)
+      - pattern: fmt.Print(...)
+
+  - id: xalgorix-no-default-http-client
+    message: >-
+      Use a context-aware http.Client with explicit timeouts. The default
+      http.Client / http.DefaultClient never times out, which violates
+      the 30s outbound webhook ceiling in design.md.
+    severity: ERROR
+    languages: [go]
+    paths:
+      include:
+        - internal/cloud
+    pattern-either:
+      - pattern: http.Get(...)
+      - pattern: http.Post(...)
+      - pattern: http.PostForm(...)
+      - pattern: http.Head(...)
+      - pattern: http.DefaultClient.$F(...)
+
+  - id: xalgorix-tenancy-no-raw-sql-from-handlers
+    message: >-
+      HTTP handlers under internal/cloud/api must not take raw *sql.DB or
+      *pgxpool.Pool arguments — go through tenancy.WithTenant so RLS GUCs
+      (`app.organization_id`, `app.workspace_id`) are set on every tx.
+      See Property 1 in design.md.
+    severity: ERROR
+    languages: [go]
+    paths:
+      include:
+        - internal/cloud/api
+    pattern-either:
+      - pattern: |
+          func $F(..., $X *sql.DB, ...) {
+            ...
+          }
+      - pattern: |
+          func $F(..., $X *pgxpool.Pool, ...) {
+            ...
+          }
+
+  - id: xalgorix-no-md5-sha1-for-auth
+    message: >-
+      MD5 and SHA-1 are not collision-resistant; never use them for
+      authentication, signing, or token derivation. Use SHA-256 or
+      Argon2id (see internal/cloud/auth/password.go).
+    severity: ERROR
+    languages: [go]
+    pattern-either:
+      - pattern: crypto/md5
+      - pattern: crypto/sha1
+      - pattern: md5.New(...)
+      - pattern: sha1.New(...)
+      - pattern: md5.Sum(...)
+      - pattern: sha1.Sum(...)
+
+  - id: xalgorix-require-context-on-public-funcs
+    message: >-
+      Exported functions in internal/cloud/* should accept context.Context
+      as their first argument so cancellation and OTel spans propagate.
+    severity: WARNING
+    languages: [go]
+    paths:
+      include:
+        - internal/cloud
+      exclude:
+        - "**/*_test.go"
+    patterns:
+      - pattern: |
+          func $F($P1 $T1, ...) $RET {
+            ...
+          }
+      - metavariable-pattern:
+          metavariable: $F
+          pattern-regex: ^[A-Z]
+      - metavariable-pattern:
+          metavariable: $T1
+          pattern-not: context.Context

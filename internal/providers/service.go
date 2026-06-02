@@ -75,7 +75,7 @@ func (s *Service) Get(ctx context.Context, id string) (Entry, bool, error) {
 	if e, ok := s.index[id]; ok {
 		return e, true, nil
 	}
-	// Fall back through LookupBuiltin to honour case-insensitive
+	// Fall back through LookupBuiltin to honor case-insensitive
 	// matching for callers that pass operator input directly.
 	if e, ok := LookupBuiltin(id); ok {
 		return e, true, nil
