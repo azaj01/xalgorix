@@ -8,12 +8,68 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-pdf/fpdf"
 )
+
+// textShowRe matches PDF text-show operators — a parenthesized string
+// (with escaped parens handled) followed by Tj. This is the visible
+// text the cover page renders.
+var textShowRe = regexp.MustCompile(`(?s)\((?:[^\\)]|\\.)*\)\s*Tj`)
+
+// fontSetRe matches font-selection operators (`/F<sha1> <size> Tf`) in
+// the content stream. The sequence of font switches is part of the
+// rendered layout; the SHA-1 id is collapsed to a placeholder so the
+// projection ignores fpdf's per-run font-id churn.
+var fontSetRe = regexp.MustCompile(`/F[0-9a-f]{40}\s+[0-9.]+\s+Tf`)
+
+// fontIDRe matches fpdf's font resource identifiers — an "F" followed
+// by the 40-char hex SHA-1 of the font definition (see go-pdf/fpdf
+// generateFontID).
+var fontIDRe = regexp.MustCompile(`F[0-9a-f]{40}`)
+
+// canonicalizeReportPDF projects a rendered report down to the
+// deterministic slice of its content and returns those bytes for
+// hashing.
+//
+// WHY: fpdf v0.9.0 emits font objects by ranging an unordered map
+// (putfonts: `for key = range f.fonts`). Across runs this shuffles the
+// object numbers assigned to each font, the order font references are
+// listed in every page /Font dictionary, the byte positions of the
+// /BaseFont object definitions, and consequently the entire xref table.
+// A raw-byte SHA-256 of the PDF is therefore non-deterministic even
+// though the rendered content is identical — which made the previous
+// snapshot test flaky (it alternated between several hashes run-to-run).
+//
+// The projection keeps exactly the parts that reflect cover-page
+// CONTENT and are invariant to fpdf's object bookkeeping:
+//   - every text-show operator (the literal text drawn on the page), in
+//     document order;
+//   - every font-selection operator, with the volatile SHA-1 font id
+//     replaced by a fixed placeholder (the order of font switches is
+//     meaningful; the id itself is not).
+//
+// Geometry, colors, dates and compression are already pinned by
+// freezeFPDF, and the text/Tf stream is emitted in deterministic
+// document order, so this projection is stable across runs while still
+// failing on a genuine cover-page content change.
+func canonicalizeReportPDF(raw []byte) []byte {
+	normFonts := fontIDRe.ReplaceAll(raw, []byte("FONT"))
+	var buf []byte
+	for _, m := range textShowRe.FindAll(raw, -1) {
+		buf = append(buf, m...)
+		buf = append(buf, '\n')
+	}
+	for _, m := range fontSetRe.FindAll(normFonts, -1) {
+		buf = append(buf, m...)
+		buf = append(buf, '\n')
+	}
+	return buf
+}
 
 // updateGoldenEnv toggles in-place rewrite of the cover-page snapshot
 // golden. Setting `UPDATE_GOLDEN=1` while running the cover-page tests
@@ -83,7 +139,12 @@ func fixedScan(companyName string) *Scan {
 
 // renderFixture renders the cover-page fixture into a temp dir and
 // returns the rendered bytes alongside the lowercase-hex SHA-256
-// digest. The temp dir is removed automatically via t.TempDir.
+// digest of the CANONICALIZED bytes. Canonicalization removes fpdf's
+// font-emission-order non-determinism (see canonicalizeReportPDF) so
+// the digest is stable across runs while still pinning content. The
+// raw (un-canonicalized) bytes are returned for callers that scan for
+// literal substrings. The temp dir is removed automatically via
+// t.TempDir.
 func renderFixture(t *testing.T, scan *Scan) ([]byte, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -95,7 +156,7 @@ func renderFixture(t *testing.T, scan *Scan) ([]byte, string) {
 	if err != nil {
 		t.Fatalf("read rendered pdf: %v", err)
 	}
-	sum := sha256.Sum256(body)
+	sum := sha256.Sum256(canonicalizeReportPDF(body))
 	return body, hex.EncodeToString(sum[:])
 }
 

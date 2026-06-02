@@ -28,8 +28,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.24"
-  GOLANGCI_LINT_VERSION: "v1.61.0"
+  GO_VERSION: "1.25"
+  GOLANGCI_LINT_VERSION: "v2.5.0"
 
 jobs:
   lint:
@@ -52,10 +52,18 @@ jobs:
         run: make lint
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
-          args: --config .golangci.yml --timeout=5m
+          args: --config .golangci.yml
+          # Gate PRs on NEW findings only. golangci-lint had never run in
+          # CI before (neither the workflow nor .golangci.yml existed on a
+          # released branch), so the existing code carries a large lint
+          # backlog. only-new-issues lets the linter run and enforce quality
+          # on changed/added code without blocking on the historical backlog,
+          # which is tracked separately. The WIP cloud tree is excluded in
+          # .golangci.yml until it stabilizes.
+          only-new-issues: true
 
   test:
     name: Unit tests

@@ -114,8 +114,8 @@ type Agent struct {
 	passiveReconPassiveLookups int
 	passiveReconBlockedActive  int
 	passiveReconSourceKeys     map[string]bool
-	hooks                      *HookRegistry // extensible lifecycle hooks
-	state                      *ScanState    // shared mutable scan state for hooks
+	hooks                      *HookRegistry     // extensible lifecycle hooks
+	state                      *ScanState        // shared mutable scan state for hooks
 	localGuard                 scopeguard.Config // operator's listener identity, consulted by shouldBlockForOutOfScope to detect Local_Or_Listener_Host references in Gated_Tool args
 }
 
@@ -160,6 +160,7 @@ func WithLLMClient(c *llm.Client) AgentOption {
 //   - a single *scanctx.ScanContext (existing web-server call site),
 //   - one or more AgentOption (new B1 path), or
 //   - a *scanctx.ScanContext followed by one or more AgentOption.
+//
 // Mixing both flavors keeps every old call site working while
 // letting the per-scan resolver injection skip building a separate
 // constructor.

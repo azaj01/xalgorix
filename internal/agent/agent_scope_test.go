@@ -1038,7 +1038,6 @@ func TestBugCondition_PublicOOSHostPassThrough(t *testing.T) {
 	}
 }
 
-
 // ───────────────────────────────────────────────────────────────────
 // Preservation property tests (spec: scope-guard-local-only, task 2).
 // Property 2 from design.md → "Correctness Properties":
@@ -1518,8 +1517,6 @@ func TestPreservation_AgentOracleStableAcrossLookupSwap(t *testing.T) {
 		_, _ = oracleShouldBlockForOutOfScope(oracleA, row.tool, args)
 	}
 }
-
-
 
 // ───────────────────────────────────────────────────────────────────
 // Bucket D — new coverage for the narrowed Local_Or_Listener_Host
