@@ -1531,6 +1531,7 @@ var dashboardRoutes = []string{
 	"/api/legacy-import/status",
 	"/api/scans",
 	"/api/scans/",
+	"/api/data-dirs/",
 	"/api/schedules",
 	"/api/schedules/",
 	"/api/upload-targets",
@@ -1843,6 +1844,11 @@ func (s *Server) Start() error {
 	// Start the background scheduler
 	go s.startScheduler()
 
+	// Start the scan-retention sweeper. It self-disables (returns
+	// immediately) when XALGORIX_SCAN_RETENTION_DAYS is 0, so this is a
+	// no-op for installs that want to keep scans forever.
+	go s.startRetentionSweeper()
+
 	// Reap expired session cookies in the background so the auth map cannot
 	// grow unbounded from abandoned logins.
 	if authConfigured(s.cfg) {
@@ -1910,6 +1916,11 @@ func (s *Server) Start() error {
 		}
 		s.handleGetScan(w, r)
 	})
+	// DELETE /api/data-dirs/{name} — delete one top-level Scan_Folder under
+	// Data_Dir. Distinct prefix from /api/scans/ (no collision, R5.3); inherits
+	// authMiddleware + CSRF and stays subject to rate limiting as a mutating
+	// route (intentionally NOT added to isDashboardReadPath). R5.1, R5.2.
+	mux.HandleFunc("/api/data-dirs/", s.handleDeleteDataDir)
 	mux.HandleFunc("/api/schedules", s.handleSchedules)
 	mux.HandleFunc("/api/schedules/", s.handleScheduleDetail)
 	mux.HandleFunc("/api/upload-targets", s.handleUploadTargets)

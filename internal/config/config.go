@@ -34,6 +34,13 @@ type Config struct {
 	DisableBrowser bool   // XALGORIX_DISABLE_BROWSER
 	MaxIterations  int    // XALGORIX_MAX_ITERATIONS — 0 = unlimited
 
+	// ScanRetentionDays controls automatic pruning of old scan output
+	// directories under DataDir. XALGORIX_SCAN_RETENTION_DAYS — when > 0, a
+	// background job deletes scan directories whose finished/started time is
+	// older than this many days. 0 (default) disables retention so nothing is
+	// ever deleted automatically.
+	ScanRetentionDays int // XALGORIX_SCAN_RETENTION_DAYS — 0 = disabled (keep forever)
+
 	// Rate limiting & API settings
 	RateLimitRequests int // XALGORIX_RATE_LIMIT_REQUESTS — requests per window
 	RateLimitWindow   int // XALGORIX_RATE_LIMIT_WINDOW — window in seconds
@@ -183,6 +190,9 @@ func load() *Config {
 		legacyCWD:      cwd,
 		DisableBrowser: envOrBool("XALGORIX_DISABLE_BROWSER", false),
 		MaxIterations:  envOrInt("XALGORIX_MAX_ITERATIONS", 0),
+
+		// Scan retention: 0 disables automatic pruning (keep forever).
+		ScanRetentionDays: envOrInt("XALGORIX_SCAN_RETENTION_DAYS", 0),
 
 		// Rate limiting (defaults: 60 requests per 60 seconds)
 		RateLimitRequests: envOrInt("XALGORIX_RATE_LIMIT_REQUESTS", 60),
