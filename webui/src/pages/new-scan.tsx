@@ -27,7 +27,7 @@ import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { PHASES } from "@/components/phase-progress";
 import { api } from "@/api/client";
-import { useAuthProfiles, useProviders, useStartScan } from "@/api/queries";
+import { useAuthProfiles, useLLMSettings, useProviders, useStartScan } from "@/api/queries";
 import { cn } from "@/lib/utils";
 
 const SCAN_MODES = [
@@ -71,6 +71,7 @@ const ACTIVITY_OPTIONS: Array<{
 export default function NewScanPage() {
   const nav = useNavigate();
   const startScan = useStartScan();
+  const llmQuery = useLLMSettings();
 
   const [targetsText, setTargetsText] = useState("");
   const [name, setName] = useState("");
@@ -551,6 +552,19 @@ export default function NewScanPage() {
                 onChange={(e) => setInstruction(e.target.value)}
                 rows={3}
               />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="model">Model override</Label>
+              <Input
+                id="model"
+                placeholder={llmQuery.data?.model || "provider/model-name"}
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                Override the model for this scan. Leave blank to use the
+                server default{llmQuery.data?.model ? ` (${llmQuery.data.model})` : ""}.
+              </p>
             </div>
             <div className="space-y-2">
               <Label>Provider profile</Label>

@@ -31,6 +31,7 @@ import {
   useDeleteSchedule,
   useTriggerSchedule,
   useAuthProfiles,
+  useLLMSettings,
   useProviders,
 } from "@/api/queries";
 import { cn, menuContentClass, menuItemClass } from "@/lib/utils";
@@ -59,6 +60,7 @@ export default function SchedulesPage() {
   const updateMutation = useUpdateSchedule();
   const deleteMutation = useDeleteSchedule();
   const triggerMutation = useTriggerSchedule();
+  const llmQuery = useLLMSettings();
 
   const [q, setQ] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -558,6 +560,20 @@ export default function SchedulesPage() {
                 value={instruction}
                 onChange={(e) => setInstruction(e.target.value)}
               />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="sched-model">Model override</Label>
+              <Input
+                id="sched-model"
+                placeholder={llmQuery.data?.model || "provider/model-name"}
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                Override the model for this schedule. Leave blank to use the
+                server default{llmQuery.data?.model ? ` (${llmQuery.data.model})` : ""}.
+              </p>
             </div>
 
             <Separator />
