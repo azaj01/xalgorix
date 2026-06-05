@@ -215,11 +215,11 @@ var builtinList = []Entry{
 	{
 		ID:          "litellm",
 		DisplayName: "LiteLLM",
-		BaseURL:     "",
+		BaseURL:     "http://localhost:4000/v1",
 		HeaderStyle: "openai",
 		AuthMethods: []string{"api_key"},
 		Models:      []string{"gpt-4o"},
-		Notes:       "Point base URL at your LiteLLM proxy via Custom Provider (commonly http://localhost:4000).",
+		Notes:       "Default base URL points at the standard LiteLLM proxy (http://localhost:4000). Override via API Base if your proxy runs on a different host or port.",
 	},
 	{
 		ID:          "lmstudio",
