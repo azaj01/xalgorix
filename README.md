@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/banner.png?v=4.5.6" alt="Xalgorix" width="860" />
+<img src="assets/banner.png?v=4.5.7" alt="Xalgorix" width="860" />
 
 <br />
 
