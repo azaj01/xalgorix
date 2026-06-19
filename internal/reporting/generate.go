@@ -746,12 +746,19 @@ func Generate(scan *Scan, opts Options) (string, error) {
 
 			pdf.SetY(headerY + 12)
 
-			// Verification method badge
+			// Verification badge — only label a finding "Verified" when it was
+			// independently confirmed; otherwise flag it for manual review so an
+			// inconclusive finding is never presented as validated.
 			if v.VerificationMethod != "" {
 				pdf.SetFont("Helvetica", "I", 7)
-				setColor(teal)
 				pdf.SetX(14)
-				pdf.CellFormat(0, 5, fmt.Sprintf("Verified via: %s", strings.ToUpper(v.VerificationMethod)), "", 1, "L", false, 0, "")
+				if v.Verified {
+					setColor(teal)
+					pdf.CellFormat(0, 5, fmt.Sprintf("Verified via: %s", strings.ToUpper(v.VerificationMethod)), "", 1, "L", false, 0, "")
+				} else {
+					pdf.SetTextColor(200, 120, 0)
+					pdf.CellFormat(0, 5, fmt.Sprintf("UNVERIFIED — manual review required (reported via %s)", strings.ToUpper(v.VerificationMethod)), "", 1, "L", false, 0, "")
+				}
 			}
 
 			// Vuln meta — row 1: CVSS + CVSS vector

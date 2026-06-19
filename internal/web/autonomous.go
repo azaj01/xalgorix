@@ -46,21 +46,27 @@ If a tool discovers a local/internal IP, SKIP IT and move to the next target. Do
 For EVERY potential vulnerability found in Phase 2, you MUST:
 
 **SQL Injection:**
-- Confirm with time-based: ` + "`" + `' AND SLEEP(5)--` + "`" + ` (measure response time)
-- Extract data: ` + "`" + `sqlmap -u "URL" --dbs --batch --risk=3 --level=5` + "`" + `
-- If data extracted → report as CRITICAL/HIGH with the dumped data as proof
-- If only time-based confirmed → report as HIGH with timing measurements
+- Time-based is FALSE-POSITIVE prone: a single slow response is NOT proof (network jitter and rate-limiting look identical). Confirm with a DIFFERENTIAL, REPEATED test — compare a baseline and ` + "`" + `SLEEP(0)` + "`" + ` against ` + "`" + `SLEEP(5)` + "`" + ` and ` + "`" + `SLEEP(10)` + "`" + `, run each 2–3 times, and require the delay to SCALE with the sleep value:
+  - ` + "`" + `' AND SLEEP(0)--` + "`" + ` ≈ baseline, ` + "`" + `' AND SLEEP(5)--` + "`" + ` ≈ +5s, ` + "`" + `' AND SLEEP(10)--` + "`" + ` ≈ +10s
+- Prefer HARD confirmation over timing: error-based (a real DB error/stack trace in the response) or data extraction: ` + "`" + `sqlmap -u "URL" --batch --dbs` + "`" + ` then ` + "`" + `--tables` + "`" + `/` + "`" + `--dump` + "`" + `.
+- If data extracted or error-based confirmed → report as CRITICAL/HIGH with the dumped data / DB error as proof.
+- If ONLY time-based: report as HIGH only when you include the full differential timing table (baseline + SLEEP(0/5/10), repeated). A single SLEEP(5) measurement is NOT acceptable proof.
 
 **Cross-Site Scripting (XSS):**
-- Inject payload and check if it appears UNENCODED in the response body
-- Use: ` + "`" + `curl -s "URL?param=<script>alert(1)</script>" | grep -i "<script>alert"` + "`" + `
-- Proof = the reflected payload in the HTTP response
-- If reflected → report as MEDIUM with the response showing the payload
+- Reflection is NOT XSS. You must prove the payload actually EXECUTES, not just that it echoes back.
+- First confirm the response ` + "`" + `Content-Type` + "`" + ` is ` + "`" + `text/html` + "`" + `. A payload reflected into a ` + "`" + `application/json` + "`" + `/` + "`" + `text/plain` + "`" + ` response is NOT XSS — the browser never parses it as HTML.
+- Confirm the special characters are reflected RAW, not entity-encoded. If the response shows ` + "`" + `&lt;script&gt;` + "`" + ` instead of ` + "`" + `<script>` + "`" + `, output encoding is working and it is NOT vulnerable.
+- Confirm the reflection lands in an executable context and breaks out of it (HTML body / unquoted attribute / JS string). Reflection inside a quoted attribute, HTML comment, or JS string that you cannot break out of is NOT exploitable.
+- Account for CSP: if a ` + "`" + `Content-Security-Policy` + "`" + ` blocks inline script, an injected ` + "`" + `<script>` + "`" + ` will not run — verify the CSP does not neutralize your payload.
+- PROOF (required): demonstrate execution, e.g. ` + "`" + `browser_action command=execute_js` + "`" + ` showing ` + "`" + `alert(document.domain)` + "`" + ` firing, a screenshot of the dialog, or an out-of-band callback (XSS Hunter / collaborator) for blind/stored XSS. The raw curl reflection alone is a LEAD to verify, not proof.
+- Severity: reflected (proven) XSS = MEDIUM; stored XSS that fires for other users = HIGH. Self-XSS or reflection-only-without-execution = INFO, do not report as a vulnerability.
 
 **Server-Side Request Forgery (SSRF):**
 - Test with callback: ` + "`" + `curl "URL?param=http://BURP_COLLABORATOR_OR_WEBHOOK"` + "`" + `
 - Test internal access: ` + "`" + `curl "URL?param=http://169.254.169.254/latest/meta-data/"` + "`" + `
 - Proof = received callback or internal metadata in response
+- SSRF means the TARGET'S SERVER makes the request. If the request is made by the victim's BROWSER (client-side JS reading URL params, fetch from a bundle), it is NOT SSRF — do not label it CWE-918. Classify client-side URL control as open redirect / client-side issue instead, and only if a real victim secret is actually exposed.
+- A credential the attacker places in the crafted URL (e.g. ` + "`" + `?token=...` + "`" + `) is ATTACKER-SUPPLIED and cannot be "stolen" — a PoC where you provide the token and then "capture" it is circular and invalid. Real token theft requires extracting a secret the victim already holds (cookie/session) that the attacker did not supply.
 
 **Remote Code Execution (RCE):**
 - Execute safe command: ` + "`" + `id` + "`" + `, ` + "`" + `whoami` + "`" + `, ` + "`" + `uname -a` + "`" + `
@@ -96,6 +102,8 @@ Call report_vulnerability with:
 | CORS misconfiguration (no cookie theft) | INFO only | Need proof of data theft via JS |
 | Open redirect (no chaining) | INFO only | Need OAuth/SSRF chain |
 | Self-XSS (only works on own session) | INFO only | Not exploitable against others |
+| Non-GET method (POST/PUT/DELETE/OPTIONS/HEAD) returns 200 with empty body | INFO/REJECT | 200 ≠ access granted. Usually CORS preflight / catch-all no-op. Must prove a state change or returned data |
+| Public OpenAPI/Swagger spec or API docs accessible without auth | REJECT | By-design — APIs publish specs for SDKs/Postman; same file on prod/docs. Field names (api_key) are labels, not secret values. Only report if actual secret VALUES are embedded |
 | phpMyAdmin/admin panel found (with auth) | INFO only | Unless you bypass auth |
 | Default credentials (if not tested) | INFO only | Must actually login |
 | SSL/TLS issues (weak ciphers, old TLS) | REJECT | Out of scope, do not report |
@@ -259,7 +267,7 @@ You are already inside the target's scan workspace. Save evidence and tool outpu
 ## EXPLOITATION REQUIRED FOR EACH FINDING:
 
 **SQLi:** Extract actual data with sqlmap --dbs, OR confirm with time-based (SLEEP)
-**XSS:** Show reflected payload in response body (curl + grep)
+**XSS:** Prove EXECUTION, not reflection — confirm the payload is reflected RAW (not ` + "`" + `&lt;` + "`" + `-encoded) in a ` + "`" + `text/html` + "`" + ` response AND that it actually runs (browser_action execute_js showing ` + "`" + `alert(document.domain)` + "`" + `, a screenshot, or an out-of-band callback for blind/stored). Reflection in JSON/text responses, encoded reflection, CSP-blocked payloads, and self-XSS are NOT XSS.
 **SSRF:** Get callback or read internal metadata
 **RCE:** Execute id/whoami and show output
 **IDOR:** Log in as User A, access User B's data by changing IDs (authenticated required)
@@ -393,7 +401,7 @@ If you determine this is a duplicate/parking/redirect subdomain, call finish wit
 ### Step 4: EXPLOITATION & VERIFICATION (MANDATORY)
 For EVERY potential vulnerability:
 - SQLi: Confirm with time-based or extract data
-- XSS: Show reflected payload in response (curl + grep)
+- XSS: Prove EXECUTION, not reflection — raw (un-encoded) payload in a text/html response that actually runs (browser execute_js alert/document.domain, screenshot, or OOB callback for blind/stored). Encoded reflection, JSON/text responses, and self-XSS are NOT XSS.
 - SSRF: Get callback or read internal metadata
 - RCE: Execute id/whoami and show output
 

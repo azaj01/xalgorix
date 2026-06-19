@@ -356,7 +356,7 @@ Xalgorix organizes autonomous testing into 22 phases.
 |    18 | CMS-specific testing                       |
 |    19 | Broken link hijacking and content spoofing |
 |    20 | Exploit verification                       |
-|    21 | Zero-day discovery                         |
+|    21 | Novel vulnerability discovery              |
 |    22 | Final report                               |
 
 Phase selection in the Web UI lets you run every phase or only the subset needed for a specific engagement.

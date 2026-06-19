@@ -25,7 +25,7 @@ var MethodologyPhaseNames = map[int]string{
 	18: "CMS-Specific Testing",
 	19: "Broken Link Hijacking & Content Spoofing",
 	20: "Exploit Verification",
-	21: "Zero-Day & Novel Vulnerability Discovery",
+	21: "Novel Vulnerability Discovery",
 	22: "Final Report",
 }
 

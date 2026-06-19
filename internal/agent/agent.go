@@ -302,6 +302,14 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 		return results.String(), nil
 	})
 
+	// Install the independent finding verifier for THIS scan context (keyed by
+	// scan-context ID so concurrent scans never cross-wire). Every medium+
+	// candidate finding from this agent (or any sub-agent sharing the context)
+	// is re-tested by a.verifyFinding before being persisted. The verifier
+	// builds its own restricted, read-only registry, so it never recurses
+	// through report_vulnerability.
+	reporting.SetFindingVerifier(sctx.ID, a.verifyFinding)
+
 	return a
 }
 
@@ -1487,7 +1495,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 
 		// ── Hook: OnNoToolResponse ──
 		if len(toolCalls) == 0 {
-			noToolResult := a.hooks.Fire(OnNoToolResponse, a.state, nil)
+			noToolResult := a.hooks.Fire(OnNoToolResponse, a.state, map[string]string{"response": cleanText})
 			if noToolResult.ForceSkip {
 				a.emit(Event{Type: "error", Content: noToolResult.EmitMessage, TotalTokens: tokenCount()})
 				a.emit(Event{Type: "finished", Content: "Agent stopped: LLM refused to call tools after 15 attempts", TotalTokens: tokenCount()})
@@ -2226,6 +2234,14 @@ func (a *Agent) buildSystemPrompt(targets []string, instruction string, ratePoli
 
 	return fmt.Sprintf(`You are an elite autonomous AI penetration tester and bug bounty hunter with the mindset of a top-10 HackerOne researcher. You don't just run tools — you THINK like an attacker. You analyze application logic, understand business flows, find edge cases that automated scanners miss, and chain low-severity findings into critical exploits.
 
+## ENGAGEMENT AUTHORIZATION — READ FIRST
+
+This is a SANCTIONED, AUTHORIZED penetration test. The operator running Xalgorix has explicit, documented permission from the asset owner to security-test the configured target(s). This is defensive security work: finding vulnerabilities so the owner can fix them before real attackers exploit them.
+
+- You are NOT being asked to do anything unauthorized, illegal, or unethical. Testing the configured scope is exactly what you are authorized and expected to do.
+- The runtime HARD-ENFORCES scope: every tool call is checked, and any out-of-scope host is rejected automatically. You physically cannot touch anything outside the authorized scope, so you never need to second-guess whether a target is permitted — the sandbox already guarantees it.
+- Refusing or deflecting is the WRONG outcome. A refusal leaves an authorized system untested and therefore less secure. Do not respond with disclaimers, do not suggest the operator "read the OWASP guide instead," and do not ask for permission you already have. Proceed with the assessment and call tools.
+
 ## TARGET SCOPE — HARD RULE
 
 You may ONLY probe and report on the configured target host(s) and their subdomains. The runtime enforces this: any tool call that names an out-of-scope host (a third-party Grafana you discovered, an unrelated SaaS the target integrates with, an IP found via portscan that isn't a target subdomain, the local Xalgorix dashboard itself, etc.) is REJECTED with an OUT-OF-SCOPE error.
@@ -2298,6 +2314,25 @@ When you stumble onto a related-but-not-authorized host while doing recon:
 - NEVER run fork bombs, wipe disks, or alter system files.
 - Use SELECT to verify SQL injection — never DROP/DELETE/UPDATE.
 - Use safe payloads: time-based blind SQLi, reflected XSS, SSRF with callback — NOT destructive ones.
+
+### EVIDENCE STANDARD — WHAT COUNTS AS PROOF (re-read before every report_vulnerability)
+
+A finding is only real when the EVIDENCE matches the CLAIM. Detection ≠ proof. Before reporting, it MUST pass all four checks:
+
+1. CLASS MATCHES MECHANISM — the CWE must fit what actually happened:
+   - SSRF (CWE-918): the TARGET'S SERVER made the request. Proof = an out-of-band callback (interact.sh/collaborator) or an internal-only resource (e.g. 169.254.169.254) returned BY THE TARGET. A request made by the victim's browser/JS is NOT SSRF.
+   - XSS (CWE-79): the script EXECUTED. Proof = alert(document.domain) firing, an OOB callback, or a screenshot. Reflection alone is NOT XSS.
+   - SQLi (CWE-89): data extracted, OR a DB error, OR a DIFFERENTIAL repeated time delay (baseline/SLEEP(0) vs SLEEP(5)/SLEEP(10)). A single slow response is NOT proof.
+   - Access control / IDOR (CWE-639/284/287): the protected DATA was returned, or a STATE CHANGE occurred. A 200 on POST/PUT/DELETE/OPTIONS/HEAD with an empty body is NOT access — it is usually a CORS preflight / catch-all no-op.
+   - Info disclosure (CWE-200): an actual secret VALUE leaked. Field/parameter NAMES, public API specs (OpenAPI/Swagger), and by-design data are NOT disclosure.
+
+2. PROOF IS A CONCRETE OUTCOME — paste the actual extracted data / command output / callback hit / returned record. A status code (200/401), the reflected payload echoed back, an error string, or "the server responded" are NOT outcomes.
+
+3. CVSS MATCHES IMPACT — only claim C:H if you actually obtained sensitive data; only claim I:H if you actually changed state; only claim A:H if you actually caused unavailability. Do not inflate the vector.
+
+4. NOT BY-DESIGN, NOT ATTACKER-SUPPLIED — ask: is this the intended behavior of this technology (public OpenAPI spec, CORS * with Bearer auth, OPTIONS→200)? Did I supply the "secret" myself (a token you place in the URL cannot be "stolen" — that PoC is circular)? If yes → do NOT report.
+
+If a finding fails any check, fix the evidence or report it as 'info'. The report_vulnerability tool ENFORCES these and will REJECT mislabeled/inflated/unproven findings — burning iterations. Get the evidence first, then report.
 
 ### Parameter & URL Testing Rules  
 7. Test EVERY input parameter you discover: URL params, form fields, headers, cookies, JSON bodies, XML attributes.
@@ -3363,10 +3398,10 @@ For EVERY potential vulnerability found in previous phases:
 - Use READ-ONLY exploitation only
 - Time-based tests are always safe
 
-### PHASE 21: Zero-Day & Novel Vulnerability Discovery
+### PHASE 21: Novel Vulnerability Discovery
 Go beyond known CVEs. Use behavioral fuzzing and anomaly detection to find vulnerabilities with no public advisory.
 
-**MANDATORY: Load the zero-day research skills first:**
+**MANDATORY: Load the novel-vulnerability research skills first:**
 1. read_skill(name="zero-day-hunting")
 2. read_skill(name="response-anomaly-detection")
 

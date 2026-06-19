@@ -24,6 +24,7 @@ type Vuln struct {
 	Remediation        string
 	ExploitationProof  string
 	VerificationMethod string
+	Verified           bool
 }
 
 // Event is the reporting-side projection of a scan WebSocket event. Only

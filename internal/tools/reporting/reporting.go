@@ -4,6 +4,7 @@ package reporting
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,11 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 )
+
+// sleepMagnitudeRe extracts the numeric argument of SLEEP/pg_sleep/WAITFOR-style
+// delays from timing-SQLi proof, so we can tell a single-shot test (one
+// magnitude) from a real differential test (two or more distinct magnitudes).
+var sleepMagnitudeRe = regexp.MustCompile(`(?:sleep|pg_sleep|delay)\s*[('"\[:\s]\s*0*(\d+)`)
 
 // Valid verification methods — the agent must specify one when reporting.
 var validVerificationMethods = map[string]bool{
@@ -31,10 +37,8 @@ var evidenceKeywords = map[string][]string{
 		"full access", "admin takeover", "account takeover", "full compromise", "root access",
 		"aws key", "secret key", "private key", "all user", "mass data"},
 	"high": {"sqli", "sql injection", "data extract", "xss", "cross-site", "ssrf", "idor",
-		"auth bypass", "token", "session hijack", "file inclusion", "sensitive data",
-		"personal data", "pii", "email address", "phone number", "credit card",
-		"password hash", "api key", "access token", "user data", "private information",
-		"unauthorized access", "privilege escalation"},
+		"auth bypass", "session hijack", "file inclusion", "pii", "credit card",
+		"password hash", "api key", "access token", "privilege escalation"},
 	"medium": {"reflected", "csrf", "redirect", "disclosure", "injection", "traversal",
 		"internal ip", "internal path", "config", "source code", "debug", "stack trace"},
 }
@@ -64,6 +68,70 @@ type Vulnerability struct {
 	Verified           bool    `json:"verified"`
 	Timestamp          string  `json:"timestamp"`
 	AgentName          string  `json:"agent_name"`
+}
+
+// ── Independent finding verification ──
+// A dedicated, distinct-purpose Verifier agent (injected by the agent package
+// to avoid an import cycle) independently re-tests every medium+ candidate
+// finding BEFORE it is persisted. This is the core of Xalgorix's "real
+// validation, not just detection" guarantee: a finding that the verifier
+// cannot independently reproduce is never presented as validated.
+
+// VerificationRequest is the candidate finding handed to the verifier.
+type VerificationRequest struct {
+	Title              string
+	Severity           string
+	CWE                string
+	VerificationMethod string
+	CVSSVector         string
+	Target             string
+	Endpoint           string
+	HTTPMethod         string
+	Description        string
+	Proof              string
+}
+
+// VerificationVerdict is the verifier's decision.
+//   - Confirmed: independently reproduced → persist as Verified.
+//   - Inconclusive: verifier could not reach a verdict (infra error / budget) →
+//     persist but flagged Unverified so it is never claimed as validated.
+//   - neither (explicit rejection): drop the finding.
+type VerificationVerdict struct {
+	Confirmed    bool
+	Inconclusive bool
+	Reason       string
+	Evidence     string
+}
+
+// FindingVerifier independently re-tests a candidate and returns a verdict.
+type FindingVerifier func(VerificationRequest) VerificationVerdict
+
+var (
+	// findingVerifiers is keyed by scan-context ID so concurrent scans never
+	// cross-wire: scan A's reports are always verified by scan A's agent, not
+	// whichever agent was constructed most recently.
+	findingVerifiers  = make(map[string]FindingVerifier)
+	findingVerifierMu sync.RWMutex
+)
+
+// SetFindingVerifier installs the finding verifier for a specific scan context.
+// The agent package calls this so report_vulnerability validates before
+// persisting. Passing a nil verifier clears the entry for that context
+// (CLI/tests with no verifier fall back to the heuristic gates).
+func SetFindingVerifier(contextID string, v FindingVerifier) {
+	findingVerifierMu.Lock()
+	defer findingVerifierMu.Unlock()
+	if v == nil {
+		delete(findingVerifiers, contextID)
+		return
+	}
+	findingVerifiers[contextID] = v
+}
+
+func getFindingVerifier(contextID string) FindingVerifier {
+	findingVerifierMu.RLock()
+	defer findingVerifierMu.RUnlock()
+	return findingVerifiers[contextID]
 }
 
 // ── Per-instance vulnerability stores ──
@@ -268,6 +336,14 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 		return tools.Result{Output: rejection}, nil
 	}
 
+	// ── Gate 3.5: Claim consistency — does the evidence actually support the
+	// claimed CWE / verification_method / CVSS impact? This is a SEMANTIC check
+	// (relational) rather than a keyword blocklist, so it generalizes across the
+	// many shapes of "mislabeled / inflated" findings.
+	if rejection := checkClaimConsistency(title, args["cwe_id"], method, args["cvss_vector"], severity, args["description"], proof); rejection != "" {
+		return tools.Result{Output: rejection}, nil
+	}
+
 	// ── Gate 4: Smart Deduplication — same vuln type on same endpoint = duplicate ──
 	store = getStoreByID(contextID)
 	store.mu.RLock()
@@ -276,6 +352,44 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 		return duplicateResult(existing, msg), nil
 	}
 	store.mu.RUnlock()
+
+	// ── Gate 4.5: Independent verification (always-on for medium+) ──
+	// Hand the candidate to the dedicated Verifier agent, which re-tests it
+	// from scratch. Explicit rejection → drop. Confirmed → mark Verified.
+	// Inconclusive → persist but flagged Unverified (never claimed as validated).
+	// No lock is held here: verification is slow (LLM + re-testing).
+	verifierConfirmed := false
+	verifierInconclusive := false
+	verifierRan := false
+	if isHighSeverity {
+		if vf := getFindingVerifier(contextID); vf != nil {
+			verifierRan = true
+			verdict := vf(VerificationRequest{
+				Title:              title,
+				Severity:           severity,
+				CWE:                strings.TrimSpace(args["cwe_id"]),
+				VerificationMethod: method,
+				CVSSVector:         strings.TrimSpace(args["cvss_vector"]),
+				Target:             target,
+				Endpoint:           endpoint,
+				HTTPMethod:         args["method"],
+				Description:        args["description"],
+				Proof:              proof,
+			})
+			switch {
+			case verdict.Confirmed:
+				verifierConfirmed = true
+			case verdict.Inconclusive:
+				verifierInconclusive = true
+			default:
+				return tools.Result{
+					Output: fmt.Sprintf("❌ REJECTED by independent verifier: %s\n\n%s\n\nThe finding could NOT be independently reproduced. Re-test with a control/baseline and only report again if it genuinely holds. If it is by-design or unexploitable, drop it.",
+						strings.TrimSpace(verdict.Reason), strings.TrimSpace(verdict.Evidence)),
+					Metadata: map[string]any{"verifier_rejected": true},
+				}, nil
+			}
+		}
+	}
 
 	// ── Gate 5: Severity classification — enforce max severity per vuln type ──
 	originalSeverity := ""
@@ -352,6 +466,12 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 		return duplicateResult(existing, msg), nil
 	}
 
+	verifiedFlag := proof != "" && method != ""
+	if verifierRan {
+		// When the verifier ran, IT is the source of truth for "validated".
+		verifiedFlag = verifierConfirmed
+	}
+
 	vuln := Vulnerability{
 		ID:                 fmt.Sprintf("XALG-%d", len(store.vulns)+1),
 		Title:              title,
@@ -372,7 +492,7 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 		PoCScript:          args["poc_script_code"],
 		ExploitationProof:  proof,
 		VerificationMethod: method,
-		Verified:           proof != "" && method != "",
+		Verified:           verifiedFlag,
 		Remediation:        args["remediation_steps"],
 		Timestamp:          time.Now().Format(time.RFC3339),
 	}
@@ -386,6 +506,11 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	promoteIfChildOfWildcard(contextID, vuln.ID)
 
 	msg := fmt.Sprintf("✅ Vulnerability reported: [%s] %s (%s | CVSS %.1f) — Verified: %v", vuln.ID, vuln.Title, strings.ToUpper(vuln.Severity), vuln.CVSS, vuln.Verified)
+	if verifierConfirmed {
+		msg += "\n✅ Independently CONFIRMED by the verifier."
+	} else if verifierInconclusive {
+		msg += "\n⚠️ Verification INCONCLUSIVE — stored as UNVERIFIED (manual review required); not counted as a validated finding."
+	}
 	if originalSeverity != "" {
 		if cvss > 0 {
 			msg += fmt.Sprintf("\n⚠️ SEVERITY ADJUSTED from %s → %s (CVSS %.1f = %s per HackerOne standards)", strings.ToUpper(originalSeverity), strings.ToUpper(severity), cvss, strings.ToUpper(severityFromCVSS(cvss)))
@@ -438,7 +563,121 @@ func findDuplicateVulnerability(existing []Vulnerability, title, description, ta
 	return Vulnerability{}, "", false
 }
 
-// checkFalsePositive detects common false positive patterns and rejects them.
+// anyContains reports whether s contains any of the given substrings.
+func anyContains(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkClaimConsistency rejects findings whose claimed CWE, verification_method,
+// or CVSS impact is not supported by the evidence. Unlike checkFalsePositive
+// (a list of known FP shapes), this checks the finding for INTERNAL CONSISTENCY:
+// the class must match the mechanism, the method must match the class, and the
+// CVSS impact metrics must be backed by proof. This catches mislabeled/inflated
+// findings regardless of the specific technology involved.
+//
+// Only enforced for medium+ (info/low are advisory and don't require proof).
+func checkClaimConsistency(title, cwe, method, cvssVector, severity, description, proof string) string {
+	sev := strings.ToLower(strings.TrimSpace(severity))
+	if sev != "critical" && sev != "high" && sev != "medium" {
+		return ""
+	}
+
+	lp := strings.ToLower(proof + " " + description)
+	cweL := strings.ToLower(strings.TrimSpace(cwe))
+	vec := strings.ToUpper(cvssVector)
+	m := strings.ToLower(strings.TrimSpace(method))
+
+	// Broad "the bug actually did something" markers. Kept intentionally wide so
+	// these checks fire ONLY on findings with NO demonstrated outcome — never on
+	// a real finding that merely uses different wording. The independent Verifier
+	// (not these deterministic gates) is the primary false-positive defense, so
+	// these gates are tuned for high precision (few false rejects), low recall.
+	hardEvidence := []string{
+		"extracted", "extraction", "dumped", "leaked", "exfiltrat", "retrieved", "obtained",
+		"callback received", "dns query", "interact.sh", "interactsh", "oast", "collaborator",
+		"169.254", "/latest/meta-data", "metadata.google", "internal", "127.0.0.1", "localhost",
+		"10.0.0", "192.168", "uid=", "root:", "/etc/passwd", "command execution", "rce", "shell",
+		"union select", "information_schema", "@@version", "sqlstate", "syntax error",
+		"another user", "other user", "cross-account", "deleted", "modified", "created", "updated",
+		"changed", "escalat", "takeover", "session", "token", "credential", "password",
+	}
+
+	// 1) verification_method 'reflected' does not prove these classes — but only
+	//    reject when the proof ALSO lacks any hard evidence, so a real finding
+	//    that merely mislabeled its method is never dropped.
+	if m == "reflected" {
+		hardClasses := map[string]string{
+			"cwe-918": "SSRF", "cwe-78": "OS command injection", "cwe-89": "SQL injection",
+			"cwe-639": "IDOR / broken access control", "cwe-287": "authentication bypass",
+			"cwe-94": "code injection", "cwe-22": "path traversal",
+		}
+		if label, ok := hardClasses[cweL]; ok && !anyContains(lp, hardEvidence...) {
+			return fmt.Sprintf("❌ REJECTED (claim consistency): verification_method 'reflected' does not prove %s (%s), and the proof shows no extraction/callback/access evidence. Reflection is not exploitation for this class — provide the matching evidence and the correct verification_method.", label, strings.ToUpper(cweL))
+		}
+	}
+
+	// 2) CVSS High Integrity (I:H) requires evidence of a state change.
+	if strings.Contains(vec, "I:H") {
+		if !anyContains(lp, "deleted", "modified", "created", "updated", "overwrote", "overwritten",
+			"changed", "wrote", "inserted", "tampered", "state change", "rce", "command execution",
+			"shell", "uid=", "escalat", "takeover", "hijack", "reset", "added", "removed", "poisoned") {
+			return "❌ REJECTED (claim consistency): the CVSS vector claims High Integrity impact (I:H) but the proof shows no actual state change. Lower the vector to I:L/I:N or provide integrity-impact evidence."
+		}
+	}
+
+	// 3) CVSS High Confidentiality (C:H) requires sensitive data actually obtained.
+	//    Command execution / RCE inherently grants confidentiality, so its markers
+	//    satisfy this check too (an RCE proof shows `uid=`, not "extracted data").
+	if strings.Contains(vec, "C:H") {
+		if !anyContains(lp, "extracted", "extraction", "dumped", "leaked", "exfiltrat", "retrieved",
+			"read /etc", "/etc/passwd", "password", "credential", "token", "api key", "secret",
+			"pii", "ssn", "credit card", "information_schema", "union select", "another user",
+			"other user", "private key", "169.254", "/latest/meta-data", "internal", "session",
+			"disclosed", "obtained", "accessed",
+			"uid=", "root:", "command execution", "rce", "shell", "whoami") {
+			return "❌ REJECTED (claim consistency): the CVSS vector claims High Confidentiality impact (C:H) but the proof shows no sensitive data actually obtained. Lower the vector to C:L/C:N or include the obtained data."
+		}
+	}
+
+	// 4) EVIDENCE PROVENANCE for SQL injection: the proof must show SQLi worked at
+	//    the injection point (data via UNION/error/blind-timing, sqlmap, a SQL
+	//    error). If the proof shows ONLY command-execution/RCE evidence and NO
+	//    SQLi-native evidence, the "SQLi" was likely proven through a different
+	//    bug (e.g. an RCE DB dump) — that does not prove SQL injection itself.
+	isSQLi := cweL == "cwe-89" || strings.Contains(strings.ToLower(title), "sql injection") ||
+		strings.Contains(strings.ToLower(title), "sqli")
+	if isSQLi {
+		sqliNative := anyContains(lp, "union select", "information_schema", "sqlmap", "sql syntax",
+			"syntax error", "sqlstate", "ora-0", "' or 1=1", "' or '1'='1", "sleep(", "pg_sleep",
+			"benchmark(", "waitfor delay", "extractvalue", "updatexml", "error-based", "boolean-based",
+			"time-based", "differential")
+		rceProvenance := anyContains(lp, "rce", "eval(", "exec(", "command injection", "command execution",
+			"reverse shell", "web shell", "webshell", "code injection", "via the rce", "using the rce",
+			"from the rce", "os command")
+		if rceProvenance && !sqliNative {
+			return "❌ REJECTED (evidence provenance): the SQL injection proof shows command-execution/RCE evidence but nothing demonstrating SQLi AT THE INJECTION POINT (no UNION/error-based/blind-timing/sqlmap result). Data dumped via a separate RCE does not prove SQL injection. Demonstrate the SQLi directly, or report it as the RCE it actually is."
+		}
+	}
+
+	// 5) BLIND XXE validation: XXE confirmed only by a generic success message is
+	//    not proof. Require retrieved file content or an out-of-band callback.
+	isXXE := cweL == "cwe-611" || strings.Contains(strings.ToLower(title), "xxe") ||
+		strings.Contains(strings.ToLower(title), "xml external entity")
+	if isXXE {
+		if !anyContains(lp, "root:", "/etc/passwd", "/etc/", "file://", "<!entity", "<!doctype",
+			"callback received", "dns query", "interact.sh", "interactsh", "oast", "collaborator",
+			"out-of-band", "retrieved", "exfiltrat", "file content", "169.254", "ssrf via xxe") {
+			return "❌ REJECTED (blind validation): the XXE finding shows no retrieved file content and no out-of-band callback — a generic 'success' response does not confirm XXE. Provide /etc/passwd (or other file) contents, or an OOB callback (interactsh/Collaborator), then re-report. If you cannot, report as 'info'."
+		}
+	}
+
+	return ""
+}
 func checkFalsePositive(title, description, severity, proof string) string {
 	lower := strings.ToLower(title + " " + description)
 	isHighSev := severity == "critical" || severity == "high" || severity == "medium"
@@ -471,7 +710,9 @@ func checkFalsePositive(title, description, severity, proof string) string {
 	}
 
 	// Pattern 4: CORS without exploitation proof
-	if strings.Contains(lower, "cors") && isHighSev {
+	if (strings.Contains(lower, "cors") ||
+		strings.Contains(lower, "access-control-allow-origin") ||
+		strings.Contains(lower, "cross-origin resource sharing")) && isHighSev {
 		corsProofKeywords := []string{"cookie", "token", "session", "steal", "extract", "hijack", "javascript", "xmlhttprequest", "fetch("}
 		hasExploitProof := false
 		lowerProof := strings.ToLower(proof)
@@ -487,7 +728,9 @@ func checkFalsePositive(title, description, severity, proof string) string {
 	}
 
 	// Pattern 5: Open redirect without chaining
-	if strings.Contains(lower, "open redirect") && isHighSev {
+	if (strings.Contains(lower, "open redirect") ||
+		strings.Contains(lower, "unvalidated redirect") ||
+		strings.Contains(lower, "url redirection")) && isHighSev {
 		chainKeywords := []string{"oauth", "token", "ssrf", "phishing", "chain", "exfiltrate", "steal"}
 		hasChain := false
 		lowerProof := strings.ToLower(proof + " " + description)
@@ -502,11 +745,21 @@ func checkFalsePositive(title, description, severity, proof string) string {
 		}
 	}
 
-	// Pattern 6: SSL/TLS issues (weak ciphers, old TLS versions)
-	sslKeywords := []string{"ssl", "tls", "cipher", "certificate", "sweet32", "poodle", "heartbleed", "beast", "crime"}
+	// Pattern 6: SSL/TLS *configuration* noise (weak ciphers, old protocol
+	// versions, expired/self-signed certs). Scoped to the specific noise
+	// patterns so genuine TLS-related exploits — certificate-validation bypass
+	// enabling MITM, mTLS auth bypass — are NOT silently dropped just because
+	// the title mentions "TLS" or "certificate".
+	sslKeywords := []string{
+		"weak cipher", "cipher suite", "rc4", "3des",
+		"tls 1.0", "tls 1.1", "tlsv1.0", "tlsv1.1", "sslv3", "ssl 3", "ssl 2",
+		"sweet32", "poodle", "heartbleed", "beast attack", "crime attack", "logjam", "drown",
+		"expired certificate", "certificate expired", "self-signed certificate",
+		"self signed certificate", "weak signature algorithm",
+	}
 	for _, kw := range sslKeywords {
 		if strings.Contains(lower, kw) {
-			return "❌ REJECTED: SSL/TLS configuration issues (weak ciphers, old versions) are OUT OF SCOPE. Do not report them."
+			return "❌ REJECTED: SSL/TLS configuration issues (weak ciphers, old protocol versions, expired/self-signed certs) are OUT OF SCOPE. Do not report them. NOTE: a genuine TLS exploit (e.g. certificate-validation bypass enabling MITM) is in scope — title it by its impact, not as a TLS config issue, and include the exploitation proof."
 		}
 	}
 
@@ -658,6 +911,282 @@ func checkFalsePositive(title, description, severity, proof string) string {
 		}
 	}
 
+	// Pattern 18: XSS reported on reflection alone (no proof of execution).
+	// Reflection ≠ XSS. The most common XSS false positive is a payload that is
+	// merely echoed back — while HTML-encoded, returned with a non-HTML content
+	// type, sitting in a non-executing context, or blocked by CSP. Require
+	// evidence the script actually RAN (or an out-of-band callback for
+	// blind/stored XSS) before allowing medium+.
+	isXSS := strings.Contains(lower, "xss") ||
+		strings.Contains(lower, "cross-site script") ||
+		strings.Contains(lower, "cross site script")
+	if isXSS && isHighSev {
+		lowerProof := strings.ToLower(proof)
+
+		// Evidence that the payload actually executed or fired out-of-band.
+		executionMarkers := []string{
+			"execute_js", "executed", "alert fired", "alert(document", "document.domain",
+			"document.cookie", "popup", "dialog box", "screenshot", "rendered as html",
+			"callback", "xss hunter", "xsshunter", "interact.sh", "interactsh", "oast",
+			"collaborator", "dns query", "out-of-band", "out of band", "fired in", "fires in",
+			"popped", "script ran", "js ran", "javascript ran", "confirmed execution",
+			"executed in the browser", "stole the cookie", "cookie was stolen", "cookie exfiltrated",
+			"session hijack", "ran in the victim",
+		}
+		hasExecution := false
+		for _, m := range executionMarkers {
+			if strings.Contains(lowerProof, m) {
+				hasExecution = true
+				break
+			}
+		}
+
+		if !hasExecution {
+			// Encoded reflection in the proof = output encoding is working = NOT XSS.
+			encodedMarkers := []string{"&lt;script", "&lt;svg", "&lt;img", "&gt;", "&#x3c;", "&#60;"}
+			for _, m := range encodedMarkers {
+				if strings.Contains(lowerProof, m) {
+					return "❌ REJECTED: The payload appears HTML-ENCODED in your proof (e.g. &lt;script&gt;), which means output encoding is working and the script does NOT execute. Encoded reflection is NOT XSS. Re-test the output context and only report if the payload is reflected RAW and actually executes."
+				}
+			}
+
+			// Proof that is only the reflected payload (no execution evidence) is
+			// the classic false positive.
+			looksLikeReflectionOnly := strings.Contains(lowerProof, "<script") ||
+				strings.Contains(lowerProof, "onerror=") ||
+				strings.Contains(lowerProof, "onload=") ||
+				strings.Contains(lowerProof, "<svg") ||
+				strings.Contains(lowerProof, "<img")
+			if looksLikeReflectionOnly {
+				return "❌ REJECTED: XSS proof shows REFLECTION only, not EXECUTION. A payload echoed in the response is not enough — it may land in a non-HTML content type, in a non-executing context, or behind a CSP, or be self-XSS only. Confirm the script actually runs (browser_action execute_js showing alert(document.domain), a screenshot of the dialog, or an out-of-band callback for blind/stored XSS), then re-report. If you cannot prove execution, report as 'info'."
+			}
+		}
+	}
+
+	// Pattern 19: S3/CloudFront subdomain takeover claimed without a claimable origin.
+	// The classic false positive: a subdomain CNAMEs to a CloudFront distribution,
+	// the global S3 namespace lookup (<name>.s3.amazonaws.com) returns NoSuchBucket,
+	// and the agent concludes "takeover" — but the CloudFront origin bucket actually
+	// EXISTS (the distribution returns NoSuchKey, not NoSuchBucket). NoSuchKey means
+	// no object at that key, not a claimable bucket. Common for MTA-STS endpoints.
+	isTakeover := strings.Contains(lower, "subdomain takeover") ||
+		strings.Contains(lower, "dangling") ||
+		(strings.Contains(lower, "takeover") &&
+			(strings.Contains(lower, "subdomain") || strings.Contains(lower, "cname")))
+	if isTakeover && isHighSev {
+		combined := lower + " " + strings.ToLower(proof)
+		involvesS3 := strings.Contains(combined, "s3") ||
+			strings.Contains(combined, "cloudfront") ||
+			strings.Contains(combined, "nosuchbucket") ||
+			strings.Contains(combined, "nosuchkey")
+		if involvesS3 {
+			// NoSuchKey anywhere in the evidence = the S3 origin bucket EXISTS = not claimable.
+			if strings.Contains(combined, "nosuchkey") {
+				return "❌ REJECTED: The evidence contains a 'NoSuchKey' response, which means the S3 origin bucket EXISTS (it just has no object at that path). NoSuchKey is NOT NoSuchBucket — the bucket is not claimable, so this is not a subdomain takeover. This is the normal response for a CloudFront-fronted S3 origin and for MTA-STS endpoints. Mark as info / false positive."
+			}
+
+			// Evidence that the resource was actually claimed and content served.
+			claimMarkers := []string{
+				"claimed", "canary", "took over", "taken over", "served my",
+				"poc page served", "my content is served", "content is now served",
+				"created the bucket and", "registered the", "now serving",
+			}
+			hasClaimProof := false
+			for _, m := range claimMarkers {
+				if strings.Contains(strings.ToLower(proof), m) {
+					hasClaimProof = true
+					break
+				}
+			}
+
+			// CloudFront-fronted S3: a NoSuchBucket on the global S3 namespace does
+			// NOT prove the CloudFront origin is claimable (origins are account-bound,
+			// often via OAC/OAI). Require a real claim + canary before allowing this.
+			if strings.Contains(combined, "cloudfront") && !hasClaimProof {
+				return "❌ REJECTED: A CloudFront-fronted S3 origin cannot be taken over by creating the bucket name in your own AWS account — CloudFront origins are bound to a specific bucket/account. A 'NoSuchBucket' on the global S3 namespace (<name>.s3.amazonaws.com) is NOT the same as the CloudFront origin being claimable. Fetch the CloudFront distribution directly: if it returns NoSuchKey the origin exists and is safe. Only report if you actually claim the resource and serve a benign canary over the real subdomain. Otherwise mark as info."
+			}
+		}
+	}
+
+	// Pattern 20: Time-based SQLi "confirmed" by a single delayed response.
+	// A lone slow request is the most common SQLi false positive — network
+	// jitter, rate-limiting, or the payload never executing all look identical.
+	// Require either hard confirmation (data extraction / DB error) or a
+	// DIFFERENTIAL timing comparison (baseline / SLEEP(0) vs SLEEP(N)).
+	isSQLi := strings.Contains(lower, "sql injection") ||
+		strings.Contains(lower, "sqli") ||
+		strings.Contains(lower, "blind sql")
+	if isSQLi && isHighSev {
+		lp := strings.ToLower(proof)
+
+		timingTerms := []string{"sleep(", "pg_sleep", "waitfor delay", "benchmark(",
+			"time-based", "time based", "response time", "delay of", "took ", "seconds"}
+		isTiming := false
+		for _, t := range timingTerms {
+			if strings.Contains(lp, t) {
+				isTiming = true
+				break
+			}
+		}
+
+		// Hard confirmation = the bug produced data or a DB error, not just a delay.
+		hardTerms := []string{"union select", "information_schema", "@@version", "dumped",
+			"extracted", "sqlmap", "sqlstate", "sql syntax", "syntax error",
+			"you have an error in your sql", "ora-0", "group_concat", "current_user", "database()"}
+		isHard := false
+		for _, t := range hardTerms {
+			if strings.Contains(lp, t) {
+				isHard = true
+				break
+			}
+		}
+
+		if isTiming && !isHard {
+			// A real differential test compares MULTIPLE timings — a single-shot
+			// SLEEP(N) is the exact false positive this gate rejects. Accept only
+			// when there are >=2 distinct sleep magnitudes (e.g. SLEEP(0) vs
+			// SLEEP(5) vs SLEEP(10)) OR an explicit baseline/control/repeat phrase.
+			distinctMags := map[string]bool{}
+			for _, m := range sleepMagnitudeRe.FindAllStringSubmatch(lp, -1) {
+				distinctMags[m[1]] = true
+			}
+			hasDiff := len(distinctMags) >= 2
+			if !hasDiff {
+				diffMarkers := []string{"baseline", "differential", "vs sleep", "without payload",
+					"control request", "control vs", "repeated", "averaged", "scales with",
+					"scaled with", "consistent delay", "each run", "multiple trials", "proportional"}
+				for _, d := range diffMarkers {
+					if strings.Contains(lp, d) {
+						hasDiff = true
+						break
+					}
+				}
+			}
+			if !hasDiff {
+				return "❌ REJECTED: Time-based SQLi proven by a single delayed response is a false positive risk — network jitter and rate-limiting produce the same delay. Provide a DIFFERENTIAL, repeated timing comparison (baseline / SLEEP(0) vs SLEEP(5) vs SLEEP(10), each run 2–3 times, delay scaling with the sleep value), OR confirm via data extraction (sqlmap --dump) or a database error string. Otherwise mark as info."
+			}
+		}
+	}
+
+	// Pattern 21: "HTTP method enforcement bypass" / broken access control inferred
+	// purely from status codes. A 200 on POST/PUT/PATCH/DELETE/OPTIONS/HEAD — especially
+	// with an empty body — is NOT proof of access. It is almost always a CORS preflight
+	// or catch-all handler that does nothing: no state changes, no data returned.
+	// OPTIONS/HEAD returning 200 is normal, RFC-correct behavior. Require evidence of a
+	// real state change or returned data before allowing medium+.
+	methodWords := []string{" post ", " put ", " patch ", " delete ", "options", "head request", "non-get"}
+	methodHits := 0
+	combinedAC := lower + " " + strings.ToLower(proof)
+	for _, m := range methodWords {
+		if strings.Contains(combinedAC, m) {
+			methodHits++
+		}
+	}
+	isMethodBypass := (strings.Contains(lower, "method") &&
+		(strings.Contains(lower, "bypass") || strings.Contains(lower, "enforcement"))) ||
+		(strings.Contains(lower, "access control") && methodHits >= 2) ||
+		(strings.Contains(lower, "broken access control") && strings.Contains(combinedAC, "200"))
+	if isMethodBypass && isHighSev {
+		lp := strings.ToLower(proof)
+		// Real impact = a state change happened or protected data was returned.
+		impactSigns := []string{
+			"another user", "other user", "user a's", "user b received", "as user b",
+			"was deleted", "was modified", "was created", "was updated", "record changed",
+			"session created", "session was created", "token issued", "token was generated",
+			"balance", "response body contained", "json body", "returned sensitive",
+			"leaked", "disclosed", "extracted", "modified the", "deleted the", "created a new",
+		}
+		hasImpact := false
+		for _, s := range impactSigns {
+			if strings.Contains(lp, s) {
+				hasImpact = true
+				break
+			}
+		}
+		if !hasImpact {
+			return "❌ REJECTED: A 200 status on POST/PUT/PATCH/DELETE/OPTIONS/HEAD is NOT proof of broken access control. An empty 200 (common for CORS preflight and catch-all handlers) means the request did nothing — no state changed and no data was returned, and OPTIONS/HEAD returning 200 is normal. To report this, demonstrate an ACTUAL state change (data created/modified/deleted) or sensitive data returned by the non-GET method — compare the response body and side effects against an authenticated request. Otherwise mark as info."
+		}
+	}
+
+	// Pattern 22: "SSRF" that is actually client-side. SSRF (CWE-918) requires the
+	// SERVER to make the attacker-controlled request. If the request originates in
+	// the victim's browser (client-side JS reading URL params, fetch from a bundle),
+	// it is NOT SSRF — and a "token" the attacker supplies in the crafted URL cannot
+	// be "stolen" (they already have it; the PoC is circular). Reject unless there's
+	// server-side out-of-band / internal-resource evidence.
+	isSSRF := strings.Contains(lower, "ssrf") ||
+		strings.Contains(lower, "server-side request forgery") ||
+		strings.Contains(lower, "server side request forgery") ||
+		strings.Contains(lower, "cwe-918")
+	if isSSRF && isHighSev {
+		clientSideMarkers := []string{
+			"client-side", "client side", "browser", "window.location", "document.location",
+			"urlsearchparams", "bundle.js", "javascript bundle", "in the user's browser",
+			"victim's browser", "frontend javascript", "runs in the browser", "executed in the browser",
+		}
+		isClientSide := false
+		for _, mk := range clientSideMarkers {
+			if strings.Contains(combinedAC, mk) {
+				isClientSide = true
+				break
+			}
+		}
+
+		serverSideProof := []string{
+			"callback received", "dns query", "interact.sh", "interactsh", "oast",
+			"burp collaborator", "collaborator", "169.254.169.254", "/latest/meta-data", "metadata.google",
+			"out-of-band", "pingback", "server made", "server-side request", "connected to the internal",
+			"internal-only", "retrieved by the target", "127.0.0.1", "localhost", "10.0.0", "192.168",
+			"internal host", "internal service", "internal ip", "ssrf confirmed", "fetched http",
+			"webhook.site", "requestbin", "canarytoken", "burpcollaborator",
+		}
+		hasServerProof := false
+		lp := strings.ToLower(proof)
+		for _, m := range serverSideProof {
+			if strings.Contains(lp, m) {
+				hasServerProof = true
+				break
+			}
+		}
+
+		if isClientSide && !hasServerProof {
+			return "❌ REJECTED: This is described as CLIENT-SIDE (browser JS reading URL params / fetch from a bundle), which is NOT SSRF. SSRF (CWE-918) requires the TARGET'S SERVER to make the attacker-controlled request — prove it with a server-side out-of-band callback (interact.sh/collaborator) or an internal-only resource retrieved BY THE TARGET (e.g. 169.254.169.254). Also note: a 'token' the attacker places in the crafted URL is attacker-supplied and cannot be 'stolen' — that PoC is circular. If a URL/redirect can be controlled client-side, classify it correctly (open redirect / client-side issue), not SSRF, and only if a real victim secret is exposed."
+		}
+	}
+
+	// Pattern 23: OpenAPI/Swagger spec or API documentation exposure reported as
+	// information disclosure. A publicly served API spec is by-design — major APIs
+	// publish it to generate SDKs/Postman collections, and the same file is usually
+	// served on production and linked from public docs. Exposed FIELD/PARAMETER
+	// NAMES (api_key, webhook_secret) are schema labels, NOT secret values. Reject
+	// unless an actual secret VALUE is exposed.
+	isAPIDocs := strings.Contains(lower, "openapi") ||
+		strings.Contains(lower, "swagger") ||
+		strings.Contains(lower, "/openapi.json") ||
+		strings.Contains(lower, "api documentation") ||
+		strings.Contains(lower, "api specification") ||
+		strings.Contains(lower, "api spec") ||
+		strings.Contains(lower, "redoc") ||
+		strings.Contains(lower, "api-docs") ||
+		strings.Contains(lower, "wadl")
+	if isAPIDocs && isHighSev {
+		lp := strings.ToLower(proof)
+		// A real leak = actual secret VALUES embedded in the spec, not field names.
+		valueLeak := []string{"sk_live", "sk_test", "bearer ey", "aws_secret", "akia",
+			"-----begin", "secret value:", "token value:", "actual key", "ghp_", "xoxb-",
+			"password:", "leaked credential", "hardcoded secret"}
+		hasValueLeak := false
+		for _, m := range valueLeak {
+			if strings.Contains(lp, m) {
+				hasValueLeak = true
+				break
+			}
+		}
+		if !hasValueLeak {
+			return "❌ REJECTED: A publicly served OpenAPI/Swagger spec or API documentation is by-design, not information disclosure (CWE-200). Major APIs publish their spec to generate SDKs and Postman collections, the same file is typically served on production, and it is often linked from public docs. Exposed FIELD/PARAMETER names (e.g. api_key, webhook_secret) are schema labels, NOT secret values — knowing a field is named 'api_key' does not leak anyone's key. Only report if actual secret VALUES are embedded in the spec, or it exposes genuinely internal/undocumented endpoints that themselves leak data without auth."
+		}
+	}
+
 	return ""
 }
 
@@ -683,32 +1212,26 @@ func hasStrongEvidence(severity, proof, description string) bool {
 		}
 	}
 
-	// Impact-based indicators (works for all severities)
+	// Impact-based indicators — concrete exploitation OUTCOMES only.
+	// Deliberately excludes incidental tokens (status codes, "http", "@",
+	// "email", bare "account"/"internal"/"localhost", generic timing words)
+	// that match almost any HTTP response and previously made this gate a
+	// no-op — letting severity-inflated findings through the auto-downgrade.
 	impactIndicators := []string{
-		// Data exfiltration proof
-		"extracted", "leaked", "exposed", "dumped", "obtained",
-		"retrieved", "exfiltrated", "downloaded", "accessed",
-		// Concrete data in proof
-		"root:", "uid=", "gid=", "password", "passwd", "shadow",
-		"select ", "union ", "from ", "where ",
-		"alert(", "<script", "onerror=", "onload=", "document.cookie",
-		"etc/passwd", "etc/shadow", "proc/self",
-		"internal", "metadata", "169.254", "127.0.0.1", "localhost",
-		// Response/output evidence
-		"response:", "output:", "result:", "HTTP/",
-		"200 ok", "302 found", "401 unauthorized",
-		// Auth/session indicators
-		"bearer ", "jwt", "session_id", "auth_token", "access_token",
-		"set-cookie", "authorization:",
-		// PII evidence
-		"@", "email", "phone", "address", "name:",
-		"user_id", "account", "profile",
-		// Timing/blind evidence
-		"sleep(", "delay", "benchmark", "elapsed", "seconds",
-		"time-based", "response time",
-		// Callback evidence
-		"callback", "dns query", "http request received", "burp collaborator",
-		"interact.sh", "oast", "webhook",
+		// Data exfiltration outcome
+		"extracted", "dumped", "exfiltrated",
+		// System file / command-execution output
+		"root:", "uid=", "gid=", "/etc/passwd", "/etc/shadow", "/proc/self",
+		"password hash", "/bin/bash",
+		// SQL data extraction
+		"union select", "information_schema", "@@version", "sqlmap",
+		// Credential / session theft (concrete)
+		"set-cookie:", "document.cookie", "session_id=", "access_token", "refresh_token",
+		// SSRF / internal access (concrete targets/content)
+		"169.254.169.254", "/latest/meta-data", "metadata.google.internal",
+		// Out-of-band callbacks
+		"callback received", "dns query", "burp collaborator",
+		"interact.sh", "interactsh", "oast", "http request received", "pingback",
 	}
 	for _, ind := range impactIndicators {
 		if strings.Contains(lowerProof, ind) {
@@ -725,11 +1248,6 @@ func hasStrongEvidence(severity, proof, description string) bool {
 		if strings.Contains(combined, phrase) {
 			return true
 		}
-	}
-
-	// If proof is substantial (>150 chars) and contains URLs or structured data, likely real
-	if len(proof) > 150 && (strings.Contains(lowerProof, "http") || strings.Contains(lowerProof, "{") || strings.Contains(lowerProof, "<")) {
-		return true
 	}
 
 	return false
@@ -790,6 +1308,10 @@ func CleanupContext(contextID string) {
 	parentMap.Lock()
 	delete(parentMap.m, contextID)
 	parentMap.Unlock()
+
+	findingVerifierMu.Lock()
+	delete(findingVerifiers, contextID)
+	findingVerifierMu.Unlock()
 }
 
 // PromoteToParent copies a single vulnerability from the child reporting
@@ -1003,7 +1525,7 @@ func classifySeverity(title, description, severity, proof string) (string, strin
 		exception func() bool
 		reason    string
 	}{
-		{[]string{"cors", "cross-origin resource sharing"},
+		{[]string{"cors", "cross-origin resource sharing", "access-control-allow-origin"},
 			func() bool {
 				// Exception: CORS + credential theft proof = allow higher severity
 				theftKeywords := []string{"cookie", "token", "steal", "exfiltrate", "xmlhttprequest", "fetch(", "document.cookie"}

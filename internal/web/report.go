@@ -511,7 +511,7 @@ var methodologyPhaseNames = map[int]string{
 	18: "CMS-Specific Testing",
 	19: "Broken Link Hijacking & Content Spoofing",
 	20: "Exploit Verification",
-	21: "Zero-Day & Novel Vulnerability Discovery",
+	21: "Novel Vulnerability Discovery",
 	22: "Final Report",
 }
 
@@ -1233,12 +1233,19 @@ func (s *Server) generateReport(scan *ScanRecord) (string, error) {
 
 			pdf.SetY(headerY + 12)
 
-			// Verification method badge
+			// Verification badge — only label a finding "Verified" when it was
+			// independently confirmed. Otherwise mark it for manual review so an
+			// inconclusive finding is never presented as validated.
 			if v.VerificationMethod != "" {
 				pdf.SetFont("Helvetica", "I", 7)
-				setColor(teal)
 				pdf.SetX(14)
-				pdf.CellFormat(0, 5, fmt.Sprintf("Verified via: %s", strings.ToUpper(v.VerificationMethod)), "", 1, "L", false, 0, "")
+				if v.Verified {
+					setColor(teal)
+					pdf.CellFormat(0, 5, fmt.Sprintf("Verified via: %s", strings.ToUpper(v.VerificationMethod)), "", 1, "L", false, 0, "")
+				} else {
+					setColor(amber)
+					pdf.CellFormat(0, 5, fmt.Sprintf("UNVERIFIED — manual review required (reported via %s)", strings.ToUpper(v.VerificationMethod)), "", 1, "L", false, 0, "")
+				}
 			}
 
 			// Vuln meta — row 1: CVSS + CVSS vector

@@ -949,6 +949,7 @@ type VulnSummary struct {
 	Remediation        string  `json:"remediation,omitempty"`
 	ExploitationProof  string  `json:"exploitation_proof,omitempty"`
 	VerificationMethod string  `json:"verification_method,omitempty"`
+	Verified           bool    `json:"verified"`
 }
 
 // SubScanSummary is a child target scanned as part of a wildcard parent scan.
@@ -6144,6 +6145,7 @@ func vulnToSummary(v reporting.Vulnerability) VulnSummary {
 		Remediation:        v.Remediation,
 		ExploitationProof:  v.ExploitationProof,
 		VerificationMethod: v.VerificationMethod,
+		Verified:           v.Verified,
 	}
 }
 

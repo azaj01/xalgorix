@@ -33,16 +33,76 @@ die()   { echo -e "${RED}[✗]${NC} $*" >&2; exit 1; }
 command -v go >/dev/null  || die "go not found"
 command -v gh >/dev/null  || die "gh CLI not found (install: https://cli.github.com)"
 command -v git >/dev/null || die "git not found"
+command -v npm >/dev/null || die "npm not found (needed to build the embedded web UI; install Node.js)"
+
+# ─── Web UI writability pre-flight ───
+# `npm install`/`npm run build` (Step 2.5) rewrite webui/package-lock.json and
+# webui/node_modules. If a previous `sudo make build` left those owned by root,
+# npm fails deep in the run with a cryptic EACCES trace. Catch it up front with
+# a clear, actionable message instead.
+check_webui_writable() {
+    local lock="$REPO_ROOT/webui/package-lock.json"
+    local nm="$REPO_ROOT/webui/node_modules"
+    local bad=()
+    [[ -e "$lock" && ! -w "$lock" ]] && bad+=("$lock")
+    [[ -d "$nm"   && ! -w "$nm"   ]] && bad+=("$nm")
+    if [[ ${#bad[@]} -gt 0 ]]; then
+        warn "Web UI build files are not writable by $(whoami) (likely created by a past 'sudo make build'):"
+        printf '    %s\n' "${bad[@]}"
+        die "Reclaim ownership, then rerun:\n    sudo chown -R \"\$USER:\$USER\" webui/node_modules webui/package-lock.json"
+    fi
+}
+check_webui_writable
 
 cd "$REPO_ROOT"
 
-# Ensure clean working tree
+# Capture the branch we started on so the auto-stash restore (below)
+# and Step 10 can return here cleanly.
+ORIGINAL_BRANCH="$(git branch --show-current)"
+
+# ─── Auto-stash dirty working tree ───
+# A dirty working tree used to hard-abort the release ("Working tree is
+# dirty. Commit or stash changes first."). That blocked releases whenever
+# unrelated/uncommitted work was present. Instead, stash everything
+# (tracked + untracked) up front and restore it automatically when the
+# script exits — on success OR failure — via the EXIT trap below. The
+# release itself still happens from a clean tree on a dedicated
+# release/vX.Y.Z branch, so the stashed changes never leak into the
+# release commit.
+#
+# Opt out with: RELEASE_NO_AUTOSTASH=1 ./release.sh ...  (restores the old
+# fail-fast behavior for anyone who prefers to stage changes by hand).
+STASH_REF=""
+restore_stash() {
+    [[ -z "$STASH_REF" ]] && return 0
+    # Only restore if the stash still exists (it was applied successfully
+    # by a prior call, or the script never got far enough to pop it).
+    if git stash list 2>/dev/null | grep -q "$STASH_REF"; then
+        info "Restoring stashed working-tree changes ($STASH_REF)..."
+        git checkout "$ORIGINAL_BRANCH" >/dev/null 2>&1 || true
+        if git stash pop >/dev/null 2>&1; then
+            ok "Working-tree changes restored"
+        else
+            warn "Could not auto-restore stashed changes — recover manually with: git stash pop ($STASH_REF)"
+        fi
+    fi
+    STASH_REF=""
+}
+
 if [[ -n "$(git status --porcelain)" ]]; then
-    die "Working tree is dirty. Commit or stash changes first."
+    if [[ "${RELEASE_NO_AUTOSTASH:-0}" == "1" ]]; then
+        die "Working tree is dirty. Commit or stash changes first (RELEASE_NO_AUTOSTASH=1)."
+    fi
+    warn "Working tree is dirty — auto-stashing changes (restored on exit):"
+    git status --short | sed 's/^/    /'
+    STASH_REF="release-autostash-$(date +%s)"
+    git stash push --include-untracked --message "$STASH_REF" >/dev/null \
+        || die "Failed to stash dirty working tree. Commit or stash manually, then rerun."
+    trap restore_stash EXIT
+    ok "Stashed dirty changes as $STASH_REF (will be restored automatically)"
 fi
 
 # ─── Step 0: Sync main with origin to avoid divergence ───
-ORIGINAL_BRANCH="$(git branch --show-current)"
 if [[ "$ORIGINAL_BRANCH" != "main" ]]; then
     info "Switching to main..."
     git checkout main
@@ -104,11 +164,28 @@ if [[ -f "$README" ]]; then
 fi
 ok "Version bumped: $CURRENT → $NEW_VERSION"
 
+# ─── Step 2.5: Build the embedded web UI ───
+# The dashboard (internal/web/static/*) is bundled into the binary via
+# //go:embed. Plain `go build` does NOT regenerate it from the React source
+# in webui/, so a release built without this step would ship a STALE
+# dashboard. Mirror the Makefile `webui` target (npm install + npm run build)
+# here so the freshly built assets are embedded AND committed into the
+# release commit (Step 6's `git add -A`).
+info "Building web UI (React → internal/web/static)..."
+if ! ( cd "$REPO_ROOT/webui" && npm install --no-audit --no-fund && npm run build ); then
+    warn "Web UI build failed — reverting version bump and deleting release branch"
+    git checkout -- "$MAIN_GO" "$MAKEFILE" "$README" internal/web/static
+    git checkout main
+    git branch -D "$RELEASE_BRANCH"
+    die "Web UI build failed (version bump reverted, release branch deleted)"
+fi
+ok "Web UI built → internal/web/static"
+
 # ─── Step 3: Build & verify ───
 info "Building and verifying..."
 if ! go build ./cmd/xalgorix/; then
     warn "Build failed — reverting version bump and deleting release branch"
-    git checkout -- "$MAIN_GO" "$MAKEFILE" "$README"
+    git checkout -- "$MAIN_GO" "$MAKEFILE" "$README" internal/web/static
     git checkout main
     git branch -D "$RELEASE_BRANCH"
     die "Build failed (version bump reverted, release branch deleted)"

