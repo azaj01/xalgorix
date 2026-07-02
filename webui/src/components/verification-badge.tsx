@@ -17,11 +17,17 @@ export function VerificationBadge({
   tags?: string[];
   className?: string;
 }) {
-  const isVerified =
-    (tags?.includes(TAG_VERIFIED) ?? false) || verified === true;
-  const needsReview =
-    (tags?.includes(TAG_MANUAL_REVIEW) ?? false) ||
-    (verified === false && !isVerified);
+  // When tags are present they are authoritative (the backend sets exactly one
+  // verification tag). Only fall back to the boolean `verified` for legacy
+  // records that predate tags — otherwise a first-party-proof finding
+  // (verified=true but tagged manual-review) would wrongly show as Verified.
+  const hasTags = (tags?.length ?? 0) > 0;
+  const isVerified = hasTags
+    ? tags!.includes(TAG_VERIFIED)
+    : verified === true;
+  const needsReview = hasTags
+    ? tags!.includes(TAG_MANUAL_REVIEW)
+    : verified === false;
 
   if (isVerified) {
     return (

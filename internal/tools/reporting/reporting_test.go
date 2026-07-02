@@ -1551,6 +1551,10 @@ func TestHasConcreteImpact(t *testing.T) {
 		"the endpoint returned HTTP 200 accepting the request",
 		"reflected the input value in the response body",
 		"server responded with a generic error page",
+		// Generic session/credential headers appear on ordinary login pages —
+		// they must NOT let the verifier auto-confirm an unrelated finding.
+		"HTTP/1.1 200 OK\r\nSet-Cookie: session_id=abc; Path=/\r\n\r\n<html>login</html>",
+		"response contained an access_token field in the JSON body",
 	} {
 		if HasConcreteImpact(s) {
 			t.Errorf("did NOT expect concrete impact for %q", s)

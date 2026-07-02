@@ -47,7 +47,6 @@ var (
 	mu           sync.Mutex
 	interactions = map[string][]Interaction{} // token -> ordered interactions
 	tokenOrder   []string                     // FIFO of registered tokens for eviction
-	started      bool
 	startErr     error
 	startOnce    sync.Once
 )
@@ -117,7 +116,6 @@ func ensureStarted() error {
 			startErr = fmt.Errorf("oob listen %s: %w", srv.Addr, err)
 			return
 		}
-		started = true
 		go func() { _ = srv.Serve(ln) }()
 	})
 	return startErr

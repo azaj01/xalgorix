@@ -1547,6 +1547,21 @@ func (a *Agent) Run(targets []string, instruction string) {
 		a.msgMu.Unlock()
 
 		toolCalls := llm.ParseToolCalls(responseClean)
+		// Enforce the tool-call budget WITHIN the batch. overBudget is only
+		// checked at iteration start, so a single response emitting many calls
+		// could otherwise blow past XALGORIX_MAX_TOOL_CALLS. Truncate the batch
+		// to the remaining allowance so the cap is honored precisely.
+		if a.cfg != nil && a.cfg.MaxToolCalls > 0 {
+			if remaining := a.cfg.MaxToolCalls - toolCallsTotal; remaining < len(toolCalls) {
+				if remaining < 0 {
+					remaining = 0
+				}
+				if len(toolCalls) > remaining {
+					a.emit(Event{Type: "message", Content: fmt.Sprintf("⏱️ Tool-call budget: executing %d of %d requested calls (cap %d reached).", remaining, len(toolCalls), a.cfg.MaxToolCalls), TotalTokens: tokenCount()})
+					toolCalls = toolCalls[:remaining]
+				}
+			}
+		}
 		toolCallsTotal += len(toolCalls)
 
 		// ── Hook: OnNoToolResponse ──
@@ -2138,6 +2153,18 @@ func (a *Agent) emit(evt Event) {
 		}
 		if evt.ToolResult.Error != "" {
 			evt.ToolResult.Error = a.redactSecrets(evt.ToolResult.Error)
+		}
+		// Tool ARGUMENTS also carry secrets: the agent is instructed to pass
+		// auth headers explicitly to curl/http_request (e.g. the second-account
+		// IDOR/BOLA flow), so credentials land in ToolArgs and would otherwise
+		// be broadcast/persisted in the clear. Redact a COPY so the agent's own
+		// working args (used to actually run the tool) are left intact.
+		if len(evt.ToolArgs) > 0 {
+			red := make(map[string]string, len(evt.ToolArgs))
+			for k, v := range evt.ToolArgs {
+				red[k] = a.redactSecrets(v)
+			}
+			evt.ToolArgs = red
 		}
 	}
 	if a.events != nil {

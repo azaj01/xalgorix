@@ -10,6 +10,7 @@
 // HTTP request. All polled interactions are RSA/AES decrypted client-side by
 // the official library, so the public server never sees our correlation data
 // in the clear.
+
 package oob
 
 import (

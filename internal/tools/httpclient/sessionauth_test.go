@@ -48,6 +48,28 @@ func TestParseAuthHeaders(t *testing.T) {
 	}
 }
 
+func TestParseAuthHeaders_MultiCookiePreserved(t *testing.T) {
+	// A browser-copied multi-cookie header must stay intact (not split on ';').
+	got := ParseAuthHeaders("Cookie: a=1; b=2; c=3")
+	if got["Cookie"] != "a=1; b=2; c=3" {
+		t.Fatalf("multi-cookie corrupted: %v", got)
+	}
+	if _, ok := got["Authorization"]; ok {
+		t.Fatalf("cookie pair mis-parsed as Authorization: %v", got)
+	}
+}
+
+func TestParseAuthHeaders_CookieThenHeaderOnOneLine(t *testing.T) {
+	// A real new header after a cookie value on the same line still splits.
+	got := ParseAuthHeaders("Cookie: sid=abc; semi=1; Authorization: Bearer xyz")
+	if got["Cookie"] != "sid=abc; semi=1" {
+		t.Fatalf("Cookie value = %q, want the two cookie pairs", got["Cookie"])
+	}
+	if got["Authorization"] != "Bearer xyz" {
+		t.Fatalf("Authorization = %q, want 'Bearer xyz'", got["Authorization"])
+	}
+}
+
 func TestSetAndGetSessionAuth(t *testing.T) {
 	const ctx = "scan-ctx-1"
 	orig := map[string]string{"Cookie": "s=1", "": "ignored", "X-Api-Key": "k"}

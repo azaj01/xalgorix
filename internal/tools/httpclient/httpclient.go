@@ -103,17 +103,26 @@ func executeWithContext(contextID string, args map[string]string) (tools.Result,
 	// Parse and set custom headers. Accepts map[string]any so callers can
 	// pass string, numeric, or []string values.
 	hdrsProvided := map[string]struct{}{}
+	blankOverride := map[string]struct{}{}
 	headersStr := strings.TrimSpace(args["headers"])
 	if headersStr != "" {
 		if err := applyHeaders(req, headersStr); err != nil {
 			return tools.Result{}, err
 		}
 		// Record which headers the caller set explicitly, so authenticated-
-		// session credentials never clobber a deliberate override.
+		// session credentials never clobber a deliberate override. A header
+		// set to an EMPTY value is a deliberate "send this request WITHOUT
+		// that credential" override (used to prove IDOR / broken access
+		// control) — track those separately so we can OMIT the header
+		// entirely rather than sending a malformed blank one.
 		var rawHdrs map[string]any
 		if json.Unmarshal([]byte(headersStr), &rawHdrs) == nil {
-			for k := range rawHdrs {
-				hdrsProvided[strings.ToLower(strings.TrimSpace(k))] = struct{}{}
+			for k, v := range rawHdrs {
+				lk := strings.ToLower(strings.TrimSpace(k))
+				hdrsProvided[lk] = struct{}{}
+				if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+					blankOverride[lk] = struct{}{}
+				}
 			}
 		}
 	}
@@ -131,6 +140,14 @@ func executeWithContext(contextID string, args map[string]string) (tools.Result,
 				req.Header.Set(name, val)
 			}
 		}
+	}
+
+	// Blank overrides: DELETE the header so the request is sent with no such
+	// credential at all. Middleware/apps can treat an empty Authorization or
+	// Cookie as malformed rather than absent, which would mask a real broken-
+	// access-control finding when the agent diffs authed vs unauthenticated.
+	for name := range blankOverride {
+		req.Header.Del(name)
 	}
 
 	// Set default User-Agent if caller didn't provide one.

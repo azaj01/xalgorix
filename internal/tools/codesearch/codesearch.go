@@ -69,7 +69,7 @@ var sinkPatterns = map[string]string{
 // Register adds the code_search tool to the registry.
 func Register(r *tools.Registry) {
 	r.Register(&tools.Tool{
-		Name: "code_search",
+		Name:        "code_search",
 		Description: "Whitebox source-code search over the target's cloned source (fast, ripgrep-backed). Use it to find dangerous SINKS, trace them to reachable HTTP routes, and build exploits. Either pass a custom 'query' regex, or set 'sinks' to a class to search curated dangerous patterns. Classes: rce, cmdi, sqli, deserialization, ssrf, fileio, template, secrets, auth, redirect, crypto. Only available when source is configured for the scan.",
 		Parameters: []tools.Parameter{
 			{Name: "query", Description: "Custom regex to search (ripgrep syntax). Provide this OR 'sinks'.", Required: false},
@@ -207,7 +207,7 @@ func ResolveSource(repo, destDir string) (string, error) {
 	if !looksLikeGitURL(repo) {
 		return "", fmt.Errorf("source %q is neither an existing directory nor a git URL", repo)
 	}
-	if err := os.MkdirAll(filepath.Dir(destDir), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(destDir), 0o750); err != nil {
 		return "", fmt.Errorf("prepare source dir: %w", err)
 	}
 	_ = os.RemoveAll(destDir)
@@ -228,7 +228,7 @@ func ResolveSource(repo, destDir string) (string, error) {
 		return "", fmt.Errorf("git clone timed out after 3m")
 	}
 	if err != nil {
-		return "", fmt.Errorf("git clone failed: %v: %s", err, truncate(string(out), 300))
+		return "", fmt.Errorf("git clone failed: %w: %s", err, truncate(string(out), 300))
 	}
 	abs, _ := filepath.Abs(destDir)
 	return abs, nil

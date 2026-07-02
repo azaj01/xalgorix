@@ -16,7 +16,7 @@ import (
 // Register adds the oob_callback tool to the registry.
 func Register(r *tools.Registry) {
 	r.Register(&tools.Tool{
-		Name: "oob_callback",
+		Name:        "oob_callback",
 		Description: "Out-of-band (OAST) callback oracle for CONFIRMING blind vulnerabilities (blind SSRF, blind RCE, blind XSS, XXE, blind SQLi, blind CMDi). Captures DNS, HTTP and SMTP callbacks (via interactsh by default — no server setup needed), so even DNS-only sinks that merely resolve your host are proven. Workflow: (1) action=generate → get a unique callback URL/host; (2) plant it in your payload (an SSRF url param, a command like `curl <url>` or `nslookup <host>`, an XXE SYSTEM entity, a blind-XSS script src); (3) action=poll with the token → any recorded interaction is concrete PROOF the target reached your callback.",
 		Parameters: []tools.Parameter{
 			{Name: "action", Description: "'generate' to mint a new callback URL, or 'poll' to check for interactions on a token.", Required: true},

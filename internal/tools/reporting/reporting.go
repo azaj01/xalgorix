@@ -507,9 +507,13 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	}
 
 	// Verification tag: every finding carries one so the UI/report can show at a
-	// glance whether it was independently confirmed or still needs human review.
+	// glance whether it was INDEPENDENTLY reproduced. Only a positive verdict
+	// from the independent Verifier earns TagVerified. Findings that never went
+	// through the verifier (low severity, or no verifier installed) carry only
+	// first-party proof, so they are tagged for manual review — never presented
+	// as "independently reproduced."
 	tags := make([]string, 0, 1)
-	if verifiedFlag {
+	if verifierConfirmed {
 		tags = append(tags, TagVerified)
 	} else {
 		tags = append(tags, TagManualReview)
@@ -1235,12 +1239,11 @@ func checkFalsePositive(title, description, severity, proof string) string {
 	return ""
 }
 
-// concreteImpactIndicators are unambiguous exploitation OUTCOMES. Unlike the
-// loose per-severity keyword lists, a match here means the target actually
-// produced impact (command output, extracted data, an OOB hit) — so it is safe
-// to auto-confirm a finding when the VERIFIER'S own re-test output contains one.
-// Deliberately excludes incidental tokens (status codes, bare "internal",
-// "localhost", generic timing words) that match almost any HTTP response.
+// concreteImpactIndicators are unambiguous exploitation OUTCOMES. A match here
+// means the target actually produced impact (command output, extracted data,
+// stolen session material, an OOB hit). Used by hasStrongEvidence to gauge the
+// strength of the AGENT'S OWN first-party proof (where a Set-Cookie/token is
+// legitimately part of a demonstrated credential-theft exploit).
 var concreteImpactIndicators = []string{
 	// Data exfiltration outcome
 	"extracted", "dumped", "exfiltrated",
@@ -1258,12 +1261,31 @@ var concreteImpactIndicators = []string{
 	"interact.sh", "interactsh", "oast", "http request received", "pingback",
 }
 
-// HasConcreteImpact reports whether text contains an unambiguous exploitation
-// outcome (see concreteImpactIndicators). The verifier uses this — NOT the
-// looser HasStrongEvidence — to auto-confirm from its own re-test output.
+// reproducedImpactIndicators is the STRICT subset used to AUTO-CONFIRM a finding
+// from the independent verifier's own re-test output. It deliberately omits the
+// generic session/credential markers (Set-Cookie, session_id, access_token,
+// refresh_token, document.cookie): those appear on ordinary login pages and any
+// baseline request, so matching them would let an unrelated response falsely
+// validate a finding the verifier never actually reproduced. Only unambiguous
+// command-execution, data-exfiltration, SQL-extraction, cloud-metadata, and
+// out-of-band-callback outcomes qualify here.
+var reproducedImpactIndicators = []string{
+	"extracted", "dumped", "exfiltrated",
+	"root:", "uid=", "gid=", "/etc/passwd", "/etc/shadow", "/proc/self",
+	"password hash", "/bin/bash",
+	"union select", "information_schema", "@@version", "sqlmap",
+	"169.254.169.254", "/latest/meta-data", "metadata.google.internal",
+	"callback received", "dns query", "burp collaborator",
+	"interact.sh", "interactsh", "oast", "http request received", "pingback",
+}
+
+// HasConcreteImpact reports whether text contains an unambiguous, non-generic
+// exploitation outcome (see reproducedImpactIndicators). The verifier uses this
+// — NOT the looser hasStrongEvidence — to auto-confirm from its own re-test
+// output, so a stray Set-Cookie on a login page can never validate a finding.
 func HasConcreteImpact(text string) bool {
 	lower := strings.ToLower(text)
-	for _, ind := range concreteImpactIndicators {
+	for _, ind := range reproducedImpactIndicators {
 		if strings.Contains(lower, ind) {
 			return true
 		}

@@ -66,32 +66,76 @@ func ParseAuthHeaders(raw string) map[string]string {
 		return nil
 	}
 	out := map[string]string{}
-	// Split on newlines first, then ';' (so cookie values containing '=' are safe).
-	var parts []string
+	// Tokenize on newlines and ';', but treat a ';'-segment as a CONTINUATION
+	// of the current header unless it starts a new "Header-Name:" pair. This
+	// preserves multi-cookie values like `Cookie: a=1; b=2` (b=2 is not a new
+	// header — it has no header-name-shaped prefix) while still splitting
+	// `Cookie: a=1; Authorization: Bearer x` into two headers.
+	var segments []string
 	for _, line := range strings.Split(raw, "\n") {
-		for _, seg := range strings.Split(line, ";") {
-			if s := strings.TrimSpace(seg); s != "" {
-				parts = append(parts, s)
+		segments = append(segments, strings.Split(line, ";")...)
+	}
+	curName, curVal := "", ""
+	flush := func() {
+		if curName != "" && curVal != "" {
+			// A repeated header name (rare) keeps the first occurrence.
+			if _, ok := out[curName]; !ok {
+				out[curName] = curVal
 			}
 		}
+		curName, curVal = "", ""
 	}
-	for _, p := range parts {
-		idx := strings.Index(p, ":")
-		if idx <= 0 {
-			// No header name — assume it's an Authorization bearer/token value.
-			if !strings.EqualFold(p, "Bearer") {
-				out["Authorization"] = p
-			}
+	for _, seg := range segments {
+		s := strings.TrimSpace(seg)
+		if s == "" {
 			continue
 		}
-		name := strings.TrimSpace(p[:idx])
-		val := strings.TrimSpace(p[idx+1:])
-		if name != "" && val != "" {
-			out[name] = val
+		if name, val, ok := splitHeaderSpec(s); ok {
+			flush()
+			curName, curVal = name, val
+		} else if curName != "" {
+			// Continuation of the current header value (e.g. another cookie).
+			curVal = curVal + "; " + s
+		} else if !strings.EqualFold(s, "Bearer") {
+			// Leading bare token with no header name → Authorization value.
+			flush()
+			curName, curVal = "Authorization", s
 		}
 	}
+	flush()
 	if len(out) == 0 {
 		return nil
 	}
 	return out
+}
+
+// splitHeaderSpec returns (name, value, true) when s begins with an
+// HTTP-header-name-shaped token followed by ':'. Cookie pairs like "b=2" (which
+// contain '=' rather than a header-name+':') return ok=false so they are kept
+// as continuations of the preceding header instead of being mis-parsed.
+func splitHeaderSpec(s string) (name, value string, ok bool) {
+	idx := strings.IndexByte(s, ':')
+	if idx <= 0 {
+		return "", "", false
+	}
+	candidate := strings.TrimSpace(s[:idx])
+	if candidate == "" || !isHeaderName(candidate) {
+		return "", "", false
+	}
+	return candidate, strings.TrimSpace(s[idx+1:]), true
+}
+
+// isHeaderName reports whether tok is a valid RFC 7230 header field-name
+// (token chars only). Notably '=' and space are excluded, so cookie pairs and
+// values are never mistaken for a header name.
+func isHeaderName(tok string) bool {
+	for _, r := range tok {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", r):
+		default:
+			return false
+		}
+	}
+	return true
 }

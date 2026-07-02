@@ -54,6 +54,11 @@ linters:
         - G104 # audited error returns are checked by errcheck
         - G304 # file path joins reviewed in storage/* directly
         - G404 # weak RNG: scanner uses math/rand for non-crypto paths
+        # G101 (hardcoded credentials) is inherent to this tool: the scanner's
+        # source ships credential-DETECTION regexes (codesearch sink patterns
+        # like `password|secret|token`) and example payloads. These are
+        # detection strings, not real secrets — no credential is embedded.
+        - G101
         # G204 (subprocess with variable input) is inherent to this tool:
         # xalgorix is an LLM-driven pentest agent whose core function is
         # running the security tools/commands the model constructs. Command

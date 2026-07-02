@@ -2718,8 +2718,8 @@ func TestTelegramConfigured_TrueWhenTokenAndChatSet(t *testing.T) {
 // response body (token is not stored on the record — only the boolean).
 func TestHandleGetScan_MarksTelegramConfigured(t *testing.T) {
 	s := newTestServer(t, &config.Config{
-		TelegramBotToken: "123456789:ABC-TOPSECRET",
-		TelegramChatID:   "-1001234567890",
+		TelegramBotToken:  "123456789:ABC-TOPSECRET",
+		TelegramChatID:    "-1001234567890",
 		RateLimitRequests: 60,
 		RateLimitWindow:   60,
 	})
@@ -3005,11 +3005,11 @@ func TestSendTelegramWithFile_FallsBackWhenFileMissing(t *testing.T) {
 // severity scale the issue specifies.
 func TestSeverityMeetsThreshold_TelegramReuseIsIdenticalToDiscord(t *testing.T) {
 	cases := []struct {
-		name          string
-		severity      string
-		minSeverity   string
-		wantDiscord   bool
-		wantTelegram  bool
+		name         string
+		severity     string
+		minSeverity  string
+		wantDiscord  bool
+		wantTelegram bool
 	}{
 		{"empty threshold sends all", "info", "", true, true},
 		{"info below low", "info", "low", false, false},

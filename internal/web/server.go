@@ -1050,38 +1050,48 @@ type QueueState struct {
 
 // ScanInstance represents a running or completed scan instance.
 type ScanInstance struct {
-	ID                string        `json:"id"`
-	Name              string        `json:"name,omitempty"` // user-defined scan name
-	Targets           string        `json:"targets"`
-	ParentTarget      string        `json:"parent_target,omitempty"` // parent domain for subdomain scans
-	Status            string        `json:"status"`                  // saved, running, paused, finished, stopped
-	StartedAt         string        `json:"started_at"`
-	FinishedAt        string        `json:"finished_at,omitempty"`
-	StopReason        string        `json:"stop_reason,omitempty"` // why stopped (user, error, watchdog)
-	Iterations        int           `json:"iterations"`
-	ToolCalls         int           `json:"tool_calls"`
-	VulnCount         int           `json:"vuln_count"`
-	TotalTokens       int           `json:"total_tokens"`
-	ScanMode          string        `json:"scan_mode"`
-	Instruction       string        `json:"instruction,omitempty"`     // custom scan instructions for restart
-	SeverityFilter    []string      `json:"severity_filter,omitempty"` // severity filter for restart
-	Phases            []int         `json:"phases,omitempty"`          // selected methodology phases (empty = all)
-	ReconMode         string        `json:"recon_mode,omitempty"`      // active or passive reconnaissance
-	ScanIntensity     string        `json:"scan_intensity,omitempty"`  // active or passive testing/scanning
-	CompanyName       string        `json:"company_name,omitempty"`    // report branding: company name
-	LogoPath          string        `json:"logo_path,omitempty"`       // report branding: logo path
-	DiscordWebhook    string        `json:"-"`                         // discord webhook (not exposed to API)
-	Vulns             []VulnSummary `json:"vulns,omitempty"`
-	CurrentPhase      int           `json:"current_phase,omitempty"`
-	agent             *agent.Agent
-	cancel            context.CancelFunc
-	scanDir           string
-	sctx              *scanctx.ScanContext // per-instance session state (vulns, notes, terminal, browser)
-	events            []WSEvent            // buffered events for replay
-	chatCfg           *config.Config       // provider settings for post-scan chat (not exposed)
-	chatMessages      []llm.Message        // lightweight post-scan chat history (not exposed)
-	mu                sync.RWMutex
-	lastSessionTokens int // tracks token count from current session for delta calculation
+	ID             string   `json:"id"`
+	Name           string   `json:"name,omitempty"` // user-defined scan name
+	Targets        string   `json:"targets"`
+	ParentTarget   string   `json:"parent_target,omitempty"` // parent domain for subdomain scans
+	Status         string   `json:"status"`                  // saved, running, paused, finished, stopped
+	StartedAt      string   `json:"started_at"`
+	FinishedAt     string   `json:"finished_at,omitempty"`
+	StopReason     string   `json:"stop_reason,omitempty"` // why stopped (user, error, watchdog)
+	Iterations     int      `json:"iterations"`
+	ToolCalls      int      `json:"tool_calls"`
+	VulnCount      int      `json:"vuln_count"`
+	TotalTokens    int      `json:"total_tokens"`
+	ScanMode       string   `json:"scan_mode"`
+	Instruction    string   `json:"instruction,omitempty"`     // custom scan instructions for restart
+	SeverityFilter []string `json:"severity_filter,omitempty"` // severity filter for restart
+	Phases         []int    `json:"phases,omitempty"`          // selected methodology phases (empty = all)
+	ReconMode      string   `json:"recon_mode,omitempty"`      // active or passive reconnaissance
+	ScanIntensity  string   `json:"scan_intensity,omitempty"`  // active or passive testing/scanning
+	CompanyName    string   `json:"company_name,omitempty"`    // report branding: company name
+	LogoPath       string   `json:"logo_path,omitempty"`       // report branding: logo path
+	DiscordWebhook string   `json:"-"`                         // discord webhook (not exposed to API)
+	// Per-scan auth/whitebox/context, restored when a saved scan is started.
+	// Kept in-memory only (json:"-", like DiscordWebhook) so third-party
+	// credentials and token-bearing source URLs are never written to the
+	// on-disk instance record or exposed via the API. Survives save→start
+	// within the running process; a process restart drops them (the operator
+	// re-enters auth), which is the safe default for secrets.
+	TargetAuth          string        `json:"-"`
+	TargetAuthSecondary string        `json:"-"`
+	SourceRepo          string        `json:"-"`
+	ScanContext         string        `json:"-"`
+	Vulns               []VulnSummary `json:"vulns,omitempty"`
+	CurrentPhase        int           `json:"current_phase,omitempty"`
+	agent               *agent.Agent
+	cancel              context.CancelFunc
+	scanDir             string
+	sctx                *scanctx.ScanContext // per-instance session state (vulns, notes, terminal, browser)
+	events              []WSEvent            // buffered events for replay
+	chatCfg             *config.Config       // provider settings for post-scan chat (not exposed)
+	chatMessages        []llm.Message        // lightweight post-scan chat history (not exposed)
+	mu                  sync.RWMutex
+	lastSessionTokens   int // tracks token count from current session for delta calculation
 }
 
 // maxConcurrentInstances removed — replaced by dynamic resource-aware
@@ -2579,6 +2589,12 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 			CompanyName:    req.CompanyName,
 			LogoPath:       req.LogoPath,
 			DiscordWebhook: req.DiscordWebhook,
+			// Retained in-memory so "Save for later" → start keeps the
+			// operator's authenticated-scanning + whitebox + context config.
+			TargetAuth:          req.TargetAuth,
+			TargetAuthSecondary: req.TargetAuthSecondary,
+			SourceRepo:          req.SourceRepo,
+			ScanContext:         req.ScanContext,
 		}
 		chatCfg := scanCfg
 		inst.chatCfg = &chatCfg
@@ -3224,6 +3240,10 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 		companyName := inst.CompanyName
 		logoPath := inst.LogoPath
 		instName := inst.Name
+		targetAuth := inst.TargetAuth
+		targetAuthB := inst.TargetAuthSecondary
+		sourceRepo := inst.SourceRepo
+		scanContext := inst.ScanContext
 		inst.mu.RUnlock()
 
 		// Clear global stop flag so the restarted scan isn't immediately aborted
@@ -3232,17 +3252,21 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 
 		// Build a new ScanRequest from stored config
 		req := ScanRequest{
-			Targets:        targets,
-			Instruction:    instruction,
-			ScanMode:       scanMode,
-			SeverityFilter: severityFilter,
-			DiscordWebhook: discordWebhook,
-			Name:           instName,
-			Phases:         phases,
-			ReconMode:      reconMode,
-			ScanIntensity:  scanIntensity,
-			CompanyName:    companyName,
-			LogoPath:       logoPath,
+			Targets:             targets,
+			Instruction:         instruction,
+			ScanMode:            scanMode,
+			SeverityFilter:      severityFilter,
+			DiscordWebhook:      discordWebhook,
+			Name:                instName,
+			Phases:              phases,
+			ReconMode:           reconMode,
+			ScanIntensity:       scanIntensity,
+			CompanyName:         companyName,
+			LogoPath:            logoPath,
+			TargetAuth:          targetAuth,
+			TargetAuthSecondary: targetAuthB,
+			SourceRepo:          sourceRepo,
+			ScanContext:         scanContext,
 		}
 
 		scanCfg := *s.cfg // shallow copy
@@ -3269,17 +3293,21 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 		inst.mu.RLock()
 		targets := strings.Split(inst.Targets, ", ")
 		req := ScanRequest{
-			Targets:        targets,
-			Instruction:    inst.Instruction,
-			ScanMode:       inst.ScanMode,
-			SeverityFilter: inst.SeverityFilter,
-			DiscordWebhook: inst.DiscordWebhook,
-			Name:           inst.Name,
-			Phases:         inst.Phases,
-			ReconMode:      inst.ReconMode,
-			ScanIntensity:  inst.ScanIntensity,
-			CompanyName:    inst.CompanyName,
-			LogoPath:       inst.LogoPath,
+			Targets:             targets,
+			Instruction:         inst.Instruction,
+			ScanMode:            inst.ScanMode,
+			SeverityFilter:      inst.SeverityFilter,
+			DiscordWebhook:      inst.DiscordWebhook,
+			Name:                inst.Name,
+			Phases:              inst.Phases,
+			ReconMode:           inst.ReconMode,
+			ScanIntensity:       inst.ScanIntensity,
+			CompanyName:         inst.CompanyName,
+			LogoPath:            inst.LogoPath,
+			TargetAuth:          inst.TargetAuth,
+			TargetAuthSecondary: inst.TargetAuthSecondary,
+			SourceRepo:          inst.SourceRepo,
+			ScanContext:         inst.ScanContext,
 		}
 		inst.mu.RUnlock()
 
@@ -4478,21 +4506,25 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 
 	// Register instance as pending initially
 	instance := &ScanInstance{
-		ID:             instanceID,
-		Name:           req.Name,
-		Targets:        strings.Join(req.Targets, ", "),
-		Status:         "pending",
-		StartedAt:      time.Now().Format(time.RFC3339Nano),
-		ScanMode:       req.ScanMode,
-		Instruction:    req.Instruction,
-		SeverityFilter: req.SeverityFilter,
-		Phases:         req.Phases,
-		ReconMode:      req.ReconMode,
-		ScanIntensity:  req.ScanIntensity,
-		CurrentPhase:   firstSelectedPhase(req.Phases),
-		CompanyName:    req.CompanyName,
-		LogoPath:       req.LogoPath,
-		DiscordWebhook: req.DiscordWebhook,
+		ID:                  instanceID,
+		Name:                req.Name,
+		Targets:             strings.Join(req.Targets, ", "),
+		Status:              "pending",
+		StartedAt:           time.Now().Format(time.RFC3339Nano),
+		ScanMode:            req.ScanMode,
+		Instruction:         req.Instruction,
+		SeverityFilter:      req.SeverityFilter,
+		Phases:              req.Phases,
+		ReconMode:           req.ReconMode,
+		ScanIntensity:       req.ScanIntensity,
+		CurrentPhase:        firstSelectedPhase(req.Phases),
+		CompanyName:         req.CompanyName,
+		LogoPath:            req.LogoPath,
+		DiscordWebhook:      req.DiscordWebhook,
+		TargetAuth:          req.TargetAuth,
+		TargetAuthSecondary: req.TargetAuthSecondary,
+		SourceRepo:          req.SourceRepo,
+		ScanContext:         req.ScanContext,
 	}
 	s.seedResumeInstanceFromRecord(instance, req)
 	chatCfg := *scanCfg
@@ -6121,8 +6153,14 @@ func (s *Server) handleUploadContext(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseMultipartForm(150 << 20); err != nil { // 150MB max (APKs get large)
-		http.Error(w, "failed to parse multipart form: "+err.Error(), http.StatusBadRequest)
+	// Hard-cap the TOTAL request body before parsing. ParseMultipartForm's
+	// argument only bounds in-memory buffering (the rest spools to disk), so
+	// without MaxBytesReader a client could stream an arbitrarily large upload
+	// that gets written to dataDir and read back — exhausting disk/memory.
+	const maxContextUpload = 160 << 20 // 160MB (allows a ~150MB APK + overhead)
+	r.Body = http.MaxBytesReader(w, r.Body, maxContextUpload)
+	if err := r.ParseMultipartForm(32 << 20); err != nil { // 32MB in memory, rest to disk
+		http.Error(w, "failed to parse multipart form (max 160MB): "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	file, header, err := r.FormFile("file")
