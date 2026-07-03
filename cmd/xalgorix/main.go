@@ -31,7 +31,7 @@ import (
 // The hardcoded fallback is only used when developers `go run` the package
 // without ldflags. It is a `var` (not `const`) precisely so ldflags can
 // rewrite it.
-var version = "4.5.42"
+var version = "4.5.43"
 
 const defaultWebPort = 9137
 
@@ -436,6 +436,16 @@ func handleStart() {
 	_ = exec.Command("fuser", "-k", fmt.Sprintf("%d/tcp", defaultWebPort)).Run()
 	time.Sleep(1 * time.Second)
 
+	// If systemd isn't the init system (common in WSL, Docker, and other
+	// minimal environments), skip the unit-file dance entirely and run in the
+	// background — otherwise `systemctl daemon-reload/start` fail and the whole
+	// command aborts with no service running.
+	if !systemdAvailable() {
+		fmt.Println("ℹ️  systemd not detected on this host — starting in background mode instead.")
+		startBackground()
+		return
+	}
+
 	// Create systemd service file
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -482,8 +492,12 @@ func handleStart() {
 	// Start the service
 	cmd = exec.Command("systemctl", "start", "xalgorix")
 	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Failed to start xalgorix service: %v\n", err)
-		os.Exit(1)
+		// systemd is present but couldn't start the unit (e.g. it's degraded
+		// or we lack privileges). Don't leave the operator with nothing —
+		// fall back to a background process.
+		fmt.Fprintf(os.Stderr, "⚠️  systemctl start failed (%v) — falling back to background mode.\n", err)
+		startBackground()
+		return
 	}
 
 	fmt.Println("✅ Xalgorix installed and started as systemd service!")
@@ -513,6 +527,22 @@ OOMPolicy=continue
 [Install]
 WantedBy=multi-user.target
 `, home, home, home, home, home, installPath)
+}
+
+// systemdAvailable reports whether systemd is the running init system.
+// `/run/systemd/system` exists only when the host was booted with systemd as
+// PID 1 — the canonical check systemd itself documents (sd_booted(3)). On WSL
+// without systemd, in most containers, and on non-systemd distros this is
+// absent, so callers should fall back to background mode instead of shelling
+// out to a `systemctl` that will fail.
+func systemdAvailable() bool {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return false
+	}
+	if fi, err := os.Stat("/run/systemd/system"); err == nil && fi.IsDir() {
+		return true
+	}
+	return false
 }
 
 func startBackground() {
