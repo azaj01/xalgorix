@@ -109,6 +109,34 @@ func TestRedactSecrets_SkipsEmptySecretEntry(t *testing.T) {
 	}
 }
 
+func TestCredentialsInURL(t *testing.T) {
+	// A tokenized GitHub clone URL must yield the userinfo AND the token so
+	// both are redacted from telemetry/logs/git errors.
+	creds := credentialsInURL("https://x-access-token:ghp_abcd1234efgh@github.com/org/repo.git")
+	joined := strings.Join(creds, "|")
+	if !strings.Contains(joined, "ghp_abcd1234efgh") {
+		t.Fatalf("token not extracted for redaction: %v", creds)
+	}
+	if !strings.Contains(joined, "x-access-token:ghp_abcd1234efgh") {
+		t.Fatalf("full userinfo not extracted: %v", creds)
+	}
+
+	// A plain (public) URL has no credentials to redact.
+	if got := credentialsInURL("https://github.com/org/repo.git"); got != nil {
+		t.Fatalf("public URL must yield no credentials, got %v", got)
+	}
+	// A bare path / non-URL yields nothing.
+	if got := credentialsInURL("/local/path/to/source"); got != nil {
+		t.Fatalf("local path must yield no credentials, got %v", got)
+	}
+	// A short token is skipped (avoids redacting trivial substrings), but the
+	// combined userinfo is still long enough to register.
+	creds = credentialsInURL("https://u:xy@host/r.git")
+	if strings.Contains(strings.Join(creds, "|"), "|xy") {
+		t.Fatalf("short token should be skipped, got %v", creds)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Per-scan setters
 // ---------------------------------------------------------------------------

@@ -3776,6 +3776,41 @@ func (a *Agent) redactSecrets(s string) string {
 	return s
 }
 
+// credentialsInURL extracts embedded clone credentials from a git/HTTP URL of
+// the form scheme://userinfo@host/path — e.g. a GitHub token in
+// https://x-access-token:<TOKEN>@github.com/org/repo.git. It returns the
+// full userinfo ("user:pass") and, separately, the password/token component,
+// so they can be registered as redaction secrets. Returns nil when the URL
+// carries no credentials. Values shorter than 4 chars are skipped to avoid
+// redacting trivially-common substrings.
+func credentialsInURL(raw string) []string {
+	i := strings.Index(raw, "://")
+	if i < 0 {
+		return nil
+	}
+	rest := raw[i+3:]
+	at := strings.Index(rest, "@")
+	if at < 0 {
+		return nil
+	}
+	// The host part may itself contain no '@'; take the userinfo up to the
+	// FIRST '@' (credentials cannot contain an unescaped '@').
+	userinfo := rest[:at]
+	if userinfo == "" {
+		return nil
+	}
+	var out []string
+	if len(userinfo) >= 4 {
+		out = append(out, userinfo)
+	}
+	if c := strings.Index(userinfo, ":"); c >= 0 {
+		if pw := userinfo[c+1:]; len(pw) >= 4 {
+			out = append(out, pw)
+		}
+	}
+	return out
+}
+
 // SetTargetAuth sets per-scan authenticated-session credentials, overriding
 // the global default. Call before Run(). Empty string clears it.
 func (a *Agent) SetTargetAuth(s string) { a.targetAuth = strings.TrimSpace(s) }
@@ -3824,10 +3859,16 @@ func (a *Agent) prepareScanEnvironment() {
 			dest = os.TempDir()
 		}
 		dest = filepath.Join(dest, "source")
-		a.emit(Event{Type: "message", Content: fmt.Sprintf("📦 Whitebox: resolving source (%s)…", a.sourceRepo)})
+		// A private-repo clone URL may embed a token
+		// (https://x-access-token:<TOKEN>@github.com/...). Register those
+		// credentials as redaction secrets BEFORE any emit/log so the token
+		// never leaks into telemetry, the scan log, PDF reports, or git's
+		// own "authentication failed for <url>" error output.
+		a.secretValues = append(a.secretValues, credentialsInURL(a.sourceRepo)...)
+		a.emit(Event{Type: "message", Content: fmt.Sprintf("📦 Whitebox: resolving source (%s)…", a.redactSecrets(a.sourceRepo))})
 		if root, err := codesearch.ResolveSource(a.sourceRepo, dest); err != nil {
-			a.emit(Event{Type: "error", Content: "Whitebox source unavailable: " + err.Error() + " — continuing black-box."})
-			log.Printf("[agent] whitebox source unavailable (%s): %v", a.sourceRepo, err)
+			a.emit(Event{Type: "error", Content: "Whitebox source unavailable: " + a.redactSecrets(err.Error()) + " — continuing black-box."})
+			log.Printf("[agent] whitebox source unavailable (%s): %v", a.redactSecrets(a.sourceRepo), a.redactSecrets(err.Error()))
 		} else if root != "" {
 			codesearch.SetSourceRoot(a.scanCtx.ID, root)
 			a.emit(Event{Type: "message", Content: "📦 Whitebox source ready — use code_search to hunt sinks."})
