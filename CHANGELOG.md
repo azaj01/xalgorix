@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] — Recognize command-injection RCE as proven
+
+### Fixed
+- **Genuine OS command-injection RCE was flagged "manual verification needed"** despite proof of root command execution. A critical `/uptime/{flag}` finding (CVSS 9+) whose proof showed `whoami`→`root`, `uname -a`→`… x86_64 GNU/Linux`, `uptime`→`load average …`, and full source-code disclosure was tagged `needs-manual-verification`. Cause: the concrete-impact detector (`HasConcreteImpact` and the reproduced-/concrete-impact indicator lists) only recognized command execution via `id`/`cat /etc/passwd`-style output (`uid=`, `gid=`, `root:`, `/etc/passwd`); it did not recognize `whoami`, `uname`, `uptime`, or Windows command output, so neither the independent Verifier's auto-confirm nor the `exploit-proven` classification fired. Added high-signal command-execution markers (`gnu/linux`, `load average`, `nt authority\`, `volume serial number`, `windows ip configuration`, `microsoft windows [version`) to both lists. Such findings are now `verified`/`exploit-proven` (Verified=true) instead of flagged for manual review. Regression: `TestHasConcreteImpact_RecognizesCommandExecutionOutput`.
+
 ## [Unreleased] — Phase-progress accuracy
 
 ### Fixed

@@ -1204,6 +1204,36 @@ func min(a, b int) int {
 	return b
 }
 
+// Regression: a genuine OS command-injection RCE — proven by injected-command
+// output (whoami→root, uname→GNU/Linux, uptime→load average) — must be
+// recognized as concrete impact, so it is classified exploit-proven/verified
+// rather than mis-tagged "manual verification needed". This was the
+// /uptime/{flag} finding that reached CVSS 9.8 with root command output yet
+// was flagged for manual review, because the old indicator list only matched
+// id/cat-passwd output (uid=/root:/etc/passwd), not whoami/uname/uptime.
+func TestHasConcreteImpact_RecognizesCommandExecutionOutput(t *testing.T) {
+	proven := []string{
+		`Response: {"command":"uptime -;whoami","output":" 11:05:55 up 71 days, load average: 0.23, 0.47\nroot\n"}`,
+		`Response: Linux 7f32aec5653c 5.10.0-39-amd64 #1 SMP Debian 5.10.251-1 x86_64 GNU/Linux`,
+		`whoami output: nt authority\system`,
+		`dir output includes " Volume Serial Number is A1B2-C3D4"`,
+	}
+	for _, p := range proven {
+		if !HasConcreteImpact(p) {
+			t.Errorf("command-execution output not recognized as concrete impact: %q", p)
+		}
+	}
+	// Benign responses with none of the markers must stay non-concrete.
+	for _, p := range []string{
+		"HTTP/1.1 200 OK, page rendered normally",
+		"the parameter value is reflected in the response body",
+	} {
+		if HasConcreteImpact(p) {
+			t.Errorf("benign response wrongly flagged as concrete impact: %q", p)
+		}
+	}
+}
+
 // TestHasStrongEvidence_IncidentalTokensAreWeak locks in the tightening: proof
 // made of incidental tokens (status codes, bare "http", emails, "account")
 // must NOT count as strong evidence, while concrete exploitation outcomes do.

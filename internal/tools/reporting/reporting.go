@@ -1270,6 +1270,14 @@ var concreteImpactIndicators = []string{
 	// System file / command-execution output
 	"root:", "uid=", "gid=", "/etc/passwd", "/etc/shadow", "/proc/self",
 	"password hash", "/bin/bash",
+	// OS command-execution output (RCE / command injection). These are highly
+	// distinctive strings that a benign web response does not emit by accident,
+	// so they reliably prove an injected command actually ran:
+	//   uname -a → "... x86_64 GNU/Linux";  uptime/top → "load average";
+	//   Windows: whoami → "nt authority\\...";  dir → "Volume Serial Number";
+	//   ipconfig → "Windows IP Configuration";  ver → "Microsoft Windows [Version".
+	"gnu/linux", "load average", "nt authority\\", "volume serial number",
+	"windows ip configuration", "microsoft windows [version",
 	// SQL data extraction
 	"union select", "information_schema", "@@version", "sqlmap",
 	// Credential / session theft (concrete)
@@ -1293,6 +1301,9 @@ var reproducedImpactIndicators = []string{
 	"extracted", "dumped", "exfiltrated",
 	"root:", "uid=", "gid=", "/etc/passwd", "/etc/shadow", "/proc/self",
 	"password hash", "/bin/bash",
+	// OS command-execution output (see concreteImpactIndicators for rationale).
+	"gnu/linux", "load average", "nt authority\\", "volume serial number",
+	"windows ip configuration", "microsoft windows [version",
 	"union select", "information_schema", "@@version", "sqlmap",
 	"169.254.169.254", "/latest/meta-data", "metadata.google.internal",
 	"callback received", "dns query", "burp collaborator",
