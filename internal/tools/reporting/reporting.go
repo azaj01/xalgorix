@@ -72,18 +72,25 @@ type Vulnerability struct {
 	VerificationMethod string `json:"verification_method"`
 	Verified           bool   `json:"verified"`
 	// Tags are machine-readable labels surfaced in the UI and report. The
-	// verification dimension is always present: TagVerified when the
-	// independent verifier reproduced the finding, otherwise TagManualReview
-	// (the finding is preserved, not dropped, but must be human-confirmed).
+	// verification dimension is always present, one of three states:
+	//   TagVerified      — the independent Verifier re-reproduced the finding.
+	//   TagExploitProven — the Verifier didn't re-confirm (inconclusive/absent),
+	//                      but the agent's OWN proof shows a concrete exploitation
+	//                      outcome (command output, extracted data, OOB callback),
+	//                      so it stands as proven — not a guess.
+	//   TagManualReview  — no concrete proof yet; preserved (not dropped) but must
+	//                      be human-confirmed before it's relied on.
 	Tags      []string `json:"tags,omitempty"`
 	Timestamp string   `json:"timestamp"`
 	AgentName string   `json:"agent_name"`
 }
 
-// Finding tags (verification dimension).
+// Finding tags (verification dimension). Exactly one is attached to every
+// finding so the UI/report can show its confidence at a glance.
 const (
-	TagVerified     = "verified"                  // independently reproduced by the Verifier
-	TagManualReview = "needs-manual-verification" // preserved but not independently confirmed
+	TagVerified      = "verified"                  // independently reproduced by the Verifier
+	TagExploitProven = "exploit-proven"            // concrete first-party exploitation proof (verifier inconclusive/absent)
+	TagManualReview  = "needs-manual-verification" // no concrete proof yet — human-confirm before relying on it
 )
 
 // ── Independent finding verification ──
@@ -380,8 +387,7 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	// Inconclusive → persist but flagged Unverified (never claimed as validated).
 	// No lock is held here: verification is slow (LLM + re-testing).
 	verifierConfirmed := false
-	verifierRan := false
-	verifierInconclusiveKept := false // inconclusive verdict but strong first-party proof → keep as Unverified
+	verifierInconclusiveKept := false // inconclusive verdict but proof preserved → flagged for manual review
 	// The independent Verifier runs for EVERY actionable finding — critical,
 	// high, medium AND low. A low-severity claim is still a claim, and "real
 	// validation, not just detection" has to hold across the board, so low
@@ -390,7 +396,6 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	// false for it — matching the Gate 2 proof requirement.
 	if requiresValidation {
 		if vf := getFindingVerifier(contextID); vf != nil {
-			verifierRan = true
 			verdict := vf(VerificationRequest{
 				Title:              title,
 				Severity:           severity,
@@ -503,24 +508,34 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 		return duplicateResult(existing, msg), nil
 	}
 
-	verifiedFlag := proof != "" && method != ""
-	if verifierRan {
-		// When the verifier ran, IT is the source of truth for "validated".
-		verifiedFlag = verifierConfirmed
-	}
+	// Does the agent's OWN proof contain a concrete, unambiguous exploitation
+	// outcome (command output like `uid=0(root)`, extracted DB rows, an OOB
+	// callback hit)? This is the STRICT bar (HasConcreteImpact), not the looser
+	// hasStrongEvidence — a stray Set-Cookie can't qualify.
+	exploitProven := HasConcreteImpact(proof)
 
-	// Verification tag: every finding carries one so the UI/report can show at a
-	// glance whether it was INDEPENDENTLY reproduced. Only a positive verdict
-	// from the independent Verifier earns TagVerified. Findings that never went
-	// through the verifier (low severity, or no verifier installed) carry only
-	// first-party proof, so they are tagged for manual review — never presented
-	// as "independently reproduced."
+	// Verification tag: every finding carries exactly one, so the UI/report can
+	// show its confidence at a glance.
+	//   • Independent Verifier reproduced it            → TagVerified.
+	//   • Verifier didn't re-confirm, but the finding's OWN proof shows a
+	//     concrete exploitation outcome                 → TagExploitProven.
+	//     (An RCE whose proof is `uid=0(root)` is proven — not a guess — so it
+	//      must NOT be buried under "manual verification needed".)
+	//   • Otherwise (no concrete proof yet)             → TagManualReview.
 	tags := make([]string, 0, 1)
-	if verifierConfirmed {
+	switch {
+	case verifierConfirmed:
 		tags = append(tags, TagVerified)
-	} else {
+	case exploitProven:
+		tags = append(tags, TagExploitProven)
+	default:
 		tags = append(tags, TagManualReview)
 	}
+
+	// A finding is "validated" (Verified=true, so reports don't stamp it
+	// "UNVERIFIED — manual review required") when the independent verifier
+	// confirmed it OR its own proof demonstrates concrete exploitation.
+	verifiedFlag := verifierConfirmed || exploitProven
 
 	vuln := Vulnerability{
 		ID:                 fmt.Sprintf("XALG-%d", len(store.vulns)+1),
@@ -560,8 +575,10 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	msg := fmt.Sprintf("✅ Vulnerability reported: [%s] %s (%s | CVSS %.1f) — Verified: %v", vuln.ID, vuln.Title, strings.ToUpper(vuln.Severity), vuln.CVSS, vuln.Verified)
 	if verifierConfirmed {
 		msg += "\n✅ Independently CONFIRMED by the verifier."
+	} else if exploitProven {
+		msg += "\n✅ RECORDED as EXPLOIT-PROVEN: the independent verifier could not re-confirm it within its budget, but your first-party proof shows a concrete exploitation outcome, so it stands as proven (NOT flagged for manual review). Do NOT re-report this — it is already saved."
 	} else if verifierInconclusiveKept {
-		msg += "\n⚠️ RECORDED as UNVERIFIED (flagged for manual review): the independent verifier could not re-confirm it within its budget, but your first-party proof is concrete, so the finding is preserved rather than dropped. Do NOT re-report this — it is already saved. If you can strengthen the proof (e.g. an OOB callback hit or extracted data), add it via add_note."
+		msg += "\n⚠️ RECORDED as UNVERIFIED (flagged for manual review): the independent verifier could not re-confirm it within its budget, and your proof does not yet show a concrete exploitation outcome, so the finding is preserved rather than dropped. Do NOT re-report this — it is already saved. If you can strengthen the proof (e.g. an OOB callback hit or extracted data), add it via add_note."
 	}
 	if originalSeverity != "" {
 		if cvss > 0 {

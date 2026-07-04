@@ -634,11 +634,13 @@ func TestReportVuln_IndependentVerifierGate(t *testing.T) {
 		}
 	})
 
-	t.Run("inconclusive with strong first-party proof is kept as UNVERIFIED", func(t *testing.T) {
-		// The verifier could not re-confirm (e.g. it ran out of turn/time budget
-		// or hit an LLM error), but the agent's own proof is concrete (data
-		// extraction). Dropping this loses a real bug, so it is preserved and
-		// flagged Unverified rather than discarded. base() carries strong proof.
+	t.Run("inconclusive with concrete first-party proof is EXPLOIT-PROVEN", func(t *testing.T) {
+		// The verifier could not re-confirm (ran out of turn/time budget or hit
+		// an LLM error), but the agent's own proof shows a CONCRETE exploitation
+		// outcome (data extraction / dumped rows). This is proven by its own
+		// evidence — not a guess — so it must NOT be buried under "manual
+		// verification needed". It's preserved, marked Verified, and tagged
+		// exploit-proven. base() carries concrete-impact proof.
 		ctx := "verifier-inconclusive-strong"
 		CleanupContext(ctx)
 		defer CleanupContext(ctx)
@@ -652,16 +654,19 @@ func TestReportVuln_IndependentVerifierGate(t *testing.T) {
 		}
 		vulns := GetVulnerabilitiesForContext(ctx)
 		if len(vulns) != 1 {
-			t.Fatalf("expected 1 vuln preserved on strong-evidence inconclusive, got %d (%s)", len(vulns), res.Output)
+			t.Fatalf("expected 1 vuln preserved on concrete-proof inconclusive, got %d (%s)", len(vulns), res.Output)
 		}
-		if vulns[0].Verified {
-			t.Fatalf("inconclusive finding must NOT be marked Verified")
+		if !vulns[0].Verified {
+			t.Fatalf("concrete-proof inconclusive finding MUST be marked Verified (exploit-proven)")
 		}
-		if !containsTag(vulns[0].Tags, TagManualReview) {
-			t.Fatalf("expected TagManualReview on an inconclusive finding, got tags=%v", vulns[0].Tags)
+		if !containsTag(vulns[0].Tags, TagExploitProven) {
+			t.Fatalf("expected TagExploitProven on a concrete-proof inconclusive finding, got tags=%v", vulns[0].Tags)
 		}
-		if !strings.Contains(res.Output, "RECORDED as UNVERIFIED") {
-			t.Fatalf("expected 'RECORDED as UNVERIFIED' notice, got: %s", res.Output)
+		if containsTag(vulns[0].Tags, TagManualReview) {
+			t.Fatalf("exploit-proven finding must NOT also carry TagManualReview, got tags=%v", vulns[0].Tags)
+		}
+		if !strings.Contains(res.Output, "RECORDED as EXPLOIT-PROVEN") {
+			t.Fatalf("expected 'RECORDED as EXPLOIT-PROVEN' notice, got: %s", res.Output)
 		}
 	})
 

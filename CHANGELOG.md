@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased] — "Exploit-proven" verification state
+
+### Fixed
+- **Proven findings were being flagged "manual verification needed."** When the independent Verifier returned an *inconclusive* verdict (ran out of turn/time budget, hit an LLM error, or the class needs state/timing/OOB it lacks), the finding was tagged `needs-manual-verification` regardless of the strength of its own proof — so a proven RCE whose exploitation proof shows `uid=0(root)`, or a SQLi that dumped rows, was presented as unverified. The verification dimension now has three states: `verified` (independently reproduced by the Verifier), **`exploit-proven`** (Verifier inconclusive/absent, but the finding's OWN proof contains a concrete exploitation outcome per `HasConcreteImpact` — command output, extracted data, OOB callback, SQL extraction, cloud-metadata), and `needs-manual-verification` (no concrete proof yet). `Verified` is now true for both `verified` and `exploit-proven`, so reports no longer stamp proven findings "UNVERIFIED — manual review required." Regression: `TestReportVuln_IndependentVerifierGate/inconclusive_with_concrete_first-party_proof_is_EXPLOIT-PROVEN`.
+
+## [Unreleased] — Internal refactor: decompose web/agent god-files
+
+### Changed
+- **Behavior-preserving decomposition of the two largest files** into cohesive, single-purpose files within their existing packages. No logic changed (verified: top-level declaration sets identical vs the prior revision, and code content byte-identical except two removed stale orphan comments; build/vet/gofmt/golangci-lint clean, tests + `-race` green).
+  - `internal/web/server.go` 8865 → 3187 LOC, split into `auth_session`, `ws_hub`, `queue_state`, `orchestrator`, `uploads`, `notify`, `scan_session`, `chat`, `schedules`, `scan_list`, `scan_query`, `scan_record`, `legacy_import`.
+  - `internal/agent/agent.go` 4028 → 1422 LOC, split into `agent_prompt`, `agent_ratepolicy`, `agent_messages`, `agent_guard`.
+
 ## [Unreleased] — Report accuracy vs severity filter (customer feedback)
 
 ### Fixed
