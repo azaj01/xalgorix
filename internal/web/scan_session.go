@@ -358,9 +358,19 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 	}
 
 	if phase := inferCurrentPhase(wsEvt, sess.phases); phase > 0 {
-		wsEvt.CurrentPhase = phase
+		// Monotonic: the phase-progress bar only ever moves forward. The agent
+		// is autonomous and non-linear — it dips back into recon between
+		// exploit attempts — so a last-wins update made the bar bounce
+		// backward (and, before the keyword cleanup above, snap forward on a
+		// single stray request). Reporting the max reached keeps progress
+		// honest and stable.
 		if sess.record != nil {
-			sess.record.CurrentPhase = phase
+			if phase > sess.record.CurrentPhase {
+				sess.record.CurrentPhase = phase
+			}
+			wsEvt.CurrentPhase = sess.record.CurrentPhase
+		} else {
+			wsEvt.CurrentPhase = phase
 		}
 	}
 
@@ -556,24 +566,13 @@ func inferCurrentPhase(evt WSEvent, allowed []int) int {
 		if phaseAllowed(allowed, 7) {
 			return 7
 		}
-	case strings.Contains(args, "idor") || strings.Contains(args, "authorization") ||
-		strings.Contains(args, "role=admin"):
-		if phaseAllowed(allowed, 8) {
-			return 8
-		}
-	case strings.Contains(args, "graphql") || strings.Contains(args, "/api/"):
-		if phaseAllowed(allowed, 9) {
-			return 9
-		}
-	case strings.Contains(args, "cors") || strings.Contains(args, "cookie"):
-		if phaseAllowed(allowed, 4) {
-			return 4
-		}
-	case strings.Contains(args, "login") || strings.Contains(args, "session") ||
-		strings.Contains(args, "agentmail"):
-		if phaseAllowed(allowed, 5) {
-			return 5
-		}
+	// NOTE: we deliberately do NOT infer phases 4/5/8/9 from tool-arg keywords
+	// like "authorization", "cookie", "login", "session", "/api/", or "graphql".
+	// Those tokens appear in ORDINARY requests on almost every target (an authed
+	// scan sends an Authorization header from the first recon request), so they
+	// caused the progress bar to false-jump to a late phase (e.g. "8. IDOR/BAC")
+	// during early reconnaissance. Those phases now advance only via the agent's
+	// own phase narration (parsePhaseMention above), which is a real signal.
 	case strings.Contains(args, "nmap") || strings.Contains(args, "naabu") ||
 		strings.Contains(args, "masscan") || strings.Contains(args, "dig ") ||
 		strings.Contains(args, "nslookup") || strings.Contains(args, "host ") ||

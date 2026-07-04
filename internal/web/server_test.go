@@ -452,14 +452,33 @@ func TestInferCurrentPhase_DoesNotTreatSessionFinishedAsFinalReport(t *testing.T
 	if got := inferCurrentPhase(WSEvent{Type: "queue_finished", Content: "Scan queue ended"}, allowed); got != 22 {
 		t.Fatalf("queue_finished inferred phase %d, want 22", got)
 	}
+	// Ubiquitous HTTP tokens in tool args must NOT infer a late phase. An
+	// authenticated scan sends an "Authorization" header (and hits "/api/")
+	// from the very first recon request, which used to false-jump the progress
+	// bar to "8. IDOR/BAC" during reconnaissance. Regression guard.
 	if got := inferCurrentPhase(WSEvent{
 		Type:     "tool_call",
 		ToolName: "terminal_execute",
 		ToolArgs: map[string]string{
-			"cmd": "test IDOR authorization bypass on account endpoint",
+			"cmd": "curl -H 'Authorization: Bearer x' https://t/api/account",
 		},
+	}, allowed); got != 0 {
+		t.Fatalf("ubiquitous-token tool call inferred phase %d, want 0", got)
+	}
+	// The agent's explicit phase narration IS a real signal and still advances.
+	if got := inferCurrentPhase(WSEvent{
+		Type:    "thinking",
+		Content: "Phase 8: starting IDOR/BAC testing now",
 	}, allowed); got != 8 {
-		t.Fatalf("IDOR tool call inferred phase %d, want 8", got)
+		t.Fatalf("phase narration inferred %d, want 8", got)
+	}
+	// Strong, dedicated tool signals still map (recon tool → phase 1).
+	if got := inferCurrentPhase(WSEvent{
+		Type:     "tool_call",
+		ToolName: "terminal_execute",
+		ToolArgs: map[string]string{"cmd": "subfinder -d example.com"},
+	}, allowed); got != 1 {
+		t.Fatalf("recon tool inferred %d, want 1", got)
 	}
 }
 

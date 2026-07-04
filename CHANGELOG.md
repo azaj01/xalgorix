@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] — Phase-progress accuracy
+
+### Fixed
+- **Phase progress jumped to a late phase during reconnaissance** (e.g. showed "8. IDOR / BAC" at iteration 4 while still fingerprinting). `inferCurrentPhase` mapped ubiquitous HTTP tokens in tool arguments to methodology phases — `authorization` → 8, `cookie` → 4, `login`/`session` → 5, `/api/`/`graphql` → 9 — but those appear in ordinary requests on nearly every target (an authenticated scan sends an `Authorization` header from its first recon request), so the bar false-jumped immediately. Those keyword heuristics are removed; phases without a dedicated tool signal now advance only via the agent's explicit phase narration. Additionally, the reported phase is now **monotonic** (progress only moves forward) so it no longer bounces backward when the autonomous agent revisits recon between exploit attempts. Regression guard in `TestInferCurrentPhase_*`.
+
 ## [Unreleased] — "Exploit-proven" verification state
 
 ### Fixed
