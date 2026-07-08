@@ -192,14 +192,22 @@ if ! go build ./cmd/xalgorix/; then
 fi
 ok "Build successful"
 
-# ─── Step 4: Build release binary ───
-info "Building linux/amd64 release binary..."
+# ─── Step 4: Build release binaries (multi-arch) ───
+# Build both linux/amd64 and linux/arm64 so the one-line installer
+# (install.sh) can serve the right binary for each host. Asset names must
+# match the `${BINARY}-${OS}-${ARCH}` pattern install.sh downloads.
 mkdir -p "$BUILD_DIR"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags "-s -w -X main.version=$NEW_VERSION" \
-    -o "$BUILD_DIR/xalgorix-linux-amd64" \
-    ./cmd/xalgorix/
-ok "Binary built: $BUILD_DIR/xalgorix-linux-amd64"
+RELEASE_ASSETS=()
+for arch in amd64 arm64; do
+    info "Building linux/$arch release binary..."
+    out="$BUILD_DIR/xalgorix-linux-$arch"
+    CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
+        -ldflags "-s -w -X main.version=$NEW_VERSION" \
+        -o "$out" \
+        ./cmd/xalgorix/
+    RELEASE_ASSETS+=("$out")
+    ok "Binary built: $out"
+done
 
 # ─── Step 5: Generate changelog (commits since last tag) ───
 info "Generating changelog..."
@@ -240,7 +248,7 @@ fi
 # ─── Step 9: Create GitHub Release ───
 info "Creating GitHub Release..."
 gh release create "v$NEW_VERSION" \
-    "$BUILD_DIR/xalgorix-linux-amd64" \
+    "${RELEASE_ASSETS[@]}" \
     --title "v$NEW_VERSION" \
     --notes "### Changes
 

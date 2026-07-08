@@ -12,16 +12,19 @@
 [![GitHub forks](https://img.shields.io/github/forks/xalgord/xalgorix?style=for-the-badge&logo=github&color=blue)](https://github.com/xalgord/xalgorix/network/members)
 [![GitHub release](https://img.shields.io/github/v/release/xalgord/xalgorix?style=for-the-badge&logo=github&color=green)](https://github.com/xalgord/xalgorix/releases)
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/xalgord/xalgorix)
+
 </div>
 
-<h1 align="center">Xalgorix — AI Autonomous Penetration Testing</h1>
+<h1 align="center">Xalgorix — Open-source AI pentester that <em>proves</em> vulnerabilities</h1>
 
 <p align="center">
-  <strong>Self-hosted AI pentesting platform</strong> with an LLM-driven agent, browser automation, a 22-phase testing methodology, live WebSocket telemetry, verified findings, and branded PDF reports. Built in Go and TypeScript. Runs on your infrastructure — no cloud dependency, no data leaves your machine.
+  <strong>Most scanners detect. Xalgorix proves.</strong> An autonomous LLM agent works a full pentest methodology, then an <strong>independent verifier re-exploits every finding</strong> before it's reported — so you get proof, not a pile of maybes to triage. Self-hosted, private, and bring-your-own-LLM. Built in Go + TypeScript.
 </p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
+  <a href="#why-xalgorix">Why Xalgorix</a> ·
   <a href="#features">Features</a> ·
   <a href="#use-cases">Use Cases</a> ·
   <a href="https://www.xalgorix.com/">Hosted Cloud</a> ·
@@ -32,6 +35,37 @@
 
 ## Quick Start
 
+**Install (one line):**
+
+```bash
+curl -sSL https://www.xalgorix.com/install | bash
+```
+
+This downloads the prebuilt binary for your platform (Linux amd64/arm64) from the latest release. Then point it at your LLM provider in `~/.xalgorix.env`:
+
+```bash
+XALGORIX_LLM=minimax/MiniMax-M2.7
+XALGORIX_API_KEY=your_provider_api_key
+```
+
+Launch the dashboard and open `http://127.0.0.1:9137`:
+
+```bash
+xalgorix --web
+```
+
+**Or run with Docker — no toolchain needed:**
+
+```bash
+docker run --rm -p 9137:9137 \
+  -e XALGORIX_LLM=minimax/MiniMax-M2.7 \
+  -e XALGORIX_API_KEY=your_provider_api_key \
+  -v xalgorix-data:/data \
+  ghcr.io/xalgord/xalgorix:latest
+```
+
+**Or build from source** (needs Go 1.25+ and Node.js):
+
 ```bash
 git clone https://github.com/xalgord/xalgorix.git
 cd xalgorix
@@ -39,20 +73,8 @@ make build
 sudo install -m 755 build/xalgorix /usr/local/bin/xalgorix
 ```
 
-Create `~/.xalgorix.env`:
-
-```bash
-XALGORIX_LLM=minimax/MiniMax-M2.7
-XALGORIX_API_KEY=your_provider_api_key
-```
-
-Start the dashboard:
-
-```bash
-xalgorix --web
-```
-
-Open `http://127.0.0.1:9137`.
+> [!TIP]
+> Prefer zero setup? A fully managed version runs at [www.xalgorix.com](https://www.xalgorix.com/) — click-to-scan, no install or API keys required.
 
 > [!IMPORTANT]
 > Use Xalgorix only on systems you own or have explicit permission to test.
@@ -155,12 +177,34 @@ If Xalgorix saves you a triage cycle, please **[⭐ star the repo](https://githu
 
 ## Installation
 
-### Requirements
+The fastest paths need no toolchain at all.
+
+### One-line install (prebuilt binary)
+
+```bash
+curl -sSL https://www.xalgorix.com/install | bash
+```
+
+Downloads the latest release binary for your platform (Linux `amd64`/`arm64`) and installs it to `/usr/local/bin` (or `~/.local/bin` without sudo). Override with `XALGORIX_INSTALL_DIR` or pin a version with `XALGORIX_VERSION=vX.Y.Z`.
+
+### Docker
+
+```bash
+docker run --rm -p 9137:9137 \
+  -e XALGORIX_LLM=minimax/MiniMax-M2.7 \
+  -e XALGORIX_API_KEY=your_provider_api_key \
+  -v xalgorix-data:/data \
+  ghcr.io/xalgord/xalgorix:latest
+```
+
+The image bundles Chromium for browser-assisted DAST and persists scan data to the `/data` volume. It binds to `0.0.0.0` inside the container; set `XALGORIX_USERNAME`/`XALGORIX_PASSWORD` before exposing it beyond localhost.
+
+### Requirements (build from source)
 
 | Requirement    | Notes                                                        |
 | -------------- | ------------------------------------------------------------ |
 | Linux          | Primary supported platform.                                  |
-| Go             | `1.24.2` or newer.                                           |
+| Go             | `1.25` or newer.                                             |
 | Node.js + npm  | Required when building the bundled React Web UI from source. |
 | Security tools | Installed on demand only when auto-install is enabled.       |
 

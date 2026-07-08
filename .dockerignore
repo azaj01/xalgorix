@@ -1,0 +1,14 @@
+.git
+.github
+build
+tmp
+research
+docs
+node_modules
+webui/node_modules
+webui/dist
+*.md
+!README.md
+.kiro
+proxies.txt
+*.log
