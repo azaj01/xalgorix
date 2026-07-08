@@ -293,6 +293,12 @@ type ScanRequest struct {
 	// git clone URL or a local path; the agent clones/opens it at scan
 	// start and exposes it via the code_search tool. Empty = blackbox.
 	SourceRepo string `json:"source_repo"`
+	// CodeScan selects a code-first scan (SourceRepo becomes the subject, no
+	// live target URL is required):
+	//   "review"    — source review / SAST, no running target (Option 1).
+	//   "provision" — build & run the source locally, then DAST it (Option 2).
+	// Empty = normal target-driven scan (SourceRepo, if set, augments it).
+	CodeScan string `json:"code_scan"`
 	// ScanContext is a path to operator-supplied context artifact(s) — an
 	// OpenAPI/Swagger spec, HAR capture, or Postman collection (file or dir).
 	// The engine parses them into a seeded attack surface (real endpoints +
@@ -325,6 +331,12 @@ type ScanRequest struct {
 	ResumeSubIndex       int      `json:"-"`
 	ResumeDiscoveryDone  bool     `json:"-"`
 	ResumeOriginalTarget int      `json:"-"`
+
+	// Code-scan internals, resolved server-side from CodeScan in handleScan.
+	// codeScanMode drives the agent's methodology; allowLoopbackPorts is the
+	// per-scan loopback allowlist the scope guard honors for provision scans.
+	codeScanMode       agent.CodeScanMode `json:"-"`
+	allowLoopbackPorts []int              `json:"-"`
 }
 
 // WSEvent is a WebSocket message sent to clients.
@@ -547,6 +559,7 @@ var dashboardRoutes = []string{
 	"/api/upload-instructions",
 	"/api/upload-logo",
 	"/api/upload-context",
+	"/api/upload-source",
 	"/uploads/logos/",
 	"/api/report/",
 	"/api/settings/rate-limit",
@@ -959,6 +972,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/upload-instructions", s.handleUploadInstructions)
 	mux.HandleFunc("/api/upload-logo", s.handleUploadLogo)
 	mux.HandleFunc("/api/upload-context", s.handleUploadContext)
+	mux.HandleFunc("/api/upload-source", s.handleUploadSource)
 	// Serve uploaded logos
 	logosDir := filepath.Join(s.dataDir, "logos")
 	_ = os.MkdirAll(logosDir, 0700)
@@ -1418,8 +1432,18 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Code-first scans: the subject is source (SourceRepo), not a live URL.
+	// "review" needs no target; "provision" synthesizes a loopback target the
+	// agent stands the app up on. resolveCodeScan validates and, on success,
+	// sets req.Targets / req.codeScanMode / req.allowLoopbackPorts.
+	isCodeScan, codeErr := s.resolveCodeScan(&req)
+	if codeErr != "" {
+		http.Error(w, codeErr, http.StatusBadRequest)
+		return
+	}
+
 	if len(req.Targets) == 0 {
-		http.Error(w, "targets required", http.StatusBadRequest)
+		http.Error(w, "targets required (or provide source_repo with code_scan=review|provision)", http.StatusBadRequest)
 		return
 	}
 	normalizeScanRequestActivity(&req)
@@ -1430,7 +1454,9 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	// instance with zero effective targets that the operator must then
 	// clean up. Surface a 400 instead. Mixed requests (at least one allowed
 	// target) proceed and the blocked entries are filtered downstream.
-	if !req.SaveOnly {
+	// Code scans are exempt: a "provision" target is a deliberate loopback
+	// address the scope guard allowlists for this scan only.
+	if !req.SaveOnly && !isCodeScan {
 		allBlocked := true
 		for _, t := range req.Targets {
 			if strings.TrimSpace(t) == "" {
@@ -2334,36 +2360,38 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 // scanSession isolates all per-scan state. Crashes in one session
 // cannot corrupt server-level state or leak into subsequent scans.
 type scanSession struct {
-	id                string
-	target            string
-	parentTarget      string // parent domain for subdomain scans (wildcard mode)
-	scanDir           string
-	cfg               *config.Config
-	agent             *agent.Agent
-	events            chan agent.Event
-	record            *ScanRecord
-	recordTokenOffset int
-	server            *Server
-	instruction       string
-	name              string
-	userInstruction   string
-	severityFilter    []string
-	discordWebhook    string
-	discoveryMode     bool
-	genReport         bool
-	resetState        bool
-	instanceID        string               // parent instance ID for multi-instance tracking
-	scanMode          string               // single, wildcard, dast — persisted so dashboard shows correct mode
-	sctx              *scanctx.ScanContext // per-session isolated state
-	companyName       string               // report branding: company name
-	logoPath          string               // report branding: logo path
-	phases            []int                // selected methodology phases
-	reconMode         string               // active or passive reconnaissance
-	scanIntensity     string               // active or passive testing/scanning
-	targetAuth        string               // per-scan authenticated-scanning material (see ScanRequest.TargetAuth)
-	targetAuthB       string               // per-scan second account for IDOR/BOLA (see ScanRequest.TargetAuthSecondary)
-	sourceRepo        string               // per-scan whitebox source repo/path (see ScanRequest.SourceRepo)
-	scanContext       string               // per-scan attack-surface context path (see ScanRequest.ScanContext)
+	id                 string
+	target             string
+	parentTarget       string // parent domain for subdomain scans (wildcard mode)
+	scanDir            string
+	cfg                *config.Config
+	agent              *agent.Agent
+	events             chan agent.Event
+	record             *ScanRecord
+	recordTokenOffset  int
+	server             *Server
+	instruction        string
+	name               string
+	userInstruction    string
+	severityFilter     []string
+	discordWebhook     string
+	discoveryMode      bool
+	genReport          bool
+	resetState         bool
+	instanceID         string               // parent instance ID for multi-instance tracking
+	scanMode           string               // single, wildcard, dast — persisted so dashboard shows correct mode
+	sctx               *scanctx.ScanContext // per-session isolated state
+	companyName        string               // report branding: company name
+	logoPath           string               // report branding: logo path
+	phases             []int                // selected methodology phases
+	reconMode          string               // active or passive reconnaissance
+	scanIntensity      string               // active or passive testing/scanning
+	targetAuth         string               // per-scan authenticated-scanning material (see ScanRequest.TargetAuth)
+	targetAuthB        string               // per-scan second account for IDOR/BOLA (see ScanRequest.TargetAuthSecondary)
+	sourceRepo         string               // per-scan whitebox source repo/path (see ScanRequest.SourceRepo)
+	scanContext        string               // per-scan attack-surface context path (see ScanRequest.ScanContext)
+	codeScanMode       agent.CodeScanMode   // code-first scan mode (see ScanRequest.CodeScan)
+	allowLoopbackPorts []int                // per-scan loopback allowlist for provision scans (scope-guard exemption)
 
 	// llmClient, when non-nil, is a pre-built llm.Client carrying
 	// a per-scan endpoint resolver derived from the originating

@@ -48,6 +48,36 @@ import (
 type Config struct {
 	BindAddr string
 	Port     int
+
+	// AllowLoopbackPorts is a per-scan allowlist of loopback ports the
+	// caller has deliberately stood a target up on — used by "provision"
+	// code scans (Option 2), where the agent builds the target's source
+	// and runs it on 127.0.0.1:<port>, then pentests it. Only loopback
+	// hosts on exactly these ports are exempted from the "self" verdict;
+	// the dashboard's own listener port is NEVER exempted (even if it
+	// somehow appears here), and the operator's real interface addresses
+	// remain blocked. Empty (the default) preserves the strict behavior:
+	// all loopback is treated as self.
+	AllowLoopbackPorts []int
+}
+
+// loopbackPortAllowed reports whether hostPort (a decimal port string) is in
+// the per-scan loopback allowlist. The dashboard listener port is never
+// allowed, so a provisioned target can never be pointed at the dashboard.
+func (c Config) loopbackPortAllowed(hostPort string) bool {
+	if hostPort == "" || len(c.AllowLoopbackPorts) == 0 {
+		return false
+	}
+	pn, err := strconv.Atoi(hostPort)
+	if err != nil || pn == c.Port {
+		return false
+	}
+	for _, ap := range c.AllowLoopbackPorts {
+		if ap == pn {
+			return true
+		}
+	}
+	return false
 }
 
 // LookupHost is the package-level resolver indirection. Tests
@@ -99,9 +129,19 @@ func IsLocalOrListener(cfg Config, target string) bool {
 		}
 	}
 
+	// Per-scan provisioned-target exception: a "provision" code scan stood
+	// the target app up on a specific loopback port and explicitly opted it
+	// in. Loopback hosts on exactly that port are NOT self. The dashboard
+	// listener port is never in the allowlist (see loopbackPortAllowed), so
+	// this can never expose the operator's own dashboard.
+	allowLoopback := cfg.loopbackPortAllowed(hostPort)
+
 	// Explicit textual matches (fast path) — these always mean "self"
 	lower := strings.ToLower(host)
 	if lower == "localhost" || lower == "0.0.0.0" || lower == "[::1]" || lower == "::1" {
+		if allowLoopback && lower != "0.0.0.0" {
+			return false
+		}
 		return true
 	}
 
@@ -139,7 +179,13 @@ func IsLocalOrListener(cfg Config, target string) bool {
 	// cloud metadata (169.254.169.254), IPv6 ULA, etc. — these may
 	// be legitimate targets on the scanned host's network.
 	for _, ip := range resolvedIPs {
-		if ip.IsLoopback() || ip.IsUnspecified() {
+		if ip.IsLoopback() {
+			if allowLoopback {
+				return false // provisioned target on an opted-in loopback port
+			}
+			return true
+		}
+		if ip.IsUnspecified() {
 			return true
 		}
 	}

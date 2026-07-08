@@ -431,6 +431,35 @@ If the process is listening but the page still does not load remotely, allow TCP
 | Wildcard / multi | Enumerating related targets and scanning the discovered attack surface.         |
 | DAST             | Browser-assisted testing for web apps, auth flows, forms, and runtime behavior. |
 
+## Scan Your Code (no target needed)
+
+Point Xalgorix at a codebase — a Git URL, a local path, or an uploaded zip — and
+it scans the source directly. No deployed URL, no infrastructure to stand up.
+
+```bash
+# Source review (SAST): audit the code, no running target required
+xalgorix --source ./my-app --code-scan review
+
+# Provision + DAST: build & run the app locally, then pentest the running instance
+xalgorix --source https://github.com/org/app.git --code-scan provision
+```
+
+| Code-scan mode | What it does | Verification level |
+| -------------- | ------------ | ------------------ |
+| `review` | Reads the source, traces user input from entry point → dangerous sink, and reports reachable vulnerabilities. No live target. | **Source-verified** — proven reachable in code (clearly labeled as not runtime-exploited). |
+| `provision` | Inspects the repo, builds and runs the app on a loopback port, then runs whitebox-guided DAST against the running instance. Falls back to `review` if the app can't be built. | **Exploit-verified** — reproduced against the running app. |
+
+- `--source` accepts a Git URL (shallow-cloned), a local directory, or a path to
+  an uploaded/extracted archive. In the Web UI / hosted app you can also upload a
+  `.zip` of your codebase (`POST /api/upload-source`).
+- You can still combine a repo **and** a live target for classic whitebox
+  augmentation — that path is unchanged. Code-scan modes are for when the
+  codebase is the whole subject.
+
+> Provision mode runs your app's build/start commands in the agent's sandbox and
+> only pentests the single loopback port it stood the app up on — the dashboard
+> and everything else on the machine stay out of scope.
+
 ## Methodology
 
 Xalgorix organizes autonomous testing into 22 phases.

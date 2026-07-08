@@ -2,6 +2,9 @@ package agent
 
 import (
 	"fmt"
+	"net"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
@@ -1461,6 +1464,44 @@ func (a *Agent) whiteboxGuidance() string {
 	if root == "" {
 		return ""
 	}
+
+	switch a.codeScanMode {
+	case CodeScanReview:
+		// Option 1 — source review / SAST with NO live target. Findings are
+		// statically verified: proven reachable in code, not runtime-exploited.
+		return fmt.Sprintf(`
+## SOURCE REVIEW MODE — code-only assessment (source at %s), NO live target
+There is NO running target to exploit. Do NOT attempt network requests against a target; there is none. Your job is a rigorous source audit that proves vulnerabilities by CODE REACHABILITY. Methodology:
+1. MAP: identify the framework, routing, entry points (route handlers, params, body, headers, CLI args, deserialized input, env/config).
+2. HUNT SINKS: use the code_search tool (sinks=rce|cmdi|sqli|deserialization|ssrf|fileio|template|secrets|auth|redirect|crypto) to locate dangerous calls; grep for hardcoded secrets/keys/tokens.
+3. TRACE REACHABILITY: for each sink, trace BACKWARD to a user-reachable entry point and confirm tainted input reaches the sink WITHOUT sanitization. Record the exact file:line, the route/entry, and the untrusted parameter.
+4. VERIFY STATICALLY: read the surrounding code to rule out mitigations (validation, parameterization, escaping, authz checks). Only report when the data flow is genuinely exploitable.
+5. PRIORITIZE: RCE / command & template injection / insecure deserialization / hardcoded secrets / SSRF / auth bypass / SQLi.
+When you report_vulnerability, set the PoC to the concrete source-level data-flow trace (file:line → sink, the untrusted input, why it's reachable). These are SOURCE-VERIFIED findings — state clearly that runtime exploitation was not performed (no live target). Be precise and conservative: no speculative findings.
+`, root)
+
+	case CodeScanProvision:
+		// Option 2 — build & run from source, then DAST the running instance.
+		port := 0
+		if len(a.activityHosts) > 0 {
+			port = portFromTarget(a.activityHosts[0])
+		}
+		bind := "127.0.0.1"
+		hostport := bind
+		if port > 0 {
+			hostport = fmt.Sprintf("%s:%d", bind, port)
+		}
+		return fmt.Sprintf(`
+## PROVISION + DAST MODE — build the target from source (at %s), run it, then pentest it
+You have the source AND you must stand the app up locally, then attack the RUNNING instance for exploit-verified findings. Methodology:
+1. INSPECT: read README, Dockerfile/compose, package manifest, and start scripts to learn how to build and run this app.
+2. BUILD & RUN: use terminal_execute to install dependencies and start the app. BIND IT TO %s (this exact loopback host:port is the only one you are permitted to reach). Prefer Docker/compose when present; otherwise the native run command. Run it in the background and confirm it's listening (curl -sI http://%s).
+3. WHITEBOX-GUIDED DAST: use code_search to find sinks (sinks=rce|cmdi|sqli|deserialization|ssrf|fileio|template|secrets|auth|redirect|crypto), trace each to a reachable route, then EXPLOIT it against http://%s and prove impact (extracted data, oob_callback hit, state change, command output).
+4. If the app cannot be built/run after reasonable effort, fall back to SOURCE REVIEW: report source-verified findings from the data-flow trace and say runtime provisioning failed.
+Report findings with a working PoC against the running instance (the verifier will re-test). Source proves the bug EXISTS; the live PoC proves it's EXPLOITABLE — get both when the app runs.
+`, root, hostport, hostport, hostport)
+	}
+
 	return fmt.Sprintf(`
 ## WHITEBOX MODE — you have the target's SOURCE CODE (at %s)
 This is your biggest advantage: you can SEE the vulnerable code, not just guess from responses. Methodology:
@@ -1471,4 +1512,23 @@ This is your biggest advantage: you can SEE the vulnerable code, not just guess 
 5. Prioritize: RCE / command & template injection / insecure deserialization / hardcoded secrets / SSRF / auth bypass — the classes source access finds that black-box misses.
 Report findings ONLY with a working live-target PoC (the verifier will re-test).
 `, root)
+}
+
+// portFromTarget extracts the port from a target like "http://127.0.0.1:3000"
+// or "127.0.0.1:3000". Returns 0 when no port is present.
+func portFromTarget(target string) int {
+	t := strings.TrimSpace(target)
+	if u, err := url.Parse(t); err == nil && u.Host != "" {
+		if p := u.Port(); p != "" {
+			if n, err := strconv.Atoi(p); err == nil {
+				return n
+			}
+		}
+	}
+	if _, p, err := net.SplitHostPort(t); err == nil {
+		if n, err := strconv.Atoi(p); err == nil {
+			return n
+		}
+	}
+	return 0
 }

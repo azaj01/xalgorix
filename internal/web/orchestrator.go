@@ -46,10 +46,15 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		}
 	}
 
-	// Filter out local/internal targets to prevent self-scanning
+	// Filter out local/internal targets to prevent self-scanning. A
+	// "provision" code scan opts a specific loopback port into scope
+	// (req.allowLoopbackPorts); isBlockedTargetForScan honors that allowlist
+	// so the deliberately-provisioned 127.0.0.1:<port> target survives the
+	// filter. For all other scans allowLoopbackPorts is empty and this is
+	// identical to isBlockedTarget.
 	var safeTargets []string
 	for _, t := range cleanTargets {
-		if s.isBlockedTarget(t) {
+		if s.isBlockedTargetForScan(t, req.allowLoopbackPorts) {
 			log.Printf("[BLOCKLIST] Skipping blocked target: %s (local/internal IP or self-listener)", t)
 		} else {
 			safeTargets = append(safeTargets, t)
@@ -555,31 +560,33 @@ func (s *Server) runSingleTarget(_ context.Context, scanCfg *config.Config, req 
 	})
 
 	sess := &scanSession{
-		id:              filepath.Base(scanDir),
-		target:          target,
-		scanDir:         scanDir,
-		cfg:             scanCfg,
-		server:          s,
-		instruction:     buildAutonomousInstruction(target, instruction),
-		name:            req.Name,
-		userInstruction: req.Instruction,
-		severityFilter:  req.SeverityFilter,
-		discordWebhook:  req.DiscordWebhook,
-		discoveryMode:   false,
-		genReport:       true,
-		resetState:      !resumed,
-		instanceID:      req.InstanceID,
-		scanMode:        "single",
-		companyName:     req.CompanyName,
-		logoPath:        req.LogoPath,
-		phases:          req.Phases,
-		reconMode:       req.ReconMode,
-		scanIntensity:   req.ScanIntensity,
-		targetAuth:      req.TargetAuth,
-		targetAuthB:     req.TargetAuthSecondary,
-		sourceRepo:      req.SourceRepo,
-		scanContext:     req.ScanContext,
-		llmClient:       s.scanLLMClientForRequest(req, scanCfg),
+		id:                 filepath.Base(scanDir),
+		target:             target,
+		scanDir:            scanDir,
+		cfg:                scanCfg,
+		server:             s,
+		instruction:        buildAutonomousInstruction(target, instruction),
+		codeScanMode:       req.codeScanMode,
+		allowLoopbackPorts: req.allowLoopbackPorts,
+		name:               req.Name,
+		userInstruction:    req.Instruction,
+		severityFilter:     req.SeverityFilter,
+		discordWebhook:     req.DiscordWebhook,
+		discoveryMode:      false,
+		genReport:          true,
+		resetState:         !resumed,
+		instanceID:         req.InstanceID,
+		scanMode:           "single",
+		companyName:        req.CompanyName,
+		logoPath:           req.LogoPath,
+		phases:             req.Phases,
+		reconMode:          req.ReconMode,
+		scanIntensity:      req.ScanIntensity,
+		targetAuth:         req.TargetAuth,
+		targetAuthB:        req.TargetAuthSecondary,
+		sourceRepo:         req.SourceRepo,
+		scanContext:        req.ScanContext,
+		llmClient:          s.scanLLMClientForRequest(req, scanCfg),
 	}
 	s.executeScanSession(sess)
 	if s.instanceInterrupted(req.InstanceID) {
@@ -625,31 +632,33 @@ func (s *Server) runDASTTarget(_ context.Context, scanCfg *config.Config, req Sc
 	})
 
 	sess := &scanSession{
-		id:              filepath.Base(scanDir),
-		target:          target,
-		scanDir:         scanDir,
-		cfg:             scanCfg,
-		server:          s,
-		instruction:     dastInstruction,
-		name:            req.Name,
-		userInstruction: req.Instruction,
-		severityFilter:  req.SeverityFilter,
-		discordWebhook:  req.DiscordWebhook,
-		discoveryMode:   false,
-		genReport:       true,
-		resetState:      !resumed,
-		instanceID:      req.InstanceID,
-		scanMode:        "dast",
-		companyName:     req.CompanyName,
-		logoPath:        req.LogoPath,
-		phases:          req.Phases,
-		reconMode:       req.ReconMode,
-		scanIntensity:   req.ScanIntensity,
-		targetAuth:      req.TargetAuth,
-		targetAuthB:     req.TargetAuthSecondary,
-		sourceRepo:      req.SourceRepo,
-		scanContext:     req.ScanContext,
-		llmClient:       s.scanLLMClientForRequest(req, scanCfg),
+		id:                 filepath.Base(scanDir),
+		target:             target,
+		scanDir:            scanDir,
+		cfg:                scanCfg,
+		server:             s,
+		instruction:        dastInstruction,
+		codeScanMode:       req.codeScanMode,
+		allowLoopbackPorts: req.allowLoopbackPorts,
+		name:               req.Name,
+		userInstruction:    req.Instruction,
+		severityFilter:     req.SeverityFilter,
+		discordWebhook:     req.DiscordWebhook,
+		discoveryMode:      false,
+		genReport:          true,
+		resetState:         !resumed,
+		instanceID:         req.InstanceID,
+		scanMode:           "dast",
+		companyName:        req.CompanyName,
+		logoPath:           req.LogoPath,
+		phases:             req.Phases,
+		reconMode:          req.ReconMode,
+		scanIntensity:      req.ScanIntensity,
+		targetAuth:         req.TargetAuth,
+		targetAuthB:        req.TargetAuthSecondary,
+		sourceRepo:         req.SourceRepo,
+		scanContext:        req.ScanContext,
+		llmClient:          s.scanLLMClientForRequest(req, scanCfg),
 	}
 	s.executeScanSession(sess)
 	if s.instanceInterrupted(req.InstanceID) {
@@ -734,32 +743,34 @@ func (s *Server) runWildcardTarget(_ context.Context, scanCfg *config.Config, re
 		// skipNotesCleanup=true prevents cleanup() from deleting the notes store,
 		// keeping them available for collectSubdomains' Layer 3 (notes fallback).
 		discoverySess := &scanSession{
-			id:               filepath.Base(scanDir),
-			target:           target,
-			scanDir:          scanDir,
-			cfg:              scanCfg,
-			server:           s,
-			instruction:      discoveryInstruction,
-			name:             req.Name,
-			userInstruction:  req.Instruction,
-			severityFilter:   req.SeverityFilter,
-			discordWebhook:   req.DiscordWebhook,
-			discoveryMode:    true,
-			genReport:        false,
-			resetState:       true,
-			instanceID:       req.InstanceID,
-			scanMode:         "wildcard",
-			skipNotesCleanup: true, // preserve notes for subdomain collection
-			companyName:      req.CompanyName,
-			logoPath:         req.LogoPath,
-			phases:           req.Phases,
-			reconMode:        req.ReconMode,
-			scanIntensity:    req.ScanIntensity,
-			targetAuth:       req.TargetAuth,
-			targetAuthB:      req.TargetAuthSecondary,
-			sourceRepo:       req.SourceRepo,
-			scanContext:      req.ScanContext,
-			llmClient:        s.scanLLMClientForRequest(req, scanCfg),
+			id:                 filepath.Base(scanDir),
+			target:             target,
+			scanDir:            scanDir,
+			cfg:                scanCfg,
+			server:             s,
+			instruction:        discoveryInstruction,
+			codeScanMode:       req.codeScanMode,
+			allowLoopbackPorts: req.allowLoopbackPorts,
+			name:               req.Name,
+			userInstruction:    req.Instruction,
+			severityFilter:     req.SeverityFilter,
+			discordWebhook:     req.DiscordWebhook,
+			discoveryMode:      true,
+			genReport:          false,
+			resetState:         true,
+			instanceID:         req.InstanceID,
+			scanMode:           "wildcard",
+			skipNotesCleanup:   true, // preserve notes for subdomain collection
+			companyName:        req.CompanyName,
+			logoPath:           req.LogoPath,
+			phases:             req.Phases,
+			reconMode:          req.ReconMode,
+			scanIntensity:      req.ScanIntensity,
+			targetAuth:         req.TargetAuth,
+			targetAuthB:        req.TargetAuthSecondary,
+			sourceRepo:         req.SourceRepo,
+			scanContext:        req.ScanContext,
+			llmClient:          s.scanLLMClientForRequest(req, scanCfg),
 		}
 		s.executeScanSession(discoverySess)
 		if s.instanceInterrupted(req.InstanceID) {
@@ -985,6 +996,8 @@ func (s *Server) runWildcardTarget(_ context.Context, scanCfg *config.Config, re
 				cfg:                  scanCfg,
 				server:               s,
 				instruction:          scanInstruction,
+				codeScanMode:         req.codeScanMode,
+				allowLoopbackPorts:   req.allowLoopbackPorts,
 				name:                 req.Name,
 				userInstruction:      req.Instruction,
 				severityFilter:       req.SeverityFilter,

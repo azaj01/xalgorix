@@ -3,6 +3,8 @@ package tui
 
 import (
 	"fmt"
+	"net"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -563,9 +565,31 @@ func RunInteractive(cfg *config.Config, targets []string, instruction string) er
 }
 
 // RunCLI runs Xalgorix in non-interactive CLI mode.
-func RunCLI(cfg *config.Config, targets []string, instruction string) {
+func RunCLI(cfg *config.Config, targets []string, instruction string, codeScan string) {
 	fmt.Print(SplashText("0.1.0"))
-	fmt.Printf("  Targets: %s\n", strings.Join(targets, ", "))
+
+	// Code-first scans make the source the subject. "review" runs without a
+	// live target; "provision" builds & runs the source on a loopback port the
+	// scope guard allowlists for this run, then DASTs it.
+	guard := scopeguard.Config{BindAddr: "127.0.0.1", Port: 0}
+	codeMode := agent.CodeScanNone
+	switch strings.ToLower(strings.TrimSpace(codeScan)) {
+	case "review", "sast", "source":
+		codeMode = agent.CodeScanReview
+		if len(targets) == 0 {
+			targets = []string{"code://" + cliCodeLabel(cfg.SourceRepo)}
+		}
+		fmt.Printf("  Source review (no live target): %s\n", cfg.SourceRepo)
+	case "provision", "run", "dast":
+		codeMode = agent.CodeScanProvision
+		port := cliPickLoopbackPort()
+		guard.AllowLoopbackPorts = []int{port}
+		targets = []string{fmt.Sprintf("http://127.0.0.1:%d", port)}
+		fmt.Printf("  Provision + DAST from source: %s (target http://127.0.0.1:%d)\n", cfg.SourceRepo, port)
+	}
+	if codeMode == agent.CodeScanNone {
+		fmt.Printf("  Targets: %s\n", strings.Join(targets, ", "))
+	}
 	if instruction != "" {
 		fmt.Printf("  Instructions: %s\n", instruction)
 	}
@@ -575,7 +599,10 @@ func RunCLI(cfg *config.Config, targets []string, instruction string) {
 	// CLI mode has no dashboard listener; localGuard defaults keep the
 	// loopback / RFC1918 / link-local rejection active without firing
 	// the listener-port rule.
-	ag := agent.NewAgent(cfg, "XalgorixAgent", events, scopeguard.Config{BindAddr: "127.0.0.1", Port: 0})
+	ag := agent.NewAgent(cfg, "XalgorixAgent", events, guard)
+	if codeMode != agent.CodeScanNone {
+		ag.SetCodeScanMode(codeMode)
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -593,4 +620,31 @@ func RunCLI(cfg *config.Config, targets []string, instruction string) {
 	<-done
 
 	fmt.Print(FormatVulnSummary())
+}
+
+// cliPickLoopbackPort returns a free loopback TCP port for a provision scan.
+// Falls back to 8137 if the OS probe fails (the agent will still try to bind).
+func cliPickLoopbackPort() int {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 8137
+	}
+	addr, ok := l.Addr().(*net.TCPAddr)
+	_ = l.Close()
+	if !ok {
+		return 8137
+	}
+	return addr.Port
+}
+
+// cliCodeLabel derives a short label from a repo URL/path for the synthesized
+// "code://<label>" review target.
+func cliCodeLabel(repo string) string {
+	r := strings.TrimSuffix(strings.TrimSpace(repo), "/")
+	r = strings.TrimSuffix(r, ".git")
+	base := filepath.Base(r)
+	if base == "" || base == "." || base == "/" {
+		return "source"
+	}
+	return base
 }

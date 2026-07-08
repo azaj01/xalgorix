@@ -92,8 +92,9 @@ func (s *Server) executeScanSession(sess *scanSession) {
 		agentOpts = append(agentOpts, agent.WithLLMClient(sess.llmClient))
 	}
 	agnt := agent.NewAgent(sess.cfg, "XalgorixAgent", events, scopeguard.Config{
-		BindAddr: s.cfg.BindAddr,
-		Port:     s.port,
+		BindAddr:           s.cfg.BindAddr,
+		Port:               s.port,
+		AllowLoopbackPorts: sess.allowLoopbackPorts,
 	}, agentOpts...)
 	agnt.SetPhaseRestrictions(sess.phases)
 	agnt.SetActivityPolicy(sess.reconMode, sess.scanIntensity, []string{sess.target, sess.parentTarget})
@@ -116,6 +117,9 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	}
 	if sess.scanContext != "" {
 		agnt.SetScanContext(sess.scanContext)
+	}
+	if sess.codeScanMode != agent.CodeScanNone {
+		agnt.SetCodeScanMode(sess.codeScanMode)
 	}
 	sess.agent = agnt
 

@@ -127,8 +127,9 @@ type Agent struct {
 	targetAuth   string
 	targetAuthB  string // optional SECOND account, for horizontal IDOR/BOLA proof
 	sourceRepo   string
-	scanContext  string   // path to OpenAPI/HAR/Postman artifact(s) seeding the attack surface
-	secretValues []string // auth values to redact from emitted telemetry
+	scanContext  string       // path to OpenAPI/HAR/Postman artifact(s) seeding the attack surface
+	codeScanMode CodeScanMode // code-first scan mode (source review / provision), see SetCodeScanMode
+	secretValues []string     // auth values to redact from emitted telemetry
 
 	// scanContextBriefing is built from scanContext in prepareScanEnvironment
 	// and injected as a high-priority user message at the start of Run.
@@ -291,6 +292,7 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 		subAgent.SetTargetAuthSecondary(a.targetAuthB)
 		subAgent.SetSourceRepo(a.sourceRepo)
 		subAgent.SetScanContext(a.scanContext)
+		subAgent.SetCodeScanMode(a.codeScanMode)
 		if a.discoveryMode {
 			subAgent.SetDiscoveryMode(true)
 		}
@@ -1212,6 +1214,28 @@ func (a *Agent) SetTargetAuth(s string) { a.targetAuth = strings.TrimSpace(s) }
 // SetTargetAuthSecondary sets a per-scan SECOND account's credentials (for
 // horizontal IDOR/BOLA proof). Call before Run(). Empty string clears it.
 func (a *Agent) SetTargetAuthSecondary(s string) { a.targetAuthB = strings.TrimSpace(s) }
+
+// CodeScanMode selects a code-first scanning strategy where the primary
+// subject is the target's source (a repo/path), not a live URL.
+type CodeScanMode int
+
+const (
+	// CodeScanNone is the default: black-box or whitebox-augmented testing
+	// against a live target URL.
+	CodeScanNone CodeScanMode = iota
+	// CodeScanReview is source review / SAST with NO live target: the agent
+	// reads the code, traces source→sink→reachable-route, and reports
+	// source-verified findings. Findings are clearly labeled as statically
+	// verified (not runtime-exploited), since there is no running target.
+	CodeScanReview
+	// CodeScanProvision builds and runs the target's source locally (in the
+	// agent's sandbox, on a loopback port the orchestrator allowlists), then
+	// pentests the running instance for exploit-verified findings.
+	CodeScanProvision
+)
+
+// SetCodeScanMode sets the code-first scan strategy. Call before Run().
+func (a *Agent) SetCodeScanMode(m CodeScanMode) { a.codeScanMode = m }
 
 // SetSourceRepo sets the per-scan whitebox source (git URL or local path),
 // overriding the global default. Call before Run().

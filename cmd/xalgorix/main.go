@@ -250,9 +250,21 @@ func main() {
 		return
 	}
 
-	// CLI/TUI mode — target required
-	if len(args.targets) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: at least one --target is required (or use --web for Web UI)\n\n")
+	// A code-first scan (--code-scan review|provision) makes the source the
+	// subject, so --target is not required — but --source (or
+	// XALGORIX_SOURCE_REPO) must supply the codebase.
+	codeScan := strings.ToLower(strings.TrimSpace(args.codeScan))
+	if args.source != "" {
+		cfg.SourceRepo = args.source
+	}
+	if codeScan != "" && strings.TrimSpace(cfg.SourceRepo) == "" {
+		fmt.Fprintf(os.Stderr, "Error: --code-scan requires --source <git URL or local path>\n\n")
+		os.Exit(1)
+	}
+
+	// CLI/TUI mode — a live target is required unless this is a code-first scan.
+	if len(args.targets) == 0 && codeScan == "" {
+		fmt.Fprintf(os.Stderr, "Error: at least one --target is required (or use --code-scan with --source, or --web for Web UI)\n\n")
 		printUsage()
 		os.Exit(1)
 	}
@@ -265,13 +277,15 @@ func main() {
 	}
 
 	// Default to CLI mode (no TUI)
-	tui.RunCLI(cfg, args.targets, args.instruction)
+	tui.RunCLI(cfg, args.targets, args.instruction, codeScan)
 }
 
 type cliArgs struct {
 	targets     []string
 	instruction string
 	model       string
+	source      string // --source: git URL or local path for code-first scans
+	codeScan    string // --code-scan: "review" or "provision"
 	bind        string
 	version     bool
 	update      bool
@@ -299,6 +313,16 @@ func parseArgs() cliArgs {
 			if i+1 < len(osArgs) {
 				i++
 				args.instruction = osArgs[i]
+			}
+		case "--source", "-s":
+			if i+1 < len(osArgs) {
+				i++
+				args.source = osArgs[i]
+			}
+		case "--code-scan":
+			if i+1 < len(osArgs) {
+				i++
+				args.codeScan = osArgs[i]
 			}
 		case "--model", "-m":
 			if i+1 < len(osArgs) {
@@ -344,6 +368,10 @@ func parseArgs() cliArgs {
 				args.targets = append(args.targets, strings.TrimPrefix(osArgs[i], "--target="))
 			} else if strings.HasPrefix(osArgs[i], "--instruction=") {
 				args.instruction = strings.TrimPrefix(osArgs[i], "--instruction=")
+			} else if strings.HasPrefix(osArgs[i], "--source=") {
+				args.source = strings.TrimPrefix(osArgs[i], "--source=")
+			} else if strings.HasPrefix(osArgs[i], "--code-scan=") {
+				args.codeScan = strings.TrimPrefix(osArgs[i], "--code-scan=")
 			} else if strings.HasPrefix(osArgs[i], "--model=") {
 				args.model = strings.TrimPrefix(osArgs[i], "--model=")
 			} else if strings.HasPrefix(osArgs[i], "--port=") {
@@ -383,6 +411,9 @@ func printUsage() {
 	fmt.Println("CLI Flags:")
 	fmt.Println("  -t, --target <url>        Target URL, IP, or local path (repeatable)")
 	fmt.Println("  -i, --instruction <text>  Custom instructions for the agent")
+	fmt.Println("  -s, --source <repo|path>  Codebase to scan (git URL or local path)")
+	fmt.Println("      --code-scan <mode>    Code-first scan: 'review' (SAST, no target)")
+	fmt.Println("                            or 'provision' (build+run source, then DAST)")
 	fmt.Println("  -m, --model <name>        LLM model (overrides XALGORIX_LLM)")
 	fmt.Println("  -v, --version             Show version")
 	fmt.Println("  -up, --update             Update to latest version")
@@ -402,6 +433,8 @@ func printUsage() {
 	fmt.Println("  xalgorix --web --port 8080")
 	fmt.Println("  xalgorix --target https://example.com")
 	fmt.Println("  xalgorix --target https://example.com --instruction \"Focus on auth\"")
+	fmt.Println("  xalgorix --source ./my-app --code-scan review")
+	fmt.Println("  xalgorix --source https://github.com/org/app.git --code-scan provision")
 	fmt.Println()
 	fmt.Println("Service Commands:")
 	fmt.Println("  xalgorix --start      Start Web UI in background")
