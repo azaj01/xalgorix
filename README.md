@@ -64,6 +64,7 @@ Open `http://127.0.0.1:9137`.
 
 - [Quick Start](#quick-start)
 - [Overview](#overview)
+- [Why Xalgorix](#why-xalgorix)
 - [Use Cases](#use-cases)
 - [Screenshots](#screenshots)
 - [Features](#features)
@@ -94,6 +95,33 @@ Xalgorix is a self-hosted AI penetration testing platform for authorized securit
 Unlike cloud-only DAST scanners, Xalgorix runs entirely on your machine. You bring your own LLM provider (OpenAI, Anthropic, DeepSeek, Gemini, Groq, Ollama, MiniMax) and control the model, reasoning effort, rate limits, and proxy configuration. No scan data, API keys, or target information leaves your infrastructure.
 
 The default experience is the Web UI. From one local dashboard you can start scans, monitor active runs, inspect findings, configure model/provider settings, manage environment variables, generate branded PDF reports, and delete or resume historical scans.
+
+## Why Xalgorix
+
+Most scanners **detect**. Xalgorix **proves**. An autonomous agent works through a 22-phase methodology, then an independent verifier re-tests every candidate finding before it is reported — so you get exploit-verified results with evidence, not a wall of "maybes" to triage.
+
+- 🧠 **An AI agent, not a template engine** — reasons about auth flows, business logic, IDOR/BOLA, and chained exploits that signature scanners miss.
+- ✅ **Exploit-verified findings** — a separate verifier independently reproduces each finding; inconclusive ones are flagged for review, never dressed up as confirmed.
+- 🔒 **Self-hosted and private** — runs on your machine with your own LLM key; no target data, keys, or findings leave your infrastructure.
+- 🧩 **Bring your own LLM** — OpenAI, Anthropic, DeepSeek, Gemini, Groq, Ollama, or MiniMax. You control model, reasoning effort, and cost.
+- 📄 **Audit-ready reports** — branded PDFs with CVSS scores, proof-of-concept, and remediation.
+
+### How it compares
+
+|                                              | **Xalgorix**             | Template scanners (e.g. Nuclei) | Crawling scanners (e.g. OWASP ZAP) | Commercial DAST        |
+| -------------------------------------------- | ------------------------ | ------------------------------- | ---------------------------------- | ---------------------- |
+| Approach                                     | Autonomous AI agent      | Signatures / templates          | Spider + active rules              | Signatures + heuristics |
+| Business logic / IDOR / auth-bypass coverage | ✅                       | Limited                         | Limited                            | Partial                |
+| Exploit-verified (proves impact)             | ✅ independent verifier  | ❌                              | ❌                                 | Partial                |
+| False-positive load                          | Low (proven)             | Template-dependent              | High                               | Medium                 |
+| Self-hosted / data stays local               | ✅                       | ✅                              | ✅                                 | Usually cloud          |
+| Bring-your-own LLM                           | ✅                       | —                               | —                                  | ❌                     |
+| Branded PDF reports                          | ✅                       | ❌                              | Basic                              | ✅                     |
+| Cost                                         | Open source + your LLM   | Free                            | Free                               | $$$                    |
+
+> Directional comparison — Nuclei and ZAP are excellent at what they do. Xalgorix adds the reasoning-heavy discovery and exploit-verification layer on top.
+
+If Xalgorix saves you a triage cycle, please **[⭐ star the repo](https://github.com/xalgord/xalgorix)** — it genuinely helps others find it.
 
 ## Use Cases
 
