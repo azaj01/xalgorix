@@ -104,7 +104,7 @@ export class HttpError extends Error {
 
 async function http<T>(
   path: string,
-  init?: RequestInit & { json?: unknown },
+  init?: RequestInit & { json?: unknown; timeoutMs?: number },
 ): Promise<T> {
   const headers: HeadersInit = {
     Accept: "application/json",
@@ -115,6 +115,18 @@ async function http<T>(
     body = JSON.stringify(init.json);
     (headers as Record<string, string>)["Content-Type"] = "application/json";
   }
+
+  // Optional client-side timeout. Without this a hung/unreachable backend
+  // (e.g. an origin returning a Cloudflare 5xx after the connection, or a
+  // stalled upload) leaves the request pending forever — the UI just spins.
+  // When timeoutMs is set we abort and surface a clear, catchable error.
+  const timeoutMs = init?.timeoutMs;
+  const controller = timeoutMs ? new AbortController() : null;
+  const timer =
+    controller && timeoutMs
+      ? setTimeout(() => controller.abort(), timeoutMs)
+      : null;
+
   let res: Response;
   try {
     res = await fetch(path, {
@@ -122,17 +134,25 @@ async function http<T>(
       ...init,
       headers,
       body,
+      ...(controller ? { signal: controller.signal } : {}),
     });
   } catch (err) {
     // Network-level failure: server unreachable, DNS, CORS, abort. Surface
     // it as an HttpError with status 0 so callers can distinguish it from
     // a real HTTP response.
+    const aborted = controller?.signal.aborted;
     throw new HttpError({
       status: 0,
-      statusText: "Network error",
-      body: err instanceof Error ? err.message : String(err),
+      statusText: aborted ? "Request timed out" : "Network error",
+      body: aborted
+        ? `The server did not respond within ${Math.round((timeoutMs ?? 0) / 1000)}s. It may be overloaded or unreachable.`
+        : err instanceof Error
+          ? err.message
+          : String(err),
       data: null,
     });
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 
   if (!res.ok) {
@@ -248,6 +268,7 @@ export const api = {
     return http<{ path: string; filename: string }>("/api/upload-logo", {
       method: "POST",
       body,
+      timeoutMs: 120_000,
     });
   },
   uploadContext: (file: File) => {
@@ -262,6 +283,10 @@ export const api = {
     }>("/api/upload-context", {
       method: "POST",
       body,
+      // APK/HAR parsing can take a little while, but a KB spec is instant —
+      // if we're past this the backend is wedged, so fail with a clear error
+      // instead of spinning forever.
+      timeoutMs: 120_000,
     });
   },
   stopAll: () => http<{ status: string }>("/api/stop", { method: "POST" }),
