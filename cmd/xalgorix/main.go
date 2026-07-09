@@ -811,6 +811,12 @@ func touchAutoUpdateMarker() {
 
 // autoUpdate checks GitHub for a newer release and self-updates if found.
 func autoUpdate() {
+	// Opt-out for immutable/managed deployments (containers, packaged installs).
+	// In a container the binary must NOT rewrite itself — updates come from
+	// pulling a new image tag — so the Docker image sets XALGORIX_NO_AUTO_UPDATE=1.
+	if v := strings.TrimSpace(os.Getenv("XALGORIX_NO_AUTO_UPDATE")); v == "1" || strings.EqualFold(v, "true") {
+		return
+	}
 	if autoUpdateThrottled() {
 		return
 	}

@@ -134,11 +134,18 @@ RUN /root/go/bin/nuclei -update-templates >/dev/null 2>&1 || echo "WARN: nuclei 
 ENV XALGORIX_BIND=0.0.0.0 \
     XALGORIX_BROWSER_PATH=/usr/bin/chromium \
     XALGORIX_DATA_DIR=/data \
-    XALGORIX_ALLOW_AUTO_INSTALL=1
+    XALGORIX_ALLOW_AUTO_INSTALL=1 \
+    XALGORIX_NO_AUTO_UPDATE=1
+
+# Entrypoint generates dashboard credentials when none are supplied (the image
+# binds 0.0.0.0, which the engine won't do without auth) so a plain
+# `docker run` starts cleanly and securely.
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 RUN mkdir -p /data
 VOLUME ["/data"]
 EXPOSE 9137
 
-ENTRYPOINT ["xalgorix"]
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["--web"]
