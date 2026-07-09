@@ -8,6 +8,20 @@
 # XALGORIX_USERNAME + XALGORIX_PASSWORD (or XALGORIX_PASSWORD_HASH).
 set -euo pipefail
 
+# Persist dashboard-configured settings on the /data volume. The engine writes
+# runtime settings (LLM model/key, integrations, etc.) to ~/.xalgorix.env
+# (=/root/.xalgorix.env). Symlinking it onto /data means anything you set under
+# Settings survives `docker run --rm` / container recreation, not just restarts.
+mkdir -p /data
+if [ ! -e /data/.xalgorix.env ]; then
+  if [ -f /root/.xalgorix.env ] && [ ! -L /root/.xalgorix.env ]; then
+    mv /root/.xalgorix.env /data/.xalgorix.env
+  else
+    : >/data/.xalgorix.env
+  fi
+fi
+ln -sf /data/.xalgorix.env /root/.xalgorix.env
+
 bind="${XALGORIX_BIND:-0.0.0.0}"
 
 # Is the bind address loopback (no auth required by the engine)?

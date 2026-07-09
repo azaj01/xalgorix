@@ -60,10 +60,18 @@ xalgorix --web
 
 ```bash
 docker run --rm -p 9137:9137 \
-  -e XALGORIX_LLM=minimax/MiniMax-M3 \
-  -e XALGORIX_API_KEY=your_provider_api_key \
   -v xalgorix-data:/data \
-  ghcr.io/xalgord/xalgorix:latest
+  xalgord/xalgorix:latest
+```
+
+Open `http://localhost:9137`. You **don't need an LLM key to start** — the dashboard launches without one; set the model + API key under **Settings → LLM** (it persists to the `/data` volume). If you don't pass `XALGORIX_USERNAME`/`XALGORIX_PASSWORD`, a random admin password is generated and printed to the container logs on first run.
+
+**Easiest — Docker Compose** (maps the port + a persistent volume for you):
+
+```bash
+curl -sSLO https://raw.githubusercontent.com/xalgord/xalgorix/main/docker-compose.yml
+docker compose up -d
+docker compose logs -f   # shows the generated admin password on first start
 ```
 
 The image ships an extensive offensive-security toolset preinstalled (nmap, nuclei, httpx, subfinder, katana, ffuf, gobuster, sqlmap, masscan, dalfox, feroxbuster, and more) **and** keeps every package manager (apt, go, cargo, pipx, npm) available so the agent can still auto-install anything missing at runtime. It runs as root inside the container by design — treat the container as a disposable, network-isolated scanning sandbox and never expose the dashboard without auth. (amd64 image; the installer above covers arm64.)

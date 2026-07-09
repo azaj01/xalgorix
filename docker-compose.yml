@@ -1,0 +1,29 @@
+# Xalgorix — one-command run. Publishes the dashboard on http://localhost:9137
+# and persists all data (scans, reports, and settings) to a named volume.
+#
+#   docker compose up -d
+#   docker compose logs -f      # shows the generated admin password on first run
+#
+# You do NOT need an LLM key to start — the dashboard launches without one and
+# you can configure the model + API key under Settings → LLM (it persists to the
+# volume). Set the env vars below only if you'd rather bake them in.
+services:
+  xalgorix:
+    image: xalgord/xalgorix:latest
+    # Or build locally instead of pulling:  build: .
+    ports:
+      - "9137:9137"
+    # Uncomment to bake in credentials / LLM (all optional). If you omit the
+    # login, a random admin password is generated and printed to the logs on
+    # first start. The LLM can be set here or under Settings → LLM.
+    # environment:
+    #   XALGORIX_USERNAME: admin
+    #   XALGORIX_PASSWORD: change-me-please
+    #   XALGORIX_LLM: minimax/MiniMax-M3
+    #   XALGORIX_API_KEY: your_provider_api_key
+    volumes:
+      - xalgorix-data:/data
+    restart: unless-stopped
+
+volumes:
+  xalgorix-data:
