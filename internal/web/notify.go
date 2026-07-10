@@ -10,11 +10,23 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/safe"
 	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
+)
+
+// The finding notification body is authored once in Discord Markdown
+// (**bold**, `code`, ```fenced```) and reused for Telegram. Telegram's HTML
+// parse_mode doesn't understand Markdown, so these convert the Discord markers
+// to Telegram HTML tags. Fenced blocks are matched before inline code so a
+// ``` block isn't chopped up by the single-backtick rule.
+var (
+	tgFencedCodeRe = regexp.MustCompile("(?s)```[a-zA-Z0-9_-]*\\n?(.*?)```")
+	tgInlineCodeRe = regexp.MustCompile("`([^`\n]+?)`")
+	tgBoldRe       = regexp.MustCompile(`\*\*([^*]+?)\*\*`)
 )
 
 // sendDiscord sends a rich embed message to the configured Discord webhook.
@@ -206,7 +218,22 @@ func telegramFormat(title, description string) string {
 	if description == "" {
 		return "<b>" + htmlEscape(title) + "</b>"
 	}
-	return "<b>" + htmlEscape(title) + "</b>\n" + htmlEscape(description)
+	return "<b>" + htmlEscape(title) + "</b>\n" + discordMarkdownToTelegramHTML(description)
+}
+
+// discordMarkdownToTelegramHTML converts the Discord-flavored Markdown used in
+// notification bodies (**bold**, `inline code`, ```fenced blocks```) into the
+// subset of HTML Telegram's HTML parse_mode supports (<b>, <code>, <pre>).
+// Text is HTML-escaped FIRST so finding content can't inject markup; the
+// Markdown markers (*, `) are not HTML-special, so escaping never disturbs
+// them. Without this, Telegram renders the raw "**", "`" characters literally.
+func discordMarkdownToTelegramHTML(s string) string {
+	s = htmlEscape(s)
+	// Fenced code first (so its contents aren't mangled by the inline rule).
+	s = tgFencedCodeRe.ReplaceAllString(s, "<pre>$1</pre>")
+	s = tgInlineCodeRe.ReplaceAllString(s, "<code>$1</code>")
+	s = tgBoldRe.ReplaceAllString(s, "<b>$1</b>")
+	return s
 }
 
 // htmlEscape escapes the four characters Telegram's HTML parse_mode
