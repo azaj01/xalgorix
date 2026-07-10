@@ -31,6 +31,57 @@ func TestCheckFalsePositive_MissingHeaders(t *testing.T) {
 	}
 }
 
+func TestCheckFalsePositive_UsernameEnumeration(t *testing.T) {
+	tests := []struct {
+		name       string
+		title      string
+		desc       string
+		severity   string
+		proof      string
+		wantReject bool
+	}{
+		{
+			"differential auth responses at high → rejected",
+			"Username Enumeration via Differential Auth Responses on Login",
+			"The endpoint returns distinct error messages for existing vs non-existent accounts.",
+			"high", "observed different JSON error for valid vs invalid username", true,
+		},
+		{
+			"user enumeration medium without PII → rejected",
+			"User Enumeration on /api/auth/login",
+			"Observable response discrepancy reveals valid usernames.",
+			"medium", "root, admin, support enumerated by response timing", true,
+		},
+		{
+			"enumeration that leaks PII → allowed",
+			"Account Enumeration exposing customer PII",
+			"The lookup endpoint returns the account's full name, phone number, and home address.",
+			"high", "enumerated account returned phone number and home address in the JSON body", false,
+		},
+		{
+			"enumeration chained to account takeover → allowed",
+			"Username Enumeration enabling account takeover",
+			"Enumerated accounts combined with the reset flaw to reset another user's password.",
+			"high", "used the valid username to trigger account takeover via the reset endpoint", false,
+		},
+		{
+			"enumeration reported as info → not rejected",
+			"Username Enumeration via Differential Error Responses",
+			"Login reveals whether an account exists.",
+			"info", "", false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := checkFalsePositive(tt.title, tt.desc, tt.severity, tt.proof)
+			gotReject := result != ""
+			if gotReject != tt.wantReject {
+				t.Errorf("wantReject=%v gotReject=%v (msg=%s)", tt.wantReject, gotReject, result)
+			}
+		})
+	}
+}
+
 func TestCheckFalsePositive_VersionDisclosure(t *testing.T) {
 	tests := []struct {
 		title      string
