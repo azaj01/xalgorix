@@ -88,6 +88,18 @@ sudo install -m 755 build/xalgorix /usr/local/bin/xalgorix
 > [!TIP]
 > Prefer zero setup? A fully managed version runs at [www.xalgorix.com](https://www.xalgorix.com/) — click-to-scan, no install or API keys required.
 
+### Review pull requests automatically — free GitHub App
+
+Want a security review on every pull request with zero setup? Install the **[Xalgorix GitHub App](https://github.com/apps/xalgorix)**. It reads each PR's diff and comments a security review — injection, broken auth/IDOR, SSRF, secrets, unsafe patterns — right on the pull request. Updates in place on new commits, and you can comment **`@xalgorix review`** to re-run on demand. No workflow file, no API key, no account — and it's free.
+
+<div align="center">
+
+[**➕ Add Xalgorix to GitHub →**](https://github.com/apps/xalgorix/installations/new)
+
+</div>
+
+For merge gating and full exploit-verified pentests in CI, use the [hosted scanner](https://www.xalgorix.com/) or the GitHub Action.
+
 > [!IMPORTANT]
 > Use Xalgorix only on systems you own or have explicit permission to test.
 

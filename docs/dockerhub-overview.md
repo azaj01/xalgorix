@@ -30,6 +30,12 @@ Then open **http://127.0.0.1:9137**.
 
 ---
 
+## Reviewing GitHub pull requests (free, no install)
+
+Prefer security review straight on your PRs? Install the **[Xalgorix GitHub App](https://github.com/apps/xalgorix/installations/new)** — it comments a security review on each pull request's diff (injection, broken auth/IDOR, SSRF, secrets, unsafe patterns), updates in place on new commits, and re-runs when you comment `@xalgorix review`. No workflow file, API key, or account required. This container image is for the deeper, self-hosted exploit-verified pentest.
+
+---
+
 ## What's inside
 
 An extensive toolset ships preinstalled — `nmap`, `nuclei`, `httpx`, `subfinder`, `dnsx`, `naabu`, `katana`, `ffuf`, `gobuster`, `dalfox`, `feroxbuster`, `sqlmap`, `masscan`, `nikto`, `whatweb`, `hydra`, SecLists, and the broader Kali web/vulnerability/fuzzing/passwords metapackages — plus Chromium for browser-assisted DAST. The Go, Rust (cargo), Python (pipx/pip), and npm toolchains stay in the image, so the agent can install anything not baked in, on demand.
