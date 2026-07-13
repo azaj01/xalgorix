@@ -203,13 +203,26 @@ func (r *Registry) Execute(name string, args map[string]string) (Result, error) 
 		delete(localArgs, "_raw")
 	}
 
-	// Validate required parameters
+	// Validate required parameters. Collect ALL missing ones and report them in
+	// a single error, rather than failing on the first — otherwise a tool with
+	// several required params (e.g. report_vulnerability) makes the agent
+	// resubmit once per missing field, burning iterations on a thrash loop.
+	var missing []string
 	for _, p := range tool.Parameters {
 		if p.Required {
 			if v, exists := localArgs[p.Name]; !exists || strings.TrimSpace(v) == "" {
-				return Result{}, fmt.Errorf("missing required parameter '%s' for tool '%s'", p.Name, name)
+				missing = append(missing, p.Name)
 			}
 		}
+	}
+	if len(missing) > 0 {
+		if len(missing) == 1 {
+			return Result{}, fmt.Errorf("missing required parameter '%s' for tool '%s'", missing[0], name)
+		}
+		return Result{}, fmt.Errorf(
+			"missing required parameters for tool '%s': %s — provide ALL of them in a single call (one <parameter=NAME>…</parameter> per field)",
+			name, strings.Join(missing, ", "),
+		)
 	}
 
 	result, err := tool.Execute(localArgs)

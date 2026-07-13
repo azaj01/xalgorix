@@ -101,6 +101,42 @@ func TestExecute_MissingRequiredParam(t *testing.T) {
 	}
 }
 
+// TestExecute_BatchesMissingRequiredParams verifies that when SEVERAL required
+// params are missing, a single error lists ALL of them (so the agent fixes
+// them in one resubmit instead of thrashing one field per iteration — the
+// report_vulnerability loop).
+func TestExecute_BatchesMissingRequiredParams(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&Tool{
+		Name: "report",
+		Parameters: []Parameter{
+			{Name: "title", Required: true},
+			{Name: "severity", Required: true},
+			{Name: "description", Required: true},
+			{Name: "impact", Required: false},
+		},
+		Execute: func(_ map[string]string) (Result, error) {
+			t.Error("Execute should not run while required params are missing")
+			return Result{}, nil
+		},
+	})
+
+	// Provide only title → severity + description still missing.
+	_, err := r.Execute("report", map[string]string{"title": "SQLi"})
+	if err == nil {
+		t.Fatal("expected error when required params missing")
+	}
+	msg := err.Error()
+	for _, want := range []string{"severity", "description"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error should list missing %q; got: %s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "title") {
+		t.Errorf("error should not list the provided 'title'; got: %s", msg)
+	}
+}
+
 // TestSchemaXML_EscapesUnsafeChars is the regression for the XML-injection
 // risk flagged in the review: a skill or tool with "<", ">", "&", or quote
 // characters in its name/description must produce well-formed XML.
