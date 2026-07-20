@@ -1657,6 +1657,11 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	// Kill all spawned processes as a safety net
 	terminal.KillAllProcesses()
 
+	// A global user stop is terminal for every queue — clear all persisted
+	// resume files so the dashboard queue counter clears and nothing is
+	// auto-resumed on the next start (issue #239).
+	s.clearQueueState()
+
 	s.broadcast(WSEvent{Type: "stopped", Content: "All instances stopped by user"})
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "stopped"})
@@ -2236,6 +2241,12 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		inst.mu.Unlock()
+
+		// Drop the persisted resume file now so the dashboard's queue counter
+		// clears immediately and the startup auto-resume never replays it. A
+		// user stop is terminal (non-resumable); the runMultiScan defer also
+		// clears it on exit, so this is just the prompt path (issue #239).
+		s.clearQueueState(instanceID)
 
 		// Broadcast stop to clients watching this instance
 		s.broadcastToInstance(instanceID, WSEvent{Type: "stopped", Content: "Instance stopped by user"})
@@ -3063,9 +3074,31 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			seenInstanceIDs[id] = true
-			if inst := s.instances[id]; inst != nil && inst.cancel != nil {
-				inst.cancel()
+			// Deleting a scan must HALT it, not just drop the map entry. Mark
+			// the instance stopped (so runMultiScan's queue loop breaks on its
+			// captured pointer), cancel the in-flight target's context, and
+			// stop the agent so the current LLM/tool loop aborts immediately.
+			// Without this the queue kept scanning in the background and
+			// consuming tokens after deletion (issue #239).
+			if inst := s.instances[id]; inst != nil {
+				inst.mu.Lock()
+				if inst.Status == "running" || inst.Status == "pending" || inst.Status == "paused" {
+					inst.Status = "stopped"
+					inst.StopReason = "user_deleted"
+					inst.FinishedAt = time.Now().Format(time.RFC3339Nano)
+				}
+				if inst.cancel != nil {
+					inst.cancel()
+				}
+				if inst.agent != nil {
+					inst.agent.Stop()
+				}
+				inst.mu.Unlock()
 			}
+			// Remove the persisted resume file so the startup auto-resume
+			// goroutine never replays this queue (previously the only fix was
+			// wiping the whole .xalgorix data dir).
+			s.clearQueueState(id)
 			delete(s.instances, id)
 		}
 		s.instancesMu.Unlock()

@@ -391,7 +391,24 @@ func (s *Server) instanceRunStatus(instanceID string) (string, string) {
 }
 
 func (s *Server) instanceInterrupted(instanceID string) bool {
-	status, _ := s.instanceRunStatus(instanceID)
+	if instanceID == "" {
+		return false
+	}
+	s.instancesMu.RLock()
+	inst := s.instances[instanceID]
+	s.instancesMu.RUnlock()
+	// A missing instance means it was DELETED mid-run (DELETE /api/scans/{id}).
+	// runMultiScan registers the instance in the map before any target is
+	// scanned and never removes it on normal completion, so "not in the map"
+	// reliably means "deleted". The running queue / subdomain loops must treat
+	// deletion as a hard stop — otherwise they keep scanning the rest of the
+	// queue and burning tokens after the user removed the scan (issue #239).
+	if inst == nil {
+		return true
+	}
+	inst.mu.RLock()
+	status := inst.Status
+	inst.mu.RUnlock()
 	return isInterruptedInstanceStatus(status)
 }
 
