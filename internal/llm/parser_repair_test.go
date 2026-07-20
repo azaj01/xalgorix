@@ -44,6 +44,27 @@ func TestParseToolCalls_RepairsMalformedOpenTag(t *testing.T) {
 			wantVal:  "https://x",
 		},
 		{
+			name:     "stray quote before angle bracket (missing leading <)",
+			input:    "function=terminal_execute\">\n<parameter=command>id</parameter>\n</function>",
+			wantName: "terminal_execute",
+			wantKey:  "command",
+			wantVal:  "id",
+		},
+		{
+			name:     "stray quote before angle bracket, bare equals",
+			input:    "=terminal_execute\">\n<parameter=command>whoami</parameter></function>",
+			wantName: "terminal_execute",
+			wantKey:  "command",
+			wantVal:  "whoami",
+		},
+		{
+			name:     "quoted name",
+			input:    "<function=\"send_request\"><parameter=method>GET</parameter></function>",
+			wantName: "send_request",
+			wantKey:  "method",
+			wantVal:  "GET",
+		},
+		{
 			name:     "correct tag still parses (idempotent)",
 			input:    "<function=finish>\n<parameter=summary>done</parameter>\n</function>",
 			wantName: "finish",

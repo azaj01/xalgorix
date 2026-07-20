@@ -30,19 +30,22 @@ var (
 	invokeOpen   = regexp.MustCompile(`<invoke\s+name=["']([^"']+)["']>`)
 	funcCallsTag = regexp.MustCompile(`</?function_calls>`)
 
-	// Recover malformed tool-call OPEN tags. Some models intermittently drop
-	// the leading "<" — or the whole "<function" — from the opening tag while
-	// still emitting a well-formed body and "</function>", e.g.
-	//     function=terminal_execute><parameter=command>id</parameter></function>
-	//     =send_request><parameter=method>GET</parameter></function>
-	// The strict fnRegex never matched these, so the call was counted as a
-	// "no tool call" response; 15 of those in a row force-stops the whole scan
-	// (observed in production). Requiring a "<parameter" or "</function>"
-	// immediately after the ">" makes this a specific, low-false-positive
-	// signal — ordinary prose does not contain "=word><parameter". Correct
-	// "<function=name>" tags also match this pattern and are rewritten to the
-	// identical canonical form, so the repair is idempotent.
-	repairFnOpenRe = regexp.MustCompile(`(?s)<?(?:function)?\s*=\s*([A-Za-z_][A-Za-z0-9_-]*)\s*>(\s*(?:<parameter|</function>))`)
+	// Recover malformed tool-call OPEN tags. Some models intermittently mangle
+	// the opening tag while still emitting a well-formed body and "</function>".
+	// Observed variants (all counted as "no tool call" by the strict fnRegex):
+	//     function=terminal_execute><parameter=command>id</parameter></function>   (no leading "<")
+	//     =send_request><parameter=method>GET</parameter></function>               (no "<function")
+	//     function=terminal_execute"><parameter=command>id</parameter></function>  (stray quote before ">")
+	//     <function="terminal_execute"><parameter=...>                             (quoted name)
+	// 15 such responses in a row force-stops the whole scan (observed in
+	// production against bitbank.cc). This repair rebuilds the canonical
+	// "<function=name>" form, tolerating an optional leading "<"/"<function",
+	// optional surrounding quotes, and stray quotes/whitespace before the ">".
+	// Requiring a "<parameter" or "</function>" immediately after makes it a
+	// specific, low-false-positive signal (ordinary prose has no
+	// "=word><parameter"), and correct "<function=name>" tags rewrite to the
+	// identical form, so it is idempotent.
+	repairFnOpenRe = regexp.MustCompile(`(?s)<?(?:function)?\s*=\s*["']?([A-Za-z_][A-Za-z0-9_-]*)["'\s]*>(\s*(?:<parameter|</function>))`)
 
 	// Normalize quotes around = in tags: <function = "name"> → <function=name>
 	stripQuotesRe = regexp.MustCompile(`<(function|parameter)\s*=\s*["']?([^>"']+?)["']?\s*>`)
