@@ -265,6 +265,7 @@ func Register(r *tools.Registry) {
 1. You MUST have already EXPLOITED this vulnerability before calling this tool.
 2. You MUST provide exploitation_proof showing concrete evidence (extracted data, reflected payload, command output, callback, timing proof).
 3. Reports without exploitation proof for severity >= medium will be REJECTED — exploit first, then report.
+3b. MANDATORY CONTROL/BASELINE TEST for any "bypass", "desync", or "differential" claim: before reporting, prove the behavior does NOT already happen WITHOUT your exploit. Run the baseline and put BOTH results in exploitation_proof. Examples: a Host-header/deployment "bypass" → hit production directly with no Host trick; if the response is identical it is PUBLIC, not a bypass. Request smuggling → resend the two requests with NO CL/TE headers; two responses then = pipelining, not desync. OAuth "state CSRF" → the authorize endpoint echoing state=test is by design (state is client-validated); complete the callback. If baseline == exploit-result, it is a FALSE POSITIVE — do not report.
 4. Do NOT report missing headers, version disclosure, or scanner-only findings as vulnerabilities — those are INFO at best.
 5. Duplicate checks are scoped to the current scan run only. If the same issue was found in a previous scan and is still exploitable now, report it again for this scan.
 6. SEVERITY MUST MATCH CVSS SCORE per HackerOne standards:
@@ -891,6 +892,183 @@ func checkFalsePositive(title, description, severity, proof string) string {
 	for _, kw := range traceKeywords {
 		if strings.Contains(lower, kw) {
 			return "❌ REJECTED: TRACE/OPTIONS methods enabled is INFORMATIONAL. Modern browsers block cross-site TRACE (XST), making this unexploitable. Do not report."
+		}
+	}
+
+	// Pattern 11a: HTTP request smuggling / desync claimed without a genuine
+	// desync proof. The canonical automated false positive: HTTP/1.1
+	// PIPELINING (two responses on one connection) plus a redirect engine
+	// ECHOING the request path into the Location header, misread as a
+	// CL.TE/TE.CL desync + cache poisoning. Real proof is a DIFFERENTIAL — a
+	// timing hang vs. an instant baseline, OR a paired follow-up/victim request
+	// on a SEPARATE connection that gets corrupted/redirected/delayed or
+	// receives the smuggled prefix. "Two responses", a canary reflected in
+	// Location, and `x-cache: HIT` on a redirect are NOT proof. Fires only at
+	// medium+ and only when the proof shows none of the differential signals,
+	// so a genuine desync (which cites timing/victim evidence) passes through.
+	smugglingKeywords := []string{
+		"request smuggling", "http smuggling", "smuggl", "desync", "desynchron",
+		"cl.te", "te.cl", "cl-te", "te-cl", "te.te", "http/1.1 desync", "http desync",
+		"request queue poison", "request tunnel", "h2.cl", "h2.te",
+	}
+	isSmuggling := false
+	for _, kw := range smugglingKeywords {
+		if strings.Contains(lower, kw) {
+			isSmuggling = true
+			break
+		}
+	}
+	if isSmuggling && isHighSev {
+		lowerProof := strings.ToLower(proof)
+		// Specific phrases only — avoid generic tokens like "baseline" or
+		// "socket" that appear in canaries/prose and would wave a FP through.
+		desyncSignals := []string{
+			// (a) timing differential — a hang vs. an instant baseline
+			"time-based", "time based", "timing differential", "hang", "hung",
+			"delayed", "timed out", "time out", "sleep(", "pg_sleep", "waitfor delay",
+			"returned instantly", "instant baseline", "vs baseline", "vs instant",
+			"response time delta", "second delay", "seconds delay",
+			// (b) cross-connection / victim contamination
+			"victim", "another connection", "different connection", "separate connection",
+			"second connection", "cross-connection", "socket reuse", "socket-reuse",
+			"another socket", "victim socket", "unrelated request", "another user",
+			// (c) the follow-up request itself being corrupted by the prefix
+			"poisoned the next", "poisoned the following", "next request received",
+			"next request returned", "follow-up request", "corrupted the next",
+			"405 on the follow", "400 on the follow", "queue poison", "prefix landed on",
+		}
+		hasDesyncProof := false
+		for _, kw := range desyncSignals {
+			if strings.Contains(lowerProof, kw) {
+				hasDesyncProof = true
+				break
+			}
+		}
+		if !hasDesyncProof {
+			return "❌ REJECTED: HTTP request smuggling / desync needs a DIFFERENTIAL proof, not a single response. Two responses on one connection is HTTP/1.1 PIPELINING, and a canary reflected in the Location header is just the redirect engine echoing the path — neither proves a desync, and `x-cache: HIT` on a redirect is normal. Prove it with EITHER (a) a time-delay probe (incomplete chunk / bad length) that hangs ~5-10s versus an instant baseline — run the baseline too — OR (b) a paired follow-up/victim request on a SEPARATE connection that gets corrupted, redirected, delayed, or receives your smuggled prefix. First run the two mandatory controls: (1) pipelining control — send the same two requests with NO Content-Length/Transfer-Encoding smuggling headers; if you STILL get two responses it is pipelining, not smuggling; (2) redirect-echo control — send a single benign GET /<canary>; if the canary appears in Location, reflection proves nothing. If neither differential holds, this is a false positive — do not report it (downgrade to 'info' only if there is a real, distinct issue)."
+		}
+	}
+
+	// Pattern 11a-2: OAuth "state" CSRF claimed from the AUTHORIZATION endpoint
+	// alone. The OAuth `state` parameter is generated and validated by the
+	// CLIENT application (relying party), NOT by the authorization server
+	// (RFC 6749 §10.12). Every authorize endpoint — Microsoft, Google, Okta —
+	// accepts and echoes ANY state (state=test, garbage, empty) by design and
+	// returns 200; that proves nothing. A real state-CSRF requires completing
+	// the full redirect callback and showing the CLIENT app accepts a state it
+	// never issued (forced login / account linking with a usable session). Fire
+	// at medium+ only when there is no callback/session evidence.
+	isStateCSRF := (strings.Contains(lower, "csrf") || strings.Contains(lower, "cross-site request forgery")) &&
+		strings.Contains(lower, "state")
+	isStateCSRF = isStateCSRF ||
+		strings.Contains(lower, "state parameter") ||
+		strings.Contains(lower, "missing state validation") ||
+		strings.Contains(lower, "state validation") ||
+		(strings.Contains(lower, "oauth") && strings.Contains(lower, "state"))
+	if isStateCSRF && isHighSev {
+		lowerProof := strings.ToLower(proof + " " + description)
+		// Evidence that the CLIENT app (not just the authorize endpoint)
+		// actually accepted an unissued state / that a session was forced.
+		callbackProof := []string{
+			"callback", "?code=", "&code=", "code= ", "authorization code",
+			"obtained a token", "usable token", "access token returned", "id_token returned",
+			"logged into", "logged in as", "authenticated session", "session fixated",
+			"account link", "account takeover", "forced login", "victim's account",
+			"my listener", "my server received", "exchanged the code",
+			"relying party accepted", "app accepted", "unissued state",
+		}
+		hasCallbackProof := false
+		for _, kw := range callbackProof {
+			if strings.Contains(lowerProof, kw) {
+				hasCallbackProof = true
+				break
+			}
+		}
+		if !hasCallbackProof {
+			return "❌ REJECTED: OAuth `state` is validated by the CLIENT application, NOT the authorization server (RFC 6749 §10.12). The authorize endpoint accepting/echoing `state=test` (or any value) and returning 200 is BY DESIGN and proves nothing — every Microsoft/Google/Okta authorize endpoint does this. To report a real state-CSRF you must complete the full redirect callback and show the CLIENT app at the redirect_uri accepts a state it never issued, yielding a forced login / account-linking with a usable session. Without that end-to-end proof this is a false positive — do not report (downgrade to 'info' only if there is a distinct, real issue)."
+		}
+	}
+
+	// Pattern 11a-3: Public OAuth/OIDC identifiers reported as "secret" /
+	// "disclosure". The Azure AD tenant ID/UUID, the OAuth `client_id`, the
+	// `/.well-known/openid-configuration` document, and tenant branding
+	// (display name/logo) are PUBLIC BY DESIGN — they are sent in the clear in
+	// every authorization URL and discovery document and are required for
+	// federated login. They are not secrets. Only a real credential
+	// (client_secret, private/signing key, refresh/access token, password)
+	// makes this reportable.
+	oauthPublicIDKeywords := []string{
+		"client_id", "client id", "tenant id", "tenant uuid", "tenant identifier",
+		"azure ad tenant", "azure tenant", "openid-configuration", "openid configuration",
+		".well-known/openid", "tenant branding", "oauth metadata", "oidc metadata",
+		"issuer disclosure", "authorization server metadata",
+	}
+	isOAuthPublicID := false
+	for _, kw := range oauthPublicIDKeywords {
+		if strings.Contains(lower, kw) {
+			isOAuthPublicID = true
+			break
+		}
+	}
+	if isOAuthPublicID &&
+		(strings.Contains(lower, "disclos") || strings.Contains(lower, "expos") ||
+			strings.Contains(lower, "leak") || strings.Contains(lower, "secret") ||
+			strings.Contains(lower, "sensitive") || strings.Contains(lower, "information disclosure")) {
+		lowerProof := strings.ToLower(proof + " " + description)
+		realSecret := []string{
+			"client_secret", "client secret", "private key", "signing key",
+			"refresh_token", "refresh token", "access_token", "bearer ey",
+			"password", "api_key", "api key", "-----begin",
+		}
+		hasRealSecret := false
+		for _, kw := range realSecret {
+			if strings.Contains(lowerProof, kw) {
+				hasRealSecret = true
+				break
+			}
+		}
+		if !hasRealSecret {
+			return "❌ REJECTED: OAuth/OIDC public identifiers — the Azure AD tenant ID/UUID, the `client_id`, the `/.well-known/openid-configuration` document, tenant branding (display name/logo) — are PUBLIC BY DESIGN (RFC 6749 §2.2; the tenant ID is in every discovery document). They are sent in the clear in every authorization URL and are not secrets. This is not a vulnerability. Only a genuine credential leak — client_secret, private/signing key, a live refresh/access token, or a password — is reportable; include the actual secret value as proof. Otherwise do not report."
+		}
+	}
+
+	// Pattern 11a-4: Host-header / deployment-protection "bypass" that only
+	// reaches PUBLIC content. Sending `Host: prod.example.com` to a staging
+	// alias (Vercel/Netlify/etc.) commonly returns 200 — but that is because
+	// the platform routes the request to the PRODUCTION alias, which is
+	// intentionally public. You did not bypass anything; you asked for the
+	// public site and got it. A real bypass must reach content that is NOT
+	// available by hitting production directly (staging-only code/config/data,
+	// a debug endpoint, an internal backend). The mandatory control is: repeat
+	// the request directly against production with NO Host trick — if the
+	// response is identical, it is a false positive by construction. Fire at
+	// medium+ only when the proof shows no such differential/control.
+	isHostBypass := (strings.Contains(lower, "host header") && strings.Contains(lower, "bypass")) ||
+		strings.Contains(lower, "deployment protection") ||
+		(strings.Contains(lower, "vercel") && (strings.Contains(lower, "bypass") || strings.Contains(lower, "protection"))) ||
+		((strings.Contains(lower, "staging") || strings.Contains(lower, "password protection") || strings.Contains(lower, "password-protected")) && strings.Contains(lower, "bypass")) ||
+		(strings.Contains(lower, "401") && strings.Contains(lower, "200") && strings.Contains(lower, "host"))
+	if isHostBypass && isHighSev {
+		lowerProof := strings.ToLower(proof + " " + description)
+		// Evidence that the bypass reaches something NOT public on production.
+		differentialSignals := []string{
+			"production directly", "prod directly", "direct to production", "directly against production",
+			"without the host", "without the bypass", "without host override", "no host override",
+			"control request", "baseline request", "differs from production", "differs from prod",
+			"not available on production", "not public on production", "staging-only", "staging only",
+			"only reachable via", "only accessible via the host", "prod returns 401", "prod returns 403",
+			"prod returns 404", "production returns 401", "production returns 403", "production returns 404",
+			"different content", "differs staging", "staging-specific", "debug endpoint not on prod",
+		}
+		hasDifferential := false
+		for _, kw := range differentialSignals {
+			if strings.Contains(lowerProof, kw) {
+				hasDifferential = true
+				break
+			}
+		}
+		if !hasDifferential {
+			return "❌ REJECTED: A Host-header / deployment-protection 'bypass' that returns 200 usually just reached PUBLIC production. Staging and production are commonly two aliases of the SAME deployment (Vercel/Netlify): sending `Host: prod-domain` routes you to the production alias, which is intentionally public — that is not a bypass. MANDATORY control: repeat the exact request DIRECTLY against production with NO Host trick. If the direct-to-production response is identical (same status/body/cookies), this is a false positive by construction — do not report. To be a real finding you must reach content that is NOT available on production directly: a staging-only endpoint/config/env, a debug route, or an internal backend the public site does not expose — show the production-direct control returning 401/403/404 alongside the bypass returning 200 with distinct content. Note: a constant anonymous guest token (e.g. a Salesforce Commerce guest EUID) and public OAuth client_id/redirect_uri are normal public-store behavior, not credentials."
 		}
 	}
 
