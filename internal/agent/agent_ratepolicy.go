@@ -61,8 +61,9 @@ func buildRequestRatePolicySection(policy scanctx.RequestRatePolicy) string {
 	threads := policy.CommandRPS()
 	return fmt.Sprintf(`### Request Rate Policy
 - Effective outbound target-touching request budget: **max %s requests/second** (%s).
-- This overrides every methodology example and every tool default. Never choose a higher rate, timing template, thread count, or crawler concurrency.
-- For nuclei/httpx/dnsx/subfinder/katana/naabu/feroxbuster, use rate flags at or below %d and keep concurrency at or below %d.
+- This overrides every methodology example and every tool default for TARGET-HAMMERING tools. Never choose a higher rate, timing template, thread count, or crawler concurrency for them.
+- EXEMPT — subdomain discovery & liveness tools run at FULL speed: subfinder, assetfinder, findomain, amass, dnsx, httpx, puredns, massdns, shuffledns, alterx. They hit third-party sources or fan out ONE request across many distinct hosts, so the per-target cap does not apply. Use high concurrency/rate for these so enumeration of large targets actually completes.
+- For nuclei/katana/naabu/feroxbuster (they focus load on one host/app), use rate flags at or below %d and keep concurrency at or below %d.
 - For nmap, do not use -T4/-T5 or --min-rate. Use -T2, --max-rate %d, and --scan-delay %s or slower.
 - For ffuf, use -rate %d and -t %d or lower. For gobuster, use --delay %s and a single worker because it has no reliable global RPS limiter.
 - For custom loops, xargs, parallel, or scripts, add sleeps/delays so aggregate traffic stays under %s requests/second.`, rate, policy.Source, threads, threads, threads, delay, threads, threads, delay, rate)

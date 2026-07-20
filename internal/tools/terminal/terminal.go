@@ -200,10 +200,35 @@ func rewriteShellSegments(command string, rewrite func(string) string) string {
 	return b.String()
 }
 
+// rateExemptDiscoveryTools are subdomain-discovery / liveness-probing tools that
+// are EXEMPT from the request-rate rewrite. They either hit third-party sources
+// (passive subdomain enumeration) or fan out a single request across thousands
+// of DISTINCT hosts (DNS resolution, HTTP liveness probing), so a global low-RPS
+// cap cripples enumeration without protecting any single target. The rate policy
+// exists to keep AGGRESSIVE testing of ONE host/app polite (nuclei, ffuf, nmap,
+// masscan, naabu port scans, sqlmap) — not to throttle recon. Throttling httpx
+// to ~10 rps is what made a wildcard scan of a huge target (e.g. att.com) find
+// only a fraction of its live subdomains before the 30-min per-command kill.
+var rateExemptDiscoveryTools = []string{
+	"httpx", "dnsx", "subfinder", "assetfinder", "findomain", "amass",
+	"puredns", "massdns", "shuffledns", "alterx", "chaos", "gau", "gauplus",
+	"waybackurls", "github-subdomains", "dnsgen", "cero",
+}
+
 func rewriteCommandSegmentForRequestRatePolicy(segment string, policy scanctx.RequestRatePolicy) string {
 	rps := policy.CommandRPS()
 	if rps <= 0 {
 		return segment
+	}
+	// Discovery / liveness tools run at full speed — the per-target rate cap
+	// does not apply to recon that fans out across many hosts or third-party
+	// sources. A command segment is a single piped stage (rewriteShellSegments
+	// splits on ; | && ||), so this exempts e.g. the `httpx` stage of
+	// `subfinder -d x | dnsx | httpx` while a later `nuclei` stage stays capped.
+	for _, tool := range rateExemptDiscoveryTools {
+		if hasToolCommand(segment, tool) {
+			return segment
+		}
 	}
 	rate := strconv.Itoa(rps)
 	delay := formatPolicyDelay(policy)
@@ -227,16 +252,8 @@ func rewriteCommandSegmentForRequestRatePolicy(segment string, policy scanctx.Re
 		rewritten = setFlagValue(rewritten, []string{"-rate"}, rate)
 		rewritten = capFlagValue(rewritten, []string{"-c"}, rate)
 	}
-	for _, tool := range []string{"httpx", "dnsx"} {
-		if hasToolCommand(rewritten, tool) {
-			rewritten = setFlagValue(rewritten, []string{"-rl", "-rate-limit"}, rate)
-			rewritten = capFlagValue(rewritten, []string{"-threads", "-t"}, rate)
-		}
-	}
-	if hasToolCommand(rewritten, "subfinder") {
-		rewritten = setFlagValue(rewritten, []string{"-rl", "-rate-limit"}, rate)
-		rewritten = capFlagValue(rewritten, []string{"-t"}, rate)
-	}
+	// NOTE: httpx, dnsx, and subfinder are intentionally NOT throttled here —
+	// they are handled by the rateExemptDiscoveryTools early-return above.
 	if hasToolCommand(rewritten, "katana") {
 		rewritten = setFlagValue(rewritten, []string{"-rl", "-rate-limit"}, rate)
 		rewritten = capFlagValue(rewritten, []string{"-c"}, rate)

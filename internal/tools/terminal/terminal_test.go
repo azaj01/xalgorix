@@ -119,10 +119,10 @@ func TestNormalizeCommandForRequestRatePolicy_RewritesScannerFlags(t *testing.T)
 			bad:  []string{"-T4", "--min-rate"},
 		},
 		{
-			name: "httpx pipeline",
-			cmd:  "cat urls.txt | httpx -silent -threads 50 -rl 20 | tee live.txt",
-			want: []string{"httpx -silent -threads 3 -rl 3"},
-			bad:  []string{"-threads 50", "-rl 20"},
+			name: "naabu still throttled",
+			cmd:  "naabu -host example.test -rate 1000 -c 50",
+			want: []string{"-rate 3", "-c 3"},
+			bad:  []string{"-rate 1000", "-c 50"},
 		},
 		{
 			name: "gobuster delay",
@@ -161,6 +161,52 @@ func TestNormalizeCommandForRequestRatePolicy_RewritesScannerFlags(t *testing.T)
 				}
 			}
 		})
+	}
+}
+
+// Subdomain-discovery / liveness tools are EXEMPT from the rate rewrite so
+// enumeration of large targets can actually complete (issue: att.com wildcard
+// scan found only a fraction of its live subdomains because httpx/dnsx were
+// throttled to ~10 rps). Their commands must pass through UNCHANGED with no
+// rate-policy note.
+func TestNormalizeCommandForRequestRatePolicy_ExemptsDiscoveryTools(t *testing.T) {
+	sc := scanctx.New("term-rate-exempt", t.TempDir())
+	sc.SetRequestRatePolicy(scanctx.RequestRatePolicy{MaxRPS: 3, Source: "custom instructions"})
+	scanctx.Activate(sc)
+	defer func() {
+		CleanupContext(sc.ID)
+		scanctx.Deactivate(sc.ID)
+	}()
+
+	exempt := []string{
+		"cat urls.txt | httpx -silent -threads 50 -rl 200 | tee live.txt",
+		"cat all_subs.txt | dnsx -silent -a -resp -threads 100",
+		"subfinder -d att.com -all -recursive -silent -t 50 -rl 100 -o subs.txt",
+		"assetfinder --subs-only att.com",
+		"puredns resolve subs.txt -r resolvers.txt",
+	}
+	for _, cmd := range exempt {
+		got, note := NormalizeCommandForRequestRatePolicy(sc.ID, cmd)
+		if note != "" {
+			t.Errorf("discovery command should NOT be rate-rewritten: %q -> note %q", cmd, note)
+		}
+		if got != cmd {
+			t.Errorf("discovery command should be unchanged:\n  in:  %q\n  out: %q", cmd, got)
+		}
+	}
+
+	// A discovery stage piped into an aggressive stage: the discovery stage is
+	// exempt, the aggressive stage is still throttled.
+	mixed := "subfinder -d att.com -silent | httpx -silent -threads 50 | nuclei -rl 100 -c 50"
+	got, note := NormalizeCommandForRequestRatePolicy(sc.ID, mixed)
+	if note == "" {
+		t.Fatal("mixed pipeline with nuclei should still produce a rate note")
+	}
+	if !strings.Contains(got, "-threads 50") {
+		t.Errorf("httpx stage in mixed pipeline should stay unthrottled: %q", got)
+	}
+	if strings.Contains(got, "-rl 100") || strings.Contains(got, "-c 50") {
+		t.Errorf("nuclei stage in mixed pipeline should be throttled: %q", got)
 	}
 }
 
