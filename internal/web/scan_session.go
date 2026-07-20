@@ -190,40 +190,62 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	}
 
 	// 8b. Abnormal LLM-side abort (agent bailed: refused tools / empty responses
-	// / repeated errors / rate-limit). This is NOT a clean completion — the scan
-	// produced no real result — so record it as "failed" with a diagnostic stop
-	// reason instead of "finished". Downstream (dashboard / hosted refunds)
-	// keys off this so a force-stopped scan is never shown as completed.
+	// / repeated errors / rate-limit).
 	//
-	// We update BOTH the persisted record AND the live instance: the scan-status
-	// API (applyInstanceSnapshot) overlays the in-memory instance status over the
-	// record, and runMultiScan's deferred finalize would otherwise flip a still-
-	// "running" instance to "finished". Marking the instance "failed" here makes
-	// every read path agree. This runs after the event processor has drained
-	// (<-done above), so there is no concurrent processEvent writer.
+	// Distinguish two very different situations that both surface as "the model
+	// stopped calling tools":
+	//
+	//   (a) The scan already reported findings — it ran the assessment and just
+	//       failed to emit the final `finish` call, then rambled until the
+	//       no-tool guard fired. This is effectively a COMPLETION: the report
+	//       reflects real work, so record it as "finished" (and let step 10
+	//       generate the report). Failing/refunding here would throw away a real
+	//       result the customer is entitled to.
+	//
+	//   (b) The scan bailed with NOTHING to show (no findings) — a genuine
+	//       malfunction that produced no result. Record it as "failed" with a
+	//       diagnostic stop reason so it is never shown as a clean completion and
+	//       (on hosted) is refunded.
+	//
+	// For (b) we update BOTH the persisted record AND the live instance: the
+	// scan-status API (applyInstanceSnapshot) overlays the in-memory instance
+	// status over the record, and runMultiScan's deferred finalize would
+	// otherwise flip a still-"running" instance to "finished". This runs after
+	// the event processor has drained (<-done above), so there is no concurrent
+	// processEvent writer.
 	if sess.abortReason != "" {
-		finishedAt := time.Now().Format(time.RFC3339)
-		sess.record.Status = "failed"
-		sess.record.StopReason = sess.abortReason
-		sess.record.FinishedAt = finishedAt
-		if sess.instanceID != "" {
-			s.instancesMu.RLock()
-			inst, ok := s.instances[sess.instanceID]
-			s.instancesMu.RUnlock()
-			if ok {
-				inst.mu.Lock()
-				// Never clobber a user-initiated stop/pause; only downgrade a
-				// still-active instance to failed.
-				if inst.Status == "running" || inst.Status == "pending" || inst.Status == "" {
-					inst.Status = "failed"
-					inst.StopReason = sess.abortReason
-					inst.FinishedAt = finishedAt
-				}
-				inst.mu.Unlock()
-			}
+		reportedVulns := 0
+		if sess.sctx != nil {
+			reportedVulns = len(reporting.GetVulnerabilitiesForContext(sess.sctx.ID))
 		}
-		s.saveScanRecordTo(sess.record, sess.scanDir)
-		return
+		producedResults := reportedVulns > 0 || len(sess.record.Vulns) > 0
+		if !producedResults {
+			finishedAt := time.Now().Format(time.RFC3339)
+			sess.record.Status = "failed"
+			sess.record.StopReason = sess.abortReason
+			sess.record.FinishedAt = finishedAt
+			if sess.instanceID != "" {
+				s.instancesMu.RLock()
+				inst, ok := s.instances[sess.instanceID]
+				s.instancesMu.RUnlock()
+				if ok {
+					inst.mu.Lock()
+					// Never clobber a user-initiated stop/pause; only downgrade a
+					// still-active instance to failed.
+					if inst.Status == "running" || inst.Status == "pending" || inst.Status == "" {
+						inst.Status = "failed"
+						inst.StopReason = sess.abortReason
+						inst.FinishedAt = finishedAt
+					}
+					inst.mu.Unlock()
+				}
+			}
+			s.saveScanRecordTo(sess.record, sess.scanDir)
+			return
+		}
+		// (a) findings exist → fall through to a normal "finished" completion.
+		log.Printf("[SCAN] %s: agent stopped calling tools (%s) but had reported %d finding(s); recording as completed with report intact",
+			sess.id, sess.abortReason, reportedVulns+len(sess.record.Vulns))
 	}
 
 	// 9. Finalize record
