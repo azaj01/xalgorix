@@ -145,13 +145,18 @@ func (c *Client) loadCtx() context.Context {
 
 // chatRequest is the OpenAI-compatible chat completion request.
 type chatRequest struct {
-	Model           string         `json:"model"`
-	Messages        []Message      `json:"messages"`
-	Stream          bool           `json:"stream"`
-	StreamOptions   *streamOptions `json:"stream_options,omitempty"`
-	Temperature     *float64       `json:"temperature,omitempty"`
-	MaxTokens       int            `json:"max_tokens,omitempty"`
-	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []Message      `json:"messages"`
+	Stream        bool           `json:"stream"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	Temperature   *float64       `json:"temperature,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	// MaxCompletionTokens is the replacement for MaxTokens on OpenAI's newer
+	// models (GPT-5 family, o-series reasoning models), which reject the legacy
+	// `max_tokens` param with a 400. Exactly one of MaxTokens /
+	// MaxCompletionTokens is set per request (see buildChatRequest).
+	MaxCompletionTokens int    `json:"max_completion_tokens,omitempty"`
+	ReasoningEffort     string `json:"reasoning_effort,omitempty"`
 }
 
 // streamOptions opts into usage stats for OpenAI-compatible streaming
@@ -593,6 +598,52 @@ func (c *Client) maxOutputTokens() int {
 	return n
 }
 
+// usesMaxCompletionTokens reports whether an OpenAI model requires the
+// `max_completion_tokens` parameter and rejects the legacy `max_tokens` with a
+// 400 ("Unsupported parameter: 'max_tokens' is not supported with this model.
+// Use 'max_completion_tokens' instead."). This covers the GPT-5 family and the
+// o-series reasoning models (o1/o3/o4). These same models also only accept the
+// default temperature, so buildChatRequest omits temperature for them.
+//
+// Only OpenAI serves these model names, so matching on the bare model name is
+// safe even though the OpenAI-compatible request path is shared with providers
+// (MiniMax/DeepSeek/Groq/Ollama) that still use `max_tokens`.
+func usesMaxCompletionTokens(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if i := strings.LastIndex(m, "/"); i >= 0 {
+		m = m[i+1:]
+	}
+	return strings.HasPrefix(m, "gpt-5") ||
+		strings.HasPrefix(m, "o1") ||
+		strings.HasPrefix(m, "o3") ||
+		strings.HasPrefix(m, "o4")
+}
+
+// buildChatRequest assembles the OpenAI-compatible chat completion request,
+// picking the correct completion-token parameter for the model. Newer OpenAI
+// models (GPT-5 / o-series) require `max_completion_tokens` and reject both
+// `max_tokens` and a non-default temperature; every other model keeps the
+// legacy `max_tokens` + configured temperature.
+func (c *Client) buildChatRequest(model string, messages []Message, endpoint string, stream bool) chatRequest {
+	req := chatRequest{
+		Model:           model,
+		Messages:        messages,
+		Stream:          stream,
+		ReasoningEffort: c.ollamaReasoningEffort(endpoint),
+	}
+	if stream {
+		req.StreamOptions = &streamOptions{IncludeUsage: true}
+	}
+	if usesMaxCompletionTokens(model) {
+		req.MaxCompletionTokens = c.maxOutputTokens()
+		// Leave Temperature nil — these models only accept the default.
+	} else {
+		req.MaxTokens = c.maxOutputTokens()
+		req.Temperature = c.effectiveTemperature()
+	}
+	return req
+}
+
 func (c *Client) chatWithRetry(messages []Message) (string, error) {
 	maxRetries := c.cfg.LLMMaxRetries
 	if maxRetries < 3 {
@@ -757,15 +808,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 			}
 			body, _ = json.Marshal(anReq)
 		} else {
-			reqBody := chatRequest{
-				Model:           model,
-				Messages:        messages,
-				Stream:          true,
-				StreamOptions:   &streamOptions{IncludeUsage: true},
-				Temperature:     c.effectiveTemperature(),
-				MaxTokens:       c.maxOutputTokens(),
-				ReasoningEffort: c.ollamaReasoningEffort(endpoint),
-			}
+			reqBody := c.buildChatRequest(model, messages, endpoint, true)
 			body, _ = json.Marshal(reqBody)
 		}
 
@@ -992,14 +1035,7 @@ func (c *Client) doChat(messages []Message) (out string, err error) {
 			return "", fmt.Errorf("failed to marshal Anthropic request: %w", err)
 		}
 	} else {
-		reqBody := chatRequest{
-			Model:           model,
-			Messages:        messages,
-			Stream:          false,
-			Temperature:     c.effectiveTemperature(),
-			MaxTokens:       c.maxOutputTokens(),
-			ReasoningEffort: c.ollamaReasoningEffort(endpoint),
-		}
+		reqBody := c.buildChatRequest(model, messages, endpoint, false)
 		body, err = json.Marshal(reqBody)
 		if err != nil {
 			return "", fmt.Errorf("failed to marshal request: %w", err)
