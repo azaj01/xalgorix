@@ -15,6 +15,31 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
 )
 
+// shouldFailInstanceOnAbort reports whether an LLM-abort (no-tool / empty /
+// repeated-error / rate-limit) in THIS session may mark the whole scan
+// instance failed.
+//
+// Only a top-level single/DAST scan qualifies. A wildcard scan runs a discovery
+// session plus one session per subdomain, and every one of them shares the
+// parent instance ID: Phase 1 discovery normally ends with a no-tool abort
+// after it has already enumerated the subdomains, and a single subdomain
+// session can abort while hundreds more are still queued. Failing the instance
+// from any wildcard sub-session marks a scan that is still actively running as
+// "failed" (and wrongly refunds it). Wildcard parent status is decided by the
+// orchestrator, so those sessions must fall through to the normal finalize.
+func shouldFailInstanceOnAbort(scanMode, parentTarget string, discoveryMode bool) bool {
+	if strings.EqualFold(strings.TrimSpace(scanMode), "wildcard") {
+		return false
+	}
+	if discoveryMode {
+		return false
+	}
+	if strings.TrimSpace(parentTarget) != "" {
+		return false
+	}
+	return true
+}
+
 // executeScanSession runs a single scan in complete isolation.
 // It NEVER panics upward — all panics are caught and logged.
 func (s *Server) executeScanSession(sess *scanSession) {
@@ -213,7 +238,18 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	// otherwise flip a still-"running" instance to "finished". This runs after
 	// the event processor has drained (<-done above), so there is no concurrent
 	// processEvent writer.
-	if sess.abortReason != "" {
+	//
+	// CRITICAL: only a TOP-LEVEL single/DAST session may fail the instance on
+	// abort. A wildcard scan runs one discovery session + one session per
+	// subdomain, and they ALL share the parent instance ID. Phase 1 discovery
+	// routinely ends with a no-tool abort AFTER it has already enumerated the
+	// subdomains, and individual subdomain sessions can abort while hundreds
+	// more are still queued. Failing the instance from any of those clobbers a
+	// scan that is genuinely still running (the reported "running but marked
+	// failed" bug) and wrongly refunds it. Wildcard parent status is owned by
+	// the orchestrator (runWildcardTarget / runMultiScan), so wildcard
+	// sub-sessions fall through to the normal "finished" finalize below.
+	if sess.abortReason != "" && shouldFailInstanceOnAbort(sess.scanMode, sess.parentTarget, sess.discoveryMode) {
 		reportedVulns := 0
 		if sess.sctx != nil {
 			reportedVulns = len(reporting.GetVulnerabilitiesForContext(sess.sctx.ID))
