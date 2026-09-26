@@ -98,6 +98,7 @@ const TYPE_COLOR: Record<string, string> = {
   tool_result: "text-emerald-600 dark:text-emerald-400",
   tool_error: "text-red-600 dark:text-red-400",
   tool_output: "text-neutral-600 dark:text-neutral-300",
+  recovery: "text-sky-600 dark:text-sky-300",
   agent: "text-foreground",
   thought: "text-violet-600 dark:text-violet-300",
   decision: "text-violet-600 dark:text-violet-300",

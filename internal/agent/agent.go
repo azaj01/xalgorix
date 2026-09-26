@@ -67,7 +67,7 @@ const defaultToolHardTimeout = 15 * time.Minute
 
 // maxCumulativeRateLimitWait is the safe fallback when a caller constructs a
 // Config literal instead of loading the environment-backed configuration.
-// Set to 6 hours by default so rolling 5-hour provider quota windows (e.g. MiniMax)
+// Set to 6 hours by default so rolling 5-hour provider quota windows
 // can refresh and allow scans to resume without premature termination.
 const maxCumulativeRateLimitWait = 6 * time.Hour
 
@@ -1334,7 +1334,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 			//
 			// CRITICAL:
 			// 1. DO NOT terminate the scan on rate limits or quota resets. Keep the agent alive
-			//    in memory so that when the provider window refreshes (e.g. MiniMax rolling 5h quota,
+			//    in memory so that when the provider window refreshes (e.g. rolling 5h provider quota,
 			//    RPM/TPM resets), the scan resumes seamlessly without interruption.
 			// 2. DO NOT emit provider rate-limit or quota error messages to the frontend/user.
 			//    All upstream provider wait messages are logged strictly to backend server logs
@@ -1534,17 +1534,21 @@ func (a *Agent) Run(targets []string, instruction string) {
 
 		// Distinguish ordinary prose-only reasoning from an attempted tool call
 		// corrupted by the provider/model protocol. The latter must be discarded
-		// rather than appended to history: feeding MiniMax's leaked `<]minimax[>`
-		// delimiters or a bare `<tool_call>` marker back to the model caused it to
+		// rather than appended to history: feeding a provider's leaked control-token
+		// delimiters or a bare ` + "`" + ` marker back to the model caused it to
 		// mimic the corruption for 30 turns and falsely finish a scan.
 		malformedToolReason := ""
 		if len(toolCalls) == 0 {
 			malformedToolReason = llm.MalformedToolOutputReason(responseClean)
 		}
 		if malformedToolReason != "" {
+			// Type "recovery", not "error": the discard-and-retry below is a
+			// handled self-healing action and the scan continues normally.
+			// Error-typed events render as red failures in hosted dashboards,
+			// alarming users over routine protocol recovery.
 			a.emit(Event{
-				Type:        "error",
-				Content:     fmt.Sprintf("⚠️ Discarded malformed LLM tool output (%s); requesting a clean executable call.", malformedToolReason),
+				Type:        "recovery",
+				Content:     fmt.Sprintf("Discarded malformed LLM tool output (%s); requesting a clean executable call.", malformedToolReason),
 				TotalTokens: tokenCount(),
 			})
 		} else if cleanText != "" {
