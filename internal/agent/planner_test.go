@@ -620,6 +620,27 @@ func TestUpdatePlanAutoTaskRequiresCoverageEvidence(t *testing.T) {
 	}
 }
 
+// A coverage-floor task cannot be skipped without a justification note: bare
+// no-note skips were the cheapest end-run around the coverage contract.
+func TestUpdatePlanAutoTaskSkipRequiresJustification(t *testing.T) {
+	a := &Agent{state: NewScanState()}
+	a.state.Plan = AutoPlan([]string{"/eval"}, nil)
+
+	if res, _ := a.updatePlanTool(map[string]string{"task_id": "test-sqli", "status": "skipped"}); res.Error == "" {
+		t.Fatal("bare no-note skip of an auto class task must be rejected")
+	}
+	if got := a.state.Plan.Get("test-sqli").Status; got != TaskPending {
+		t.Fatalf("rejected skip must not change status, got %v", got)
+	}
+	res, _ := a.updatePlanTool(map[string]string{"task_id": "test-sqli", "status": "skipped", "notes": "No SQL-backed parameters exist: every discovered endpoint is static content."})
+	if res.Error != "" {
+		t.Fatalf("justified skip must be accepted: %s", res.Error)
+	}
+	if got := a.state.Plan.Get("test-sqli").Status; got != TaskSkipped {
+		t.Fatalf("justified skip should stick, got %v", got)
+	}
+}
+
 // LLM-authored tasks keep free status transitions: the model's own scoped
 // contract (e.g. "test /eval for RCE") is completed by the model, not gated by
 // the engine's per-endpoint matrix heuristics.
