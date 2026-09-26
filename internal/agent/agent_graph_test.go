@@ -118,7 +118,8 @@ func TestMaybeAutoDelegateLaunchesOneDeterministicWave(t *testing.T) {
 	state := NewScanState()
 	state.Iteration = 5
 	state.ReconDone = true
-	state.Plan = AutoPlan([]string{"/api/users"}, nil)
+	state.Plan = AutoPlan([]string{"/api/users"}, nil) // stale: built from the seeded surface only
+	state.DiscoveredEndpoints = []string{"/api/users", "/admin/export", "/search"}
 	state.PlanBuilt = true
 	state.LedgerSeeded = true
 
@@ -133,6 +134,13 @@ func TestMaybeAutoDelegateLaunchesOneDeterministicWave(t *testing.T) {
 		t.Fatalf("delegation launched before an endpoint inventory: message=%q count=%d", got, graph.DelegationCount())
 	}
 	state.EndpointInventorySaved = true
+	// Recon-first sequencing: an inventory note alone must not launch the wave
+	// while content discovery and technology detection are still outstanding.
+	if got := a.maybeAutoDelegate([]string{"https://example.test"}); got != "" || graph.DelegationCount() != 0 {
+		t.Fatalf("delegation launched before comprehensive recon completed: message=%q count=%d", got, graph.DelegationCount())
+	}
+	state.DirBustingDone = true
+	state.DetectedTechs["flask"] = true
 	message := a.maybeAutoDelegate([]string{"https://example.test"})
 	if graph.DelegationCount() != len(defaultSpecialistProfiles) {
 		t.Fatalf("delegated %d agents, want one %d-agent wave", graph.DelegationCount(), len(defaultSpecialistProfiles))
@@ -149,6 +157,19 @@ func TestMaybeAutoDelegateLaunchesOneDeterministicWave(t *testing.T) {
 	}
 	if !state.DelegationAttempted || !strings.Contains(message, "ENGINE DELEGATION STARTED") {
 		t.Fatalf("automatic delegation was not recorded: attempted=%v message=%q", state.DelegationAttempted, message)
+	}
+	// The stale one-endpoint plan must have been rebuilt from the full
+	// discovered surface at wave launch, so specialists partition every
+	// endpoint instead of the seeded subset.
+	fresh := false
+	for _, task := range state.Plan.Tasks {
+		if strings.Contains(task.Notes, "/admin/export") {
+			fresh = true
+			break
+		}
+	}
+	if !fresh {
+		t.Fatal("wave launched from a stale plan: no task references the post-recon endpoint /admin/export")
 	}
 	if again := a.maybeAutoDelegate([]string{"https://example.test"}); again != "" {
 		t.Fatalf("a second wave must never launch: %q", again)
@@ -187,6 +208,8 @@ func TestMaybeAutoDelegateSkipsNarrowModes(t *testing.T) {
 		state.Iteration = 5
 		state.ReconDone = true
 		state.EndpointInventorySaved = true
+		state.DirBustingDone = true
+		state.DetectedTechs["flask"] = true
 		state.Plan = AutoPlan([]string{"/"}, nil)
 		state.PlanBuilt = true
 		state.LedgerSeeded = true
