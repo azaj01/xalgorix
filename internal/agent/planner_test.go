@@ -355,8 +355,11 @@ func TestBuildPlanToolValidation(t *testing.T) {
 		{"id":"x","title":"x","phase":1},
 		{"id":"x","title":"dup","phase":2}
 	]`})
-	if a.state.Plan == nil || len(a.state.Plan.Tasks) != 1 {
-		t.Errorf("duplicate ids: expected 1 task kept, got %d", len(a.state.Plan.Tasks))
+	// 1 deduped model task + the required-class coverage floor (empty techs map:
+	// nil suppresses the tech lanes inside defaultVulnClasses).
+	wantTasks := 1 + len(defaultVulnClasses(map[string]bool{}))
+	if a.state.Plan == nil || len(a.state.Plan.Tasks) != wantTasks {
+		t.Errorf("duplicate ids: expected %d task(s) kept (1 deduped + coverage floor), got %d", wantTasks, len(a.state.Plan.Tasks))
 	}
 }
 
@@ -554,5 +557,78 @@ func TestUpdatePlanToolTolerance(t *testing.T) {
 	a3.state.Plan.SetStatus(other, TaskActive)
 	if res, _ := a3.updatePlanTool(map[string]string{"status": "completed"}); res.Error == "" {
 		t.Fatal("ambiguous task_id (multiple active) should error with a task-id hint")
+	}
+}
+
+// A model-authored plan may be narrower than the required class coverage
+// contract; build_plan must append the engine's per-class tasks so the finish
+// gate still enforces every vulnerability class. The LLM's own tasks stay
+// untouched.
+func TestBuildPlanCoverageFloorAppendsRequiredClasses(t *testing.T) {
+	a := &Agent{state: NewScanState()}
+	a.state.DiscoveredEndpoints = []string{"/eval", "/tokens"}
+	args := map[string]string{"tasks": `[
+		{"id":"recon","title":"Map surface","phase":1},
+		{"id":"test-eval-rce","title":"Test /eval RCE","phase":6,"vuln_class":"rce","endpoint":"/eval"}
+	]`}
+	res, err := a.buildPlanTool(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Error != "" {
+		t.Fatalf("build_plan failed: %s", res.Error)
+	}
+	represented := map[string]bool{}
+	for _, task := range a.state.Plan.Tasks {
+		if c := normalizeCoverageClass(task.VulnClass); c != "" {
+			represented[c] = true
+		}
+		if task.ID == "test-eval-rce" && task.Origin != "llm" {
+			t.Fatal("LLM-authored task must keep Origin llm")
+		}
+	}
+	for _, class := range defaultVulnClasses(nil) {
+		if !represented[class] {
+			t.Errorf("coverage floor missing required class %q after build_plan", class)
+		}
+	}
+	if !strings.Contains(res.Output, "Coverage floor") {
+		t.Errorf("build_plan output should report the appended coverage floor: %s", res.Output)
+	}
+}
+
+// Engine coverage-floor tasks cannot be hand-completed without evidence; one
+// update_plan call must not substitute for testing the discovered surface.
+func TestUpdatePlanAutoTaskRequiresCoverageEvidence(t *testing.T) {
+	a := &Agent{state: NewScanState()}
+	a.state.Plan = AutoPlan([]string{"/eval"}, nil)
+
+	if res, _ := a.updatePlanTool(map[string]string{"task_id": "test-sqli", "status": "completed"}); res.Error == "" {
+		t.Fatal("auto class task completed without evidence must be rejected")
+	}
+	if got := a.state.Plan.Get("test-sqli").Status; got != TaskPending {
+		t.Fatalf("rejected completion must not change status, got %v", got)
+	}
+
+	// Cover the endpoint for the class, then completion must succeed.
+	markEndpointClassCoverage(a.state, "/eval", "sqli")
+	if res, _ := a.updatePlanTool(map[string]string{"task_id": "test-sqli", "status": "completed"}); res.Error != "" {
+		t.Fatalf("evidence-backed completion rejected: %s", res.Error)
+	}
+	if got := a.state.Plan.Get("test-sqli").Status; got != TaskCompleted {
+		t.Fatalf("evidence-backed completion should stick, got %v", got)
+	}
+}
+
+// LLM-authored tasks keep free status transitions: the model's own scoped
+// contract (e.g. "test /eval for RCE") is completed by the model, not gated by
+// the engine's per-endpoint matrix heuristics.
+func TestUpdatePlanLLMTaskCompletionIsNotEvidenceGated(t *testing.T) {
+	a := &Agent{state: NewScanState()}
+	plan := NewPlan()
+	plan.add(&Task{ID: "test-eval-rce", Title: "Test /eval RCE", Phase: 6, VulnClass: "rce", Endpoint: "/eval", Origin: "llm"})
+	a.state.Plan = plan
+	if res, _ := a.updatePlanTool(map[string]string{"task_id": "test-eval-rce", "status": "completed"}); res.Error != "" {
+		t.Fatalf("LLM task completion must not be evidence-gated: %s", res.Error)
 	}
 }

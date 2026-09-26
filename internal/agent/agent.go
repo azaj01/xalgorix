@@ -621,6 +621,22 @@ func (a *Agent) delegatedWorkFinishGate(_ *ScanState, _ map[string]string) HookR
 	return HookResult{}
 }
 
+// noteDelegationDefer records why the specialist wave has not launched and
+// emits a diagnostic message whenever the reason changes. Without this, a wave
+// that never fired was invisible in the scan event stream and indistinguishable
+// from a wave that ran and finished — production scans lost their specialist
+// acceleration with no trace of why.
+func (a *Agent) noteDelegationDefer(reason string) {
+	if a == nil || a.state == nil {
+		return
+	}
+	if a.state.DelegationDeferReason == reason {
+		return
+	}
+	a.state.DelegationDeferReason = reason
+	a.emit(Event{Type: "message", Content: fmt.Sprintf("⏸️ Specialist wave deferred: %s. The wave launches automatically once the blocker clears (configuration blockers need an operator change).", reason)})
+}
+
 // reconPhaseComplete reports whether the comprehensive reconnaissance
 // milestone is met: fingerprinting/banners, a saved endpoint inventory, real
 // content discovery, and at least one detected technology. The specialist
@@ -681,14 +697,19 @@ func (a *Agent) maybeAutoDelegate(targets []string) string {
 	// restoring pre-v4.6.93 behavior where the root agent does all the work
 	// itself. Some operators prefer the deeper single-threaded methodology.
 	if a.cfg != nil && a.cfg.DisableAutoDelegate {
+		a.noteDelegationDefer("disabled by configuration (XALGORIX_DISABLE_AUTO_DELEGATE=true)")
 		a.state.DelegationAttempted = true
 		return ""
 	}
 	if !a.reconPhaseComplete() || a.state.Iteration < 5 || a.state.Plan == nil ||
 		!a.state.PlanBuilt || !a.state.LedgerSeeded || a.agentGraph.DelegationCount() > 0 {
+		if a.state.Iteration >= 5 {
+			a.noteDelegationDefer("comprehensive recon not complete (missing: " + strings.Join(a.reconIncompleteReasons(), ", ") + ")")
+		}
 		return ""
 	}
 	if _, ok := a.registry.Get("spawn_agent"); !ok {
+		a.noteDelegationDefer("spawn_agent tool is not available in this agent's registry")
 		return ""
 	}
 
@@ -743,6 +764,7 @@ Stopping rule: %s.`, profile.Role, target, strings.Join(profile.VulnClasses, ", 
 	}
 	a.state.DelegationAttempted = true
 	a.state.DelegationNudgeFired = true
+	a.state.DelegationDeferReason = ""
 	return fmt.Sprintf("🚀 ENGINE DELEGATION STARTED: launched %d non-overlapping specialists (%s). "+
 		"Continue the root's highest-value remaining work NOW — the specialist wave is a parallel "+
 		"accelerator, not a substitute for your own testing. While they run: (1) test endpoint/class "+

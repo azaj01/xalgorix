@@ -349,6 +349,28 @@ func planIsEngineAuthored(p *Plan) bool {
 	return true
 }
 
+// newCoverageTask builds the engine-owned per-class coverage task. It is the
+// coverage floor for both the auto plan and model-authored plans: a class task
+// carries Origin "auto", so update_plan cannot hand-complete it — only the
+// endpoint x class coverage matrix can (via reconcilePlan or the update_plan
+// evidence guard).
+func newCoverageTask(class string, endpoints []string) *Task {
+	t := &Task{
+		ID:        "test-" + class,
+		Title:     fmt.Sprintf("Test for %s across discovered endpoints", class),
+		Phase:     classPhase(class),
+		VulnClass: class,
+		Status:    TaskPending,
+		DependsOn: []string{"recon"},
+		Origin:    "auto",
+	}
+	if len(endpoints) > 0 {
+		t.Notes = fmt.Sprintf("Discovered endpoints to test for %s: %s", class, truncList(endpoints, 12))
+		t.Endpoint = truncList(endpoints, 1)
+	}
+	return t
+}
+
 // taskCoverageComplete grounds plan reconciliation in exact coverage. An
 // explicit LLM task targets its endpoint; grouped/auto tasks require coverage
 // across every endpoint discovered by recon. Whole-target black-box tasks use
@@ -452,21 +474,7 @@ func AutoPlan(endpoints []string, detectedTechs map[string]bool) *Plan {
 	// the endpoint set in its Notes so the model tests them all; when unknown,
 	// the task is whole-target and the model refines after discovery.
 	for _, class := range classes {
-		phase := classPhase(class)
-		t := &Task{
-			ID:        "test-" + class,
-			Title:     fmt.Sprintf("Test for %s across discovered endpoints", class),
-			Phase:     phase,
-			VulnClass: class,
-			Status:    TaskPending,
-			DependsOn: []string{"recon"},
-			Origin:    "auto",
-		}
-		if len(endpoints) > 0 {
-			t.Notes = fmt.Sprintf("Discovered endpoints to test for %s: %s", class, truncList(endpoints, 12))
-			t.Endpoint = truncList(endpoints, 1)
-		}
-		p.add(t)
+		p.add(newCoverageTask(class, endpoints))
 	}
 
 	// Phase 5: full authentication & session testing - always a complete lane,

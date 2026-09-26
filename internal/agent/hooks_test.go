@@ -661,6 +661,7 @@ func TestFinishGatekeeper_ProfessionalCompletedPlanSkipsLegacyIterationQuota(t *
 	state.MeaningfulTestCalls = 5
 	state.ReconDone = true
 	state.EndpointInventorySaved = true
+	state.DirBustingDone = true
 	state.PlanBuilt = true
 	plan := NewPlan()
 	plan.add(&Task{ID: "recon", Title: "Map live surface", Phase: 1, Status: TaskCompleted})
@@ -674,6 +675,30 @@ func TestFinishGatekeeper_ProfessionalCompletedPlanSkipsLegacyIterationQuota(t *
 	}
 }
 
+// A professional assessment that never ran content discovery must not finish,
+// no matter how complete its plan looks: the per-endpoint coverage contract is
+// grounded in a fully mapped surface.
+func TestFinishGatekeeper_ProfessionalPlanRequiresContentDiscovery(t *testing.T) {
+	state := NewScanState()
+	state.ProfessionalAssessment = true
+	state.Iteration = 60
+	state.TerminalCalls = 30
+	state.MeaningfulTestCalls = 10
+	state.ReconDone = true
+	state.EndpointInventorySaved = true
+	state.PlanBuilt = true
+	state.MaxFinishRejections = 15
+	plan := NewPlan()
+	plan.add(&Task{ID: "recon", Title: "Map live surface", Phase: 1, Status: TaskCompleted})
+	plan.add(&Task{ID: "test-xss", Title: "Test client routes", Phase: 6, VulnClass: "xss", Status: TaskCompleted})
+	state.Plan = plan
+
+	result := hookFinishGatekeeper(state, nil)
+	if !result.Block || !strings.Contains(result.BlockReason, "Content discovery has not run yet") {
+		t.Fatalf("professional finish without dirbusting must be blocked, got: %+v", result)
+	}
+}
+
 func TestFinishGatekeeper_ProfessionalPlanStillRequiresMeaningfulWorkAndCompletion(t *testing.T) {
 	state := NewScanState()
 	state.ProfessionalAssessment = true
@@ -681,6 +706,7 @@ func TestFinishGatekeeper_ProfessionalPlanStillRequiresMeaningfulWorkAndCompleti
 	state.TerminalCalls = 8
 	state.ReconDone = true
 	state.EndpointInventorySaved = true
+	state.DirBustingDone = true
 	state.PlanBuilt = true
 	plan := NewPlan()
 	plan.add(&Task{ID: "test-xss", Title: "Test client routes", Phase: 6, VulnClass: "xss", Status: TaskPending})

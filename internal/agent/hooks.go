@@ -213,6 +213,7 @@ type ScanState struct {
 	SkillSuggestionFired        bool            // prevents hookAutoSkillSuggester from firing more than once
 	DelegationAttempted         bool            // coordinator called spawn_agent/create_agent
 	ReconGateBlocks             int             // coordinator claim attempts blocked by the recon-first gate (bounded bypass)
+	DelegationDeferReason       string          // last specialist-wave defer reason, for change-triggered diagnostics
 	DelegationNudgeFired        bool            // multi-agent role decomposition nudge sent once
 	DelegationNudgeAt           int             // iteration of the initial decomposition nudge
 	DelegationReminders         int             // bounded reminders after ignored/malformed spawn calls
@@ -1215,6 +1216,8 @@ func normalizeCoverageClass(class string) string {
 		return "csrf"
 	case "prototype-pollution", "prototype_pollution":
 		return "prototype-pollution"
+	case "parameter_mining", "parameter-mining", "param_mining":
+		return "parameter_mining"
 	default:
 		return ""
 	}
@@ -2052,6 +2055,24 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 			return HookResult{
 				Block:       true,
 				BlockReason: fmt.Sprintf("Professional assessment has only %d meaningful security test(s). Execute concrete control/probe checks for the grounded plan before finishing.", state.MeaningfulTestCalls),
+			}
+		}
+		// Comprehensive recon must also precede finish: content discovery and
+		// the endpoint inventory are load-bearing for the per-endpoint coverage
+		// contract, and a plan whose tasks all closed without them was grounded
+		// in a half-mapped surface (observed in production: finish at 132
+		// iterations with zero dirbusting and 5 findings on a 17-finding
+		// target). Bounded by the FinishAttempts ceiling above.
+		if !state.DirBustingDone {
+			return HookResult{
+				Block:       true,
+				BlockReason: "Content discovery has not run yet. Run a bounded content-discovery pass (ffuf/gobuster/dirsearch with a common wordlist and -maxtime) on the primary host before finishing — undiscovered routes are untested attack surface.",
+			}
+		}
+		if !state.EndpointInventorySaved {
+			return HookResult{
+				Block:       true,
+				BlockReason: "Save an Endpoint Inventory note (every live route from responses, links, forms, and first-party JavaScript) before finishing — the coverage contract is enforced per discovered endpoint.",
 			}
 		}
 		return planFinishGate(state, maxRejections)
