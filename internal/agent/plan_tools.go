@@ -248,6 +248,17 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 			"task %q (%s) needs coverage evidence before completion: every discovered endpoint must be tested for %s (engine-verified). Continue testing the class, or mark status 'skipped' with a concrete justification if it is genuinely not applicable to this target.",
 			id, t.VulnClass, t.VulnClass)}, nil
 	}
+	// A coverage-floor task may only be skipped with a concrete justification.
+	// A bare no-note skip is the cheapest end-run around the coverage
+	// contract: a scan was observed issuing ten simultaneous no-note skips to
+	// satisfy the finish gate without class coverage. The finish gate only
+	// rejects shortcut-excuse notes, so the requirement is enforced at the
+	// transition itself.
+	if st == TaskSkipped && t.Origin == "auto" && t.VulnClass != "" && notes == "" {
+		return tools.Result{Error: fmt.Sprintf(
+			"task %q (%s) cannot be skipped without a justification note. If the class genuinely does not apply to this target, state the concrete reason (for example: 'no XML input surface exists'); otherwise test it.",
+			id, t.VulnClass)}, nil
+	}
 	t.Status = st
 	if notes != "" {
 		if t.Notes != "" {
