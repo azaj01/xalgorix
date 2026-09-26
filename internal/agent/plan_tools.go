@@ -117,6 +117,36 @@ func (a *Agent) buildPlanTool(args map[string]string) (tools.Result, error) {
 		return tools.Result{Error: "no valid tasks after parsing (every task needs a unique id)"}, nil
 	}
 
+	// ── Coverage floor ──
+	// A model-authored plan can be as narrow as the hypotheses the model found
+	// interesting half a minute into the scan, and the finish gate trusts the
+	// plan as the whole completion contract — so a narrow plan silently drops
+	// entire vulnerability classes (observed in production: an 11-task bespoke
+	// plan completed in 132 iterations yielded 5 findings on a target that
+	// yields 17+). Append the engine's per-class task for every required class
+	// the plan does not already cover. These tasks carry Origin "auto": they
+	// close only on engine-verified endpoint x class coverage, never on a bare
+	// update_plan call.
+	represented := map[string]bool{}
+	for _, t := range plan.Tasks {
+		if c := normalizeCoverageClass(t.VulnClass); c != "" {
+			represented[c] = true
+		}
+	}
+	var floorClasses []string
+	for _, class := range defaultVulnClasses(a.state.DetectedTechs) {
+		if represented[class] {
+			continue
+		}
+		t := newCoverageTask(class, a.state.DiscoveredEndpoints)
+		if plan.Get(t.ID) != nil {
+			t.ID += "-coverage"
+		}
+		if plan.add(t) {
+			floorClasses = append(floorClasses, class)
+		}
+	}
+
 	a.state.Plan = plan
 	a.state.PlanBuilt = true
 	// Ground the new plan in the discovered endpoints so coverage-gap detection
@@ -127,6 +157,9 @@ func (a *Agent) buildPlanTool(args map[string]string) (tools.Result, error) {
 	sb.WriteString(fmt.Sprintf("Plan built: %d tasks.\n", len(plan.Tasks)))
 	for _, t := range plan.Tasks {
 		sb.WriteString(fmt.Sprintf("  • [%s] phase %d — %s\n", t.ID, t.Phase, t.Title))
+	}
+	if len(floorClasses) > 0 {
+		sb.WriteString(fmt.Sprintf("\nCoverage floor: appended %d required-class tasks (%s). Every vulnerability class is tested before finish; these tasks close only on engine-verified endpoint x class coverage.\n", len(floorClasses), strings.Join(floorClasses, ", ")))
 	}
 	if len(warnings) > 0 {
 		sb.WriteString("\nWarnings:\n")
@@ -203,6 +236,17 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 		st = TaskSkipped
 	default:
 		return tools.Result{Error: "status must be one of: active, completed, skipped (got " + args["status"] + ")"}, nil
+	}
+	// Engine coverage-floor tasks (Origin "auto" with a vulnerability class)
+	// cannot be hand-completed: a single update_plan call must not substitute
+	// for actually testing the discovered surface. reconcilePlan closes them
+	// automatically once the endpoint x class coverage matrix is complete, so
+	// a rejection here always means the class is not yet covered.
+	if st == TaskCompleted && t.Origin == "auto" && t.VulnClass != "" && a.state != nil &&
+		!taskCoverageComplete(a.state, t) {
+		return tools.Result{Error: fmt.Sprintf(
+			"task %q (%s) needs coverage evidence before completion: every discovered endpoint must be tested for %s (engine-verified). Continue testing the class, or mark status 'skipped' with a concrete justification if it is genuinely not applicable to this target.",
+			id, t.VulnClass, t.VulnClass)}, nil
 	}
 	t.Status = st
 	if notes != "" {
