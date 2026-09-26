@@ -312,6 +312,24 @@ func (a *Agent) readLedgerTool(args map[string]string) (tools.Result, error) {
 }
 
 func (a *Agent) claimNextHypothesisTool(args map[string]string) (tools.Result, error) {
+	// Recon-first sequencing (coordinator only): vulnerability testing enters
+	// the hypothesis ledger only after comprehensive reconnaissance mapped
+	// the surface — same milestone the specialist wave waits for. Testing
+	// from a half-mapped surface is what makes identical targets produce
+	// wildly different finding sets between runs. Specialists are exempt:
+	// the wave itself is gated on the same milestone, so children always
+	// start from a complete surface. Bounded bypass (3 blocks) so a target
+	// where a milestone is genuinely impossible cannot deadlock the scan.
+	if a.state != nil && a.state.ProfessionalAssessment && a.delegatedAgentID == "" &&
+		!a.ctfMission && !a.state.DiscoveryMode && !a.reconPhaseComplete() {
+		if a.state.ReconGateBlocks < 3 {
+			a.state.ReconGateBlocks++
+			return tools.Result{Error: fmt.Sprintf(
+				"RECON FIRST: comprehensive reconnaissance must complete before hypothesis testing. Still missing: %s. "+
+					"Complete them, refresh the Endpoint Inventory note, then claim again.",
+				strings.Join(a.reconIncompleteReasons(), "; "))}, nil
+		}
+	}
 	l := a.ledger()
 	if l == nil {
 		return tools.Result{Error: "ledger unavailable in this context"}, nil

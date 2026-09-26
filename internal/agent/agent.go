@@ -621,8 +621,48 @@ func (a *Agent) delegatedWorkFinishGate(_ *ScanState, _ map[string]string) HookR
 	return HookResult{}
 }
 
-// maybeAutoDelegate launches the one deterministic specialist wave once recon
-// has produced a grounded plan and shared ledger. Requiring the coordinator LLM
+// reconPhaseComplete reports whether the comprehensive reconnaissance
+// milestone is met: fingerprinting/banners, a saved endpoint inventory, real
+// content discovery, and at least one detected technology. The specialist
+// wave and the coordinator's hypothesis-claiming lane wait for this so every
+// run partitions the SAME fully mapped surface. Launching testing earlier —
+// from whatever thin inventory exists a minute into the scan — was the
+// largest source of run-to-run result variance: identical targets produced
+// specialist lanes grounded in 13 paths one run and 17 the next.
+func (a *Agent) reconPhaseComplete() bool {
+	if a == nil || a.state == nil {
+		return false
+	}
+	s := a.state
+	return s.ReconDone && s.EndpointInventorySaved && s.DirBustingDone && len(s.DetectedTechs) > 0
+}
+
+// reconIncompleteReasons lists the reconnaissance milestones still missing,
+// for wave/claim block messages.
+func (a *Agent) reconIncompleteReasons() []string {
+	if a == nil || a.state == nil {
+		return nil
+	}
+	s := a.state
+	var missing []string
+	if !s.ReconDone {
+		missing = append(missing, "banner/technology fingerprinting (curl -sI, whatweb)")
+	}
+	if !s.EndpointInventorySaved {
+		missing = append(missing, "an Endpoint Inventory note listing every live route")
+	}
+	if !s.DirBustingDone {
+		missing = append(missing, "content discovery on at least one host (ffuf/gobuster/dirsearch)")
+	}
+	if len(s.DetectedTechs) == 0 {
+		missing = append(missing, "technology stack detection (whatweb / server headers)")
+	}
+	return missing
+}
+
+// maybeAutoDelegate launches the one deterministic specialist wave once the
+// comprehensive reconnaissance milestone (reconPhaseComplete) has produced a
+// final surface, grounded plan, and shared ledger. Requiring the coordinator LLM
 // to remember spawn_agent proved nondeterministic in real runs: it could ignore
 // several explicit nudges and continue serial work until the scan deadline.
 // Engine-owned launch makes coverage parallel by construction while the graph's
@@ -644,12 +684,25 @@ func (a *Agent) maybeAutoDelegate(targets []string) string {
 		a.state.DelegationAttempted = true
 		return ""
 	}
-	if !a.state.ReconDone || !a.state.EndpointInventorySaved || a.state.Iteration < 5 || a.state.Plan == nil ||
+	if !a.reconPhaseComplete() || a.state.Iteration < 5 || a.state.Plan == nil ||
 		!a.state.PlanBuilt || !a.state.LedgerSeeded || a.agentGraph.DelegationCount() > 0 {
 		return ""
 	}
 	if _, ok := a.registry.Get("spawn_agent"); !ok {
 		return ""
+	}
+
+	// Ground the wave in the FINAL mapped surface. The auto plan is built as
+	// soon as an inventory note exists; dirbusting and client-route discovery
+	// surface more endpoints afterwards, so that early plan goes stale. Rebuild
+	// the engine-owned plan from the completed surface (reconcilePlan restores
+	// task completion from the coverage matrix) so every run partitions the
+	// same fully mapped endpoint set instead of whatever a one-minute
+	// inventory happened to contain. An LLM-authored plan is never clobbered.
+	if planIsEngineAuthored(a.state.Plan) && len(a.state.DiscoveredEndpoints) > 0 {
+		a.state.Plan = AutoPlan(a.state.DiscoveredEndpoints, a.state.DetectedTechs)
+		a.state.PlanBuilt = true
+		reconcilePlan(a.state)
 	}
 
 	target := ""

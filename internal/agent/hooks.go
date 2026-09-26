@@ -212,6 +212,7 @@ type ScanState struct {
 	DetectedTechs               map[string]bool // e.g. "php", "nodejs", "java"
 	SkillSuggestionFired        bool            // prevents hookAutoSkillSuggester from firing more than once
 	DelegationAttempted         bool            // coordinator called spawn_agent/create_agent
+	ReconGateBlocks             int             // coordinator claim attempts blocked by the recon-first gate (bounded bypass)
 	DelegationNudgeFired        bool            // multi-agent role decomposition nudge sent once
 	DelegationNudgeAt           int             // iteration of the initial decomposition nudge
 	DelegationReminders         int             // bounded reminders after ignored/malformed spawn calls

@@ -333,6 +333,22 @@ func endpointSetContains(set map[string]bool, aliases []string) bool {
 	return false
 }
 
+// planIsEngineAuthored reports whether every task in the plan came from
+// AutoPlan (Origin "auto"). Such a plan may be safely rebuilt from a more
+// mature endpoint inventory; a plan containing any LLM-authored task must be
+// left alone.
+func planIsEngineAuthored(p *Plan) bool {
+	if p == nil || len(p.Tasks) == 0 {
+		return false
+	}
+	for _, t := range p.Tasks {
+		if t.Origin != "auto" {
+			return false
+		}
+	}
+	return true
+}
+
 // taskCoverageComplete grounds plan reconciliation in exact coverage. An
 // explicit LLM task targets its endpoint; grouped/auto tasks require coverage
 // across every endpoint discovered by recon. Whole-target black-box tasks use
