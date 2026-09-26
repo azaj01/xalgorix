@@ -249,6 +249,8 @@ func summarizeChatEvent(evt WSEvent) string {
 		return fmt.Sprintf("thinking: %s", truncStr(evt.Content, 160))
 	case "message":
 		return fmt.Sprintf("message: %s", truncStr(evt.Content, 300))
+	case "recovery":
+		return fmt.Sprintf("recovery: %s", truncStr(evt.Content, 300))
 	case "error":
 		return fmt.Sprintf("error: %s", truncStr(evt.Content, 300))
 	case "tool_call":
