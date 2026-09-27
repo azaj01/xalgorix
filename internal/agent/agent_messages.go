@@ -456,7 +456,11 @@ func compactMessages(msgs []llm.Message) string {
 	}
 
 	if len(endpoints) > 0 {
-		sb.WriteString("\n### Endpoints Tested\n")
+		// "Tested" overstated what this digest establishes: it is a lossy inventory
+		// of URL mentions in the conversation, not an execution ledger — a mention
+		// does not prove a request was made, succeeded, or was conclusively
+		// assessed. Consumers must read it as mentions only.
+		sb.WriteString("\n### URLs Mentioned (lossy summary — a mention is not evidence of testing)\n")
 		count := 0
 		for ep := range endpoints {
 			if count >= 30 { // cap to avoid bloat

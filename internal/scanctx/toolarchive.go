@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -31,11 +32,27 @@ type ToolArchive struct {
 
 // NewToolArchive creates an archive rooted at <scanDir>/tool-outputs.
 // A nil-safe empty archive is returned when scanDir is empty.
+//
+// Existing records are immutable across reopen: the sequence counter starts
+// past the highest archived id. A reopened archive previously restarted the
+// counter at zero and Archive's temp+rename silently replaced an existing
+// record with different content under the same retrieval id — deterministic
+// evidence loss whenever the archive outlives one process (resume/restart).
 func NewToolArchive(scanDir string) *ToolArchive {
 	if scanDir == "" {
 		return &ToolArchive{}
 	}
-	return &ToolArchive{dir: filepath.Join(scanDir, toolArchiveDir)}
+	a := &ToolArchive{dir: filepath.Join(scanDir, toolArchiveDir)}
+	if entries, err := os.ReadDir(a.dir); err == nil {
+		for _, e := range entries {
+			if m := archiveIDPattern.FindStringSubmatch(e.Name()); m != nil {
+				if n, err := strconv.Atoi(m[1]); err == nil && n > a.next {
+					a.next = n
+				}
+			}
+		}
+	}
+	return a
 }
 
 // enabled reports whether the archive has a backing directory.
@@ -56,6 +73,16 @@ func (a *ToolArchive) Archive(toolName, content string, minBytes int) string {
 	id := fmt.Sprintf("to_%06d", a.next)
 	if err := os.MkdirAll(a.dir, 0o700); err != nil {
 		return ""
+	}
+	// Belt-and-braces immutability: never overwrite an existing record, even if
+	// the reopen scan raced a concurrent writer. Advance until the id is free.
+	for target := filepath.Join(a.dir, id); ; {
+		if _, err := os.Stat(target); os.IsNotExist(err) {
+			break
+		}
+		a.next++
+		id = fmt.Sprintf("to_%06d", a.next)
+		target = filepath.Join(a.dir, id)
 	}
 	// The file body keeps the tool name as a header so a bare retrieval is
 	// self-describing; the id alone never reveals target data.
