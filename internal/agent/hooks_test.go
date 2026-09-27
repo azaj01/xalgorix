@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xalgord/xalgorix/v4/internal/llm"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 )
 
@@ -1943,5 +1944,32 @@ func TestHookSlowReconGuard(t *testing.T) {
 		"tool_name": "verify_sqli", "command": "nmap -p- --scan-delay 1s x",
 	}); r.ForceSkip {
 		t.Fatal("a non-terminal tool call must be ignored")
+	}
+}
+
+// In-batch duplicates cannot produce new results and previously counted
+// toward the loop-limit kill, force-finishing healthy scans mid-batch.
+func TestDedupeBatchCalls(t *testing.T) {
+	calls := []llm.ToolCall{
+		{Name: "update_plan", Args: map[string]string{"task_id": "recon", "status": "completed"}},
+		{Name: "update_plan", Args: map[string]string{}}, // empty bookkeeping call
+		{Name: "update_plan", Args: map[string]string{}}, // identical repeat in-batch
+		{Name: "update_plan", Args: map[string]string{}}, // identical repeat in-batch
+		{Name: "update_plan", Args: map[string]string{}}, // identical repeat in-batch
+		{Name: "terminal_execute", Args: map[string]string{"command": "curl -sk https://example.com"}},
+		{Name: "update_plan", Args: map[string]string{"task_id": "recon", "status": "completed"}}, // same as first — still one turn
+	}
+	got := dedupeBatchCalls(calls)
+	if len(got) != 3 {
+		t.Fatalf("dedupeBatchCalls kept %d of 7, want 3: %+v", len(got), got)
+	}
+	if got[0].Name != "update_plan" || got[0].Args["task_id"] != "recon" {
+		t.Fatalf("first call should be preserved, got %+v", got[0])
+	}
+	if got[1].Name != "update_plan" || len(got[1].Args) != 0 {
+		t.Fatalf("empty call should be kept once, got %+v", got[1])
+	}
+	if got[2].Name != "terminal_execute" {
+		t.Fatalf("third distinct call should be preserved, got %+v", got[2])
 	}
 }
