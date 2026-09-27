@@ -530,15 +530,22 @@ type ScanRecord struct {
 	// When Truncated is set, the client lazily pages older events via
 	// GET /api/scans/{id}/events?offset=&limit=. Both are omitempty so the
 	// persisted scan.json is unaffected (they are zero on the saved record).
-	EventsTotal      int              `json:"events_total,omitempty"`
-	EventsTruncated  bool             `json:"events_truncated,omitempty"`
-	Vulns            []VulnSummary    `json:"vulns"`
-	TotalTokens      int              `json:"total_tokens"`
-	Iterations       int              `json:"iterations"`
-	ToolCalls        int              `json:"tool_calls"`
-	CompanyName      string           `json:"company_name,omitempty"` // report branding: company name
-	LogoPath         string           `json:"logo_path,omitempty"`    // report branding: logo path
-	Phases           []int            `json:"phases,omitempty"`       // selected methodology phases
+	EventsTotal     int           `json:"events_total,omitempty"`
+	EventsTruncated bool          `json:"events_truncated,omitempty"`
+	Vulns           []VulnSummary `json:"vulns"`
+	TotalTokens     int           `json:"total_tokens"`
+	Iterations      int           `json:"iterations"`
+	ToolCalls       int           `json:"tool_calls"`
+	CompanyName     string        `json:"company_name,omitempty"` // report branding: company name
+	LogoPath        string        `json:"logo_path,omitempty"`    // report branding: logo path
+	Phases          []int         `json:"phases,omitempty"`       // selected methodology phases
+	// PhasesWorked is the set of phases the engine observed concrete evidence
+	// for (tool activity classified into a phase, or a phase the model worked
+	// in). A forward jump - e.g. a "phase 20" mention while the timeline is on
+	// phase 1 - marks only its endpoints, so consumers can distinguish phases
+	// actually touched from phases merely skipped past. Rendering every earlier
+	// phase as complete was dishonest.
+	PhasesWorked     []int            `json:"phases_worked,omitempty"`
 	CurrentPhase     int              `json:"current_phase,omitempty"`
 	SubScans         []SubScanSummary `json:"sub_scans,omitempty"`
 	SubScanTotal     int              `json:"sub_scan_total,omitempty"`

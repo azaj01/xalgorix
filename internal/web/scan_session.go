@@ -533,6 +533,20 @@ func (s *Server) executeScanSession(sess *scanSession) {
 }
 
 // processEvent handles a single agent event — forwards to WebSocket, updates scan record, sends Discord.
+// markPhaseWorked records that the engine observed concrete work tied to the
+// given phase. Deduplicated; first-observation order preserved.
+func (r *ScanRecord) markPhaseWorked(phase int) {
+	if r == nil || phase <= 0 {
+		return
+	}
+	for _, p := range r.PhasesWorked {
+		if p == phase {
+			return
+		}
+	}
+	r.PhasesWorked = append(r.PhasesWorked, phase)
+}
+
 func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 	wsEvt := WSEvent{
 		Type:        evt.Type,
@@ -641,6 +655,11 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 		// single stray request). Reporting the max reached keeps progress
 		// honest and stable.
 		if sess.record != nil {
+			// Observed-work ledger: every phase the engine sees concrete evidence
+			// for is recorded as worked, independently of the monotonic current.
+			// A jump from 1 to 20 records {1, 20} - phases 2-19 were skipped
+			// past, not completed, and the UI can now say so.
+			sess.record.markPhaseWorked(phase)
 			if phase > sess.record.CurrentPhase {
 				sess.record.CurrentPhase = phase
 			}
