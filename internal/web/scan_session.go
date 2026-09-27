@@ -226,7 +226,12 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	notes.SetPersistPathForContext(sctx.ID, sess.scanDir)
 	if !sess.resetState {
 		// Resume scenario: load previously saved notes from disk
-		notes.LoadFromDiskForContext(sctx.ID)
+		if _, err := notes.LoadFromDiskForContext(sctx.ID); err != nil {
+			// A failed restore must be visible, not silently equal to an empty
+			// note set: the resumed session would proceed without the durable
+			// notes its predecessor saved.
+			log.Printf("[RESUME] %s: %v — continuing with in-memory notes only", sctx.ID, err)
+		}
 	}
 
 	// 1c. Configure hypothesis/evidence ledger persistence → ledger.json.
@@ -537,6 +542,11 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 	if evt.Type == "tool_result" {
 		wsEvt.Output = evt.ToolResult.Output
 		wsEvt.Error = evt.ToolResult.Error
+		// Typed outcome provenance (duplicate / verifier_rejected / saved
+		// receipt ids): previously only output+error crossed the event schema,
+		// so rejected reports were indistinguishable from clean ones unless a
+		// consumer parsed prose.
+		wsEvt.ResultMeta = evt.ToolResult.Metadata
 
 		// Push vuln to UI in real-time when report_vulnerability succeeds
 		if evt.ToolName == "report_vulnerability" && evt.ToolResult.Error == "" {

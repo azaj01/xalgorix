@@ -148,18 +148,30 @@ func (s *noteStore) marshalSnapshot() ([]byte, string) {
 // misconfigured persistPath cannot escape the Allow_List (Requirement 8.3).
 // The lookup uses the owning ScanContext's roots when available, falling
 // back to the process Workspace_Root via sandbox.Resolve.
-func (s *noteStore) writeFile(data []byte, path string) {
+func (s *noteStore) writeFile(data []byte, path string) error {
 	if data == nil || path == "" {
-		return
+		return nil
 	}
 	canonical, err := sandbox.Default().CheckResolve(scanctx.Get(s.contextID), "notes", path)
 	if err != nil {
 		log.Printf("[notes] Warning: refusing to save notes to %s: %v", path, err)
-		return
+		return err
 	}
-	if err := os.WriteFile(canonical, data, 0600); err != nil {
+	// Atomic persistence: write to a temp file and rename into place so an
+	// interrupted write can never leave a truncated/corrupt snapshot at the
+	// canonical path (a half-written snapshot would parse as zero notes on
+	// restore and silently erase the context's durable note history).
+	tmp := canonical + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		log.Printf("[notes] Warning: failed to save notes to %s: %v", tmp, err)
+		return err
+	}
+	if err := os.Rename(tmp, canonical); err != nil {
+		_ = os.Remove(tmp)
 		log.Printf("[notes] Warning: failed to save notes to %s: %v", canonical, err)
+		return err
 	}
+	return nil
 }
 
 // Register adds note tools to the registry.
@@ -212,14 +224,30 @@ func addNoteForContext(contextID string, args map[string]string) (tools.Result, 
 		contextID = scanctx.Default().ID
 	}
 	s := getNoteStoreForContext(contextID)
+	// The durable write happens UNDER the state lock: snapshots are written in
+	// the order they were taken, so a slower older snapshot can no longer
+	// overwrite a newer one under concurrency. Map readers are unaffected
+	// (they lock the map, not the file).
 	s.mu.Lock()
+	prev, existed := s.store[key]
 	s.store[key] = value
 	data, path := s.marshalSnapshot()
+	writeErr := s.writeFile(data, path)
+	if writeErr != nil {
+		// Durable-write acknowledgement: the receipt must never claim a save
+		// that failed on disk. Roll the in-memory change back so receipt and
+		// durable state agree, and tell the caller what to do about it.
+		if existed {
+			s.store[key] = prev
+		} else {
+			delete(s.store, key)
+		}
+	}
 	s.mu.Unlock()
 
-	// Write to disk outside the lock — non-blocking for concurrent readers
-	s.writeFile(data, path)
-
+	if writeErr != nil {
+		return tools.Result{Error: fmt.Sprintf("add_note: durable write failed (%v) — the note was NOT saved. Retry the add_note call, or include the information in your report instead of relying on it persisting.", writeErr)}, nil
+	}
 	return tools.Result{Output: fmt.Sprintf("Note saved: %s", key)}, nil
 }
 
@@ -322,24 +350,31 @@ func ResetNotesForContext(contextID string) {
 }
 
 // LoadFromDiskForContext loads notes from disk for a specific context.
-func LoadFromDiskForContext(contextID string) int {
+// LoadFromDiskForContext loads notes from disk for a specific context. The
+// returned error distinguishes a restore failure (missing file, corrupt JSON)
+// from a genuinely empty note set — a failed restore must never read as an
+// intact empty context in audit records.
+func LoadFromDiskForContext(contextID string) (int, error) {
 	s := getNoteStoreForContext(contextID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.persistPath == "" {
-		return 0
+		return 0, nil
 	}
 
 	data, err := os.ReadFile(s.persistPath)
 	if err != nil {
-		return 0
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("notes restore failed: %w", err)
 	}
 
 	loaded := make(map[string]string)
 	if err := json.Unmarshal(data, &loaded); err != nil {
 		log.Printf("[notes] Warning: failed to parse %s: %v", s.persistPath, err)
-		return 0
+		return 0, fmt.Errorf("notes restore failed: corrupt snapshot at %s: %w", s.persistPath, err)
 	}
 
 	count := 0
@@ -353,7 +388,7 @@ func LoadFromDiskForContext(contextID string) int {
 	if count > 0 {
 		log.Printf("[notes] Loaded %d notes from: %s (context=%s)", count, s.persistPath, contextID)
 	}
-	return count
+	return count, nil
 }
 
 // GetAllNotesForContext returns all notes for a specific context.

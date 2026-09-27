@@ -78,7 +78,7 @@ func TestNotesDiskPersistenceIsContextSpecific(t *testing.T) {
 	}
 
 	ResetNotesForContext(contextID)
-	if count := LoadFromDiskForContext(contextID); count != 1 {
+	if count, err := LoadFromDiskForContext(contextID); err != nil || count != 1 {
 		t.Fatalf("LoadFromDiskForContext count = %d, want 1", count)
 	}
 	if got := GetAllNotesForContext(contextID)["endpoint"]; got != "/admin" {

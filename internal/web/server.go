@@ -450,6 +450,10 @@ type WSEvent struct {
 	// finishing") to learn a scan was force-stopped.
 	Aborted     bool   `json:"aborted,omitempty"`
 	AbortReason string `json:"abort_reason,omitempty"`
+	// ResultMeta projects tool-result metadata (typed outcomes such as
+	// duplicate / verifier_rejected / saved receipt ids) so audit consumers
+	// never have to parse prose to classify a report attempt's outcome.
+	ResultMeta map[string]any `json:"result_meta,omitempty"`
 }
 
 // VulnSummary is a simplified vulnerability for the UI.
