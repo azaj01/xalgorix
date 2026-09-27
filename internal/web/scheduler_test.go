@@ -334,18 +334,28 @@ func TestCheckAndRunSchedules(t *testing.T) {
 	// data directory from its own goroutine. t.TempDir's RemoveAll cleanup races
 	// with those writes ("unlinkat ... directory not empty" flakes in CI), so
 	// drain the instance to a terminal state before cleanup is allowed to run.
+	// Status is guarded by the per-instance mutex (not instancesMu), so each
+	// read takes instance.mu — reading it under instancesMu alone trips the race
+	// detector against runMultiScan's terminal write.
 	s.instancesMu.RUnlock()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		s.instancesMu.RLock()
-		terminal := len(s.instances) > 0
+		insts := make([]*ScanInstance, 0, len(s.instances))
 		for _, inst := range s.instances {
-			if inst.Status == "running" || inst.Status == "queued" || inst.Status == "" {
+			insts = append(insts, inst)
+		}
+		s.instancesMu.RUnlock()
+		terminal := len(insts) > 0
+		for _, inst := range insts {
+			inst.mu.Lock()
+			st := inst.Status
+			inst.mu.Unlock()
+			if st == "running" || st == "queued" || st == "" {
 				terminal = false
 				break
 			}
 		}
-		s.instancesMu.RUnlock()
 		if terminal {
 			break
 		}
