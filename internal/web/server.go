@@ -496,16 +496,24 @@ type SubScanSummary struct {
 
 // ScanRecord is a persisted scan result.
 type ScanRecord struct {
-	ID                       string    `json:"id"`
-	InstanceID               string    `json:"instance_id,omitempty"` // parent queue/instance id returned by /api/scan
-	Name                     string    `json:"name,omitempty"`        // user-defined scan name
-	Target                   string    `json:"target"`
-	ParentTarget             string    `json:"parent_target,omitempty"` // parent domain for subdomain scans (wildcard mode)
-	StartedAt                string    `json:"started_at"`
-	FinishedAt               string    `json:"finished_at,omitempty"`
-	Status                   string    `json:"status"`                               // saved, running, finished, stopped
-	StopReason               string    `json:"stop_reason,omitempty"`                // why scan stopped (error, user, watchdog, etc.)
-	Completion               string    `json:"completion,omitempty"`                 // "" / "full" / "partial": partial = terminated by a forced stop (loop limit, budget, unrecoverable error) — findings retained but the assessment is not complete
+	ID           string `json:"id"`
+	InstanceID   string `json:"instance_id,omitempty"` // parent queue/instance id returned by /api/scan
+	Name         string `json:"name,omitempty"`        // user-defined scan name
+	Target       string `json:"target"`
+	ParentTarget string `json:"parent_target,omitempty"` // parent domain for subdomain scans (wildcard mode)
+	StartedAt    string `json:"started_at"`
+	FinishedAt   string `json:"finished_at,omitempty"`
+	Status       string `json:"status"`                // saved, running, finished, stopped
+	StopReason   string `json:"stop_reason,omitempty"` // why scan stopped (error, user, watchdog, etc.)
+	Completion   string `json:"completion,omitempty"`  // "" / "full" / "partial": partial = terminated by a forced stop (loop limit, budget, unrecoverable error) — findings retained but the assessment is not complete
+	// Plan task dispositions at terminal time: the honest executed-vs-skipped
+	// record for the final root plan. Skips carry justifications but are not
+	// executed coverage; unfinished work is visible here instead of being
+	// folded into a single percentage or completion label.
+	PlanTasksTotal           int       `json:"plan_tasks_total,omitempty"`
+	PlanTasksCompleted       int       `json:"plan_tasks_completed,omitempty"`
+	PlanTasksSkipped         int       `json:"plan_tasks_skipped,omitempty"`
+	PlanTasksUnfinished      int       `json:"plan_tasks_unfinished,omitempty"`
 	ScanMode                 string    `json:"scan_mode,omitempty"`                  // single, wildcard, dast
 	Instruction              string    `json:"instruction,omitempty"`                // custom scan instructions
 	SeverityFilter           []string  `json:"severity_filter,omitempty"`            // severity filter for scan

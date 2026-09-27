@@ -587,12 +587,14 @@ func reportVulnWithContextIDAndVerifier(contextID string, verifier FindingVerifi
 		return tools.Result{
 			Output: fmt.Sprintf("❌ REJECTED: '%s' reported as %s but has NO verification_method — ⚠️ CRITICAL: You MUST re-call report_vulnerability IMMEDIATELY with 'verification_method' specified (one of: %s) and ALL other required parameters so this finding is saved to the dashboard. If it is not exploitable, downgrade severity to 'info'.",
 				title, strings.ToUpper(severity), formatValidMethods()),
+			Metadata: map[string]any{"report_outcome": "validation_rejected"},
 		}, nil
 	}
 	if method != "" && !validVerificationMethods[method] {
 		return tools.Result{
 			Output: fmt.Sprintf("❌ REJECTED: Invalid verification_method '%s'. Must be one of: %s\n\nYou must EXPLOIT the vulnerability first, then report with the correct verification method.",
 				method, formatValidMethods()),
+			Metadata: map[string]any{"report_outcome": "validation_rejected"},
 		}, nil
 	}
 
@@ -615,6 +617,7 @@ Required steps:
 
 If you cannot exploit it, downgrade severity to 'info' and report as informational.`,
 				title, strings.ToUpper(severity), title),
+			Metadata: map[string]any{"report_outcome": "validation_rejected"},
 		}, nil
 	}
 
@@ -624,7 +627,7 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	if isSSRFClaim(title, args["description"], args["cwe_id"]) &&
 		usesSSRFOOBEvidence(args["oob_token"], method, proof, args["description"]) {
 		if rejection := validateSSRFOOBProof(args["oob_token"], proof); rejection != "" {
-			return tools.Result{Output: rejection}, nil
+			return tools.Result{Output: rejection, Metadata: map[string]any{"report_outcome": "validation_rejected"}}, nil
 		}
 	}
 
@@ -634,7 +637,7 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 		// severity) so the keyword/PII lists can be reviewed and tuned if a
 		// legitimate finding is ever bounced.
 		log.Printf("[reporting] false-positive gate rejected finding: severity=%s title=%q", severity, title)
-		return tools.Result{Output: rejection}, nil
+		return tools.Result{Output: rejection, Metadata: map[string]any{"report_outcome": "validation_rejected"}}, nil
 	}
 
 	// ── Gate 3.25: Deterministic CVSS reconciliation ──

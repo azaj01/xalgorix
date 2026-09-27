@@ -1,8 +1,10 @@
 package web
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"runtime/debug"
 	"strings"
@@ -229,8 +231,13 @@ func (s *Server) executeScanSession(sess *scanSession) {
 		if _, err := notes.LoadFromDiskForContext(sctx.ID); err != nil {
 			// A failed restore must be visible, not silently equal to an empty
 			// note set: the resumed session would proceed without the durable
-			// notes its predecessor saved.
-			log.Printf("[RESUME] %s: %v — continuing with in-memory notes only", sctx.ID, err)
+			// notes its predecessor saved. Absent snapshots (fresh context) and
+			// corrupt snapshots are logged distinctly.
+			if errors.Is(err, os.ErrNotExist) {
+				log.Printf("[RESUME] %s: expected notes snapshot is absent (fresh context or cleared scan dir) — continuing without restored notes", sctx.ID)
+			} else {
+				log.Printf("[RESUME] %s: %v — continuing with in-memory notes only", sctx.ID, err)
+			}
 		}
 	}
 
@@ -1105,6 +1112,13 @@ func (s *Server) finalizeScanSessionRecord(sess *scanSession) bool {
 	if sess.abortReason != "" {
 		sess.record.Completion = "partial"
 		sess.record.StopReason = sess.abortReason
+	}
+	// Final plan dispositions: the completion label alone cannot express what
+	// the assessment actually executed. A clean finish with 8 skipped and 2
+	// unfinished tasks is a different report from one with everything executed.
+	if sess.agent != nil {
+		sess.record.PlanTasksTotal, sess.record.PlanTasksCompleted,
+			sess.record.PlanTasksSkipped, sess.record.PlanTasksUnfinished = sess.agent.PlanDisposition()
 	}
 	sess.record.Status = "finished"
 	sess.record.FinishedAt = time.Now().Format(time.RFC3339)
