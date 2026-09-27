@@ -799,6 +799,29 @@ func (a *Agent) PlanDisposition() (total, completed, skipped, unfinished int) {
 	return len(a.state.Plan.Tasks), completed, skipped, pending + active
 }
 
+// dedupeBatchCalls drops byte-identical (tool, args) repeats from a single
+// model response. The model cannot have seen the first call's result when it
+// emits the duplicate, so re-executing it is pure waste — and the stuck-call
+// tracker previously counted those in-batch duplicates toward the loop-limit
+// kill. Cross-turn repetition (the model saw the result and re-issued anyway)
+// is unaffected and still guarded.
+func dedupeBatchCalls(calls []llm.ToolCall) []llm.ToolCall {
+	if len(calls) < 2 {
+		return calls
+	}
+	seen := make(map[string]bool, len(calls))
+	kept := calls[:0]
+	for _, tc := range calls {
+		key := tc.Name + "\x00" + hashToolArgs(tc.Name, tc.Args)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		kept = append(kept, tc)
+	}
+	return kept
+}
+
 // PlanWorkedPhases returns the phases of plan tasks that were COMPLETED.
 // The plan's own phase attribution is the richest per-phase work signal:
 // AutoPlan and model-authored tasks both carry explicit phase numbers, so a
@@ -1532,6 +1555,20 @@ func (a *Agent) Run(targets []string, instruction string) {
 				kept = append(kept, tc)
 			}
 			toolCalls = kept
+		}
+		// ── In-batch duplicate dedup ──
+		// A model response can carry many tool calls, and executing a
+		// byte-identical call twice within ONE turn cannot produce a different
+		// result: the model has not seen the first result yet. Worse, the
+		// repeat-call tracker counted in-batch duplicates toward the loop-limit
+		// kill, force-finishing healthy scans mid-batch (production: a final
+		// bookkeeping batch carried several identical empty update_plan calls
+		// and a 60-minute scan with 11 unfinished tasks died without the model
+		// ever getting a turn to adapt). Skip duplicates quietly; CROSS-turn
+		// repeats still count toward the stuck-loop guard exactly as before.
+		if deduped := dedupeBatchCalls(toolCalls); len(deduped) != len(toolCalls) {
+			a.emit(Event{Type: "recovery", Content: fmt.Sprintf("Skipped %d duplicate tool call(s) within one response — an identical repeat in the same turn cannot produce a different result.", len(toolCalls)-len(deduped)), TotalTokens: tokenCount()})
+			toolCalls = deduped
 		}
 		// ── Schema-guided recovery of dropped-open-tag tool calls ──
 		// Some models intermittently drop the <function=NAME> open tag and
