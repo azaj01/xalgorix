@@ -469,18 +469,24 @@ func TestInferCurrentPhase_DoesNotTreatSessionFinishedAsFinalReport(t *testing.T
 	if got := inferCurrentPhase(WSEvent{Type: "queue_finished", Content: "Scan queue ended"}, allowed); got != 22 {
 		t.Fatalf("queue_finished inferred phase %d, want 22", got)
 	}
-	// Ubiquitous HTTP tokens in tool args must NOT infer a late phase. An
+	// Ubiquitous HTTP tokens in tool args must NOT infer a LATE phase. An
 	// authenticated scan sends an "Authorization" header (and hits "/api/")
 	// from the very first recon request, which used to false-jump the progress
 	// bar to "8. IDOR/BAC" during reconnaissance. Regression guard.
+	//
+	// The request-bearing fallback now classifies this command as phase 1
+	// (recon): an authenticated request IS target interaction, and phase 1 is
+	// the floor — it can never false-jump the progress bar, and it only feeds
+	// the worked-phase ledger with a truth (recon happened by definition on
+	// any request-bearing scan).
 	if got := inferCurrentPhase(WSEvent{
 		Type:     "tool_call",
 		ToolName: "terminal_execute",
 		ToolArgs: map[string]string{
 			"cmd": "curl -H 'Authorization: Bearer x' https://t/api/account",
 		},
-	}, allowed); got != 0 {
-		t.Fatalf("ubiquitous-token tool call inferred phase %d, want 0", got)
+	}, allowed); got != 1 {
+		t.Fatalf("ubiquitous-token tool call inferred phase %d, want 1 (recon floor, never a late phase)", got)
 	}
 	// The agent's explicit phase narration IS a real signal and still advances.
 	if got := inferCurrentPhase(WSEvent{

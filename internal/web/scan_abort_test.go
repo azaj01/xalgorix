@@ -311,3 +311,46 @@ func TestProcessEvent_PhaseJumpMarksOnlyWorkedPhases(t *testing.T) {
 		}
 	}
 }
+
+// Plain curl reconnaissance previously fell through the phase inference
+// unclassified, so the recon phase never registered as worked and completed
+// scans rendered phase 1 as "skipped". The generic request-bearing fallback
+// marks it worked.
+func TestProcessEvent_PlainCurlMarksReconPhaseWorked(t *testing.T) {
+	s := newTestServer(t, nil)
+	allPhases := make([]int, 22)
+	for i := range allPhases {
+		allPhases[i] = i + 1
+	}
+	sess := &scanSession{
+		id:      "curl-recon",
+		target:  "https://example.com",
+		scanDir: t.TempDir(),
+		record: &ScanRecord{
+			ID:     "curl-recon",
+			Target: "https://example.com",
+			Status: "running",
+			Phases: allPhases,
+		},
+		server: s,
+	}
+
+	s.processEvent(agent.Event{
+		Type:     "tool_call",
+		ToolName: "terminal_execute",
+		ToolArgs: map[string]string{"command": "curl -skI https://example.com -m 10"},
+	}, sess)
+
+	found := false
+	for _, p := range sess.record.PhasesWorked {
+		if p == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("plain curl recon must mark phase 1 worked, got PhasesWorked=%v", sess.record.PhasesWorked)
+	}
+	if sess.record.CurrentPhase != 1 {
+		t.Fatalf("CurrentPhase = %d, want 1", sess.record.CurrentPhase)
+	}
+}

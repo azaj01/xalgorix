@@ -653,3 +653,32 @@ func TestUpdatePlanLLMTaskCompletionIsNotEvidenceGated(t *testing.T) {
 		t.Fatalf("LLM task completion must not be evidence-gated: %s", res.Error)
 	}
 }
+
+// PlanWorkedPhases is the richest per-phase work signal: only COMPLETED tasks
+// contribute their phase - skips are dispositions, not work.
+func TestPlanWorkedPhasesCountsOnlyCompletedTasks(t *testing.T) {
+	a := &Agent{state: NewScanState()}
+	plan := NewPlan()
+	plan.add(&Task{ID: "auth-session", Title: "Auth", Phase: 5, Status: TaskCompleted})
+	plan.add(&Task{ID: "test-sqli", Title: "SQLi", Phase: 6, Status: TaskCompleted})
+	plan.add(&Task{ID: "test-xss", Title: "XSS", Phase: 6, Status: TaskCompleted}) // dup phase
+	plan.add(&Task{ID: "test-csrf", Title: "CSRF", Phase: 5, Status: TaskSkipped}) // skipped, not worked
+	plan.add(&Task{ID: "recon", Title: "Recon", Phase: 1, Status: TaskPending})
+	a.state.Plan = plan
+
+	phases := a.PlanWorkedPhases()
+	if len(phases) != 2 {
+		t.Fatalf("expected phases {5,6}, got %v", phases)
+	}
+	for _, want := range []int{5, 6} {
+		found := false
+		for _, p := range phases {
+			if p == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected phase %d in %v", want, phases)
+		}
+	}
+}
