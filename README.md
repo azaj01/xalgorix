@@ -14,8 +14,6 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/xalgorix/xalgorix)
 
-<a href="https://trendshift.io/repositories/35278?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-35278" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/35278/daily?language=Go" alt="xalgorix/xalgorix | Trendshift" width="250" height="55"/></a>
-
 </div>
 
 <h1 align="center">Xalgorix — Open-source AI pentester that <em>proves</em> vulnerabilities</h1>
