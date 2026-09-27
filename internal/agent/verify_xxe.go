@@ -286,10 +286,10 @@ func (a *Agent) blindXXEVerify(method, absURL string, headers map[string]string,
 	switch {
 	case t.nonScannerHTTP > 0:
 		confirmed, confidence = true, 0.9
-		verdict = fmt.Sprintf("the target fetched the external SYSTEM entity out-of-band (assessed non-scanner HTTP callback) — the parser resolves external entities (blind XXE, CWE-611)")
+		verdict = "the target fetched the external SYSTEM entity out-of-band (assessed non-scanner HTTP callback) — the parser resolves external entities (blind XXE, CWE-611)"
 	case t.dns > 0:
 		confirmed, confidence = true, 0.75
-		verdict = fmt.Sprintf("the target's resolver looked up the callback host planted in the external entity (DNS callback) — the parser resolves external entities (blind XXE, CWE-611)")
+		verdict = "the target's resolver looked up the callback host planted in the external entity (DNS callback) — the parser resolves external entities (blind XXE, CWE-611)"
 	default:
 		verdict = "only scanner-origin / origin-unassessed interactions arrived — not attributable to the target"
 	}
@@ -303,7 +303,7 @@ func (a *Agent) blindXXEVerify(method, absURL string, headers map[string]string,
 			Title:      "XML External Entity injection (blind) at " + endpoint,
 			VulnClass:  "xxe",
 			Endpoint:   endpoint,
-			Target:     baseURLOf(u_MustParse(absURL)),
+			Target:     baseURLOf(mustParseURL(absURL)),
 			Confidence: confidence,
 			Status:     scanctx.HypothesisTesting,
 			Origin:     "verify_xxe",
@@ -328,9 +328,9 @@ func (a *Agent) blindXXEVerify(method, absURL string, headers map[string]string,
 	}
 }
 
-// u_MustParse parses rawURL for target bookkeeping where failure is impossible
+// mustParseURL parses rawURL for target bookkeeping where failure is impossible
 // (the caller already url.Parse'd it successfully).
-func u_MustParse(rawURL string) *url.URL {
+func mustParseURL(rawURL string) *url.URL {
 	u, _ := url.Parse(rawURL)
 	return u
 }

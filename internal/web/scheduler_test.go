@@ -329,4 +329,37 @@ func TestCheckAndRunSchedules(t *testing.T) {
 	if len(s.instances) != 1 {
 		t.Errorf("expected 1 registered scan instance, got %d", len(s.instances))
 	}
+
+	// The schedule-launched scan keeps writing records into the TempDir-backed
+	// data directory from its own goroutine. t.TempDir's RemoveAll cleanup races
+	// with those writes ("unlinkat ... directory not empty" flakes in CI), so
+	// drain the instance to a terminal state before cleanup is allowed to run.
+	// Status is guarded by the per-instance mutex (not instancesMu), so each
+	// read takes instance.mu — reading it under instancesMu alone trips the race
+	// detector against runMultiScan's terminal write.
+	s.instancesMu.RUnlock()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		s.instancesMu.RLock()
+		insts := make([]*ScanInstance, 0, len(s.instances))
+		for _, inst := range s.instances {
+			insts = append(insts, inst)
+		}
+		s.instancesMu.RUnlock()
+		terminal := len(insts) > 0
+		for _, inst := range insts {
+			inst.mu.Lock()
+			st := inst.Status
+			inst.mu.Unlock()
+			if st == "running" || st == "queued" || st == "" {
+				terminal = false
+				break
+			}
+		}
+		if terminal {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	s.instancesMu.RLock()
 }
