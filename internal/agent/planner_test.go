@@ -33,9 +33,15 @@ func TestAutoPlanDependencyGraph(t *testing.T) {
 	if p.Get("test-ssti") == nil {
 		t.Error("java tech should produce an ssti task")
 	}
-	// seeded surface → no dirbust task
-	if p.Get("dirbust") != nil {
-		t.Error("seeded surface should skip the dirbust task")
+	// Seeded surfaces still get a phase-3 task: hidden non-API paths
+	// (debug consoles, backups) only surface via wordlist enumeration, and
+	// suppressing the task pushed discovery to finish-gate time.
+	if p.Get("dirbust") == nil {
+		t.Error("seeded surface must still create the (bounded) dirbust task")
+	}
+	// Step-by-step: class tasks wait for recon AND dirbust.
+	if sqli := p.Get("test-sqli"); sqli != nil && !dependsOn(sqli, "dirbust") {
+		t.Errorf("test-sqli deps = %v, want recon+dirbust", sqli.DependsOn)
 	}
 
 	// IDOR depends on recon AND auth-session
@@ -129,13 +135,24 @@ func TestNextTasksDependencyOrder(t *testing.T) {
 	if next[0].ID != "recon" {
 		t.Errorf("first ready task = %q, want recon (everything depends on it)", next[0].ID)
 	}
-	// After recon completes, the test tasks + auth + dirbust(omitted here) unblock.
+	// Step-by-step: after recon completes, ONLY dirbust is ready — the
+	// testing lanes (phases 5+) must not open before content discovery.
 	p.SetStatus("recon", TaskCompleted)
 	next = p.NextTasks(10)
 	ids := taskIDs(next)
+	if contains(ids, "test-sqli") || contains(ids, "auth-session") {
+		t.Errorf("testing lanes opened before dirbust: %v", ids)
+	}
+	if !contains(ids, "dirbust") {
+		t.Errorf("dirbust should be the ready task after recon, got %v", ids)
+	}
+	// After dirbust completes, the test tasks + auth unblock.
+	p.SetStatus("dirbust", TaskCompleted)
+	next = p.NextTasks(10)
+	ids = taskIDs(next)
 	for _, want := range []string{"test-sqli", "test-xss", "auth-session"} {
 		if !contains(ids, want) {
-			t.Errorf("after recon, %q should be ready; got %v", want, ids)
+			t.Errorf("after recon+dirbust, %q should be ready; got %v", want, ids)
 		}
 	}
 	// idor should NOT be ready yet (depends on auth-session).

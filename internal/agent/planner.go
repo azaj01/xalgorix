@@ -455,19 +455,29 @@ func AutoPlan(endpoints []string, detectedTechs map[string]bool) *Plan {
 	}
 	p.add(recon)
 
-	// Phase 3: directory/content discovery (only when no seeded surface — a
-	// seeded OpenAPI surface makes broad dirbusting lower-value).
-	if len(endpoints) == 0 {
-		p.add(&Task{
-			ID:        "dirbust",
-			Title:     "Directory & file discovery (ffuf/gobuster) + hidden paths",
-			Phase:     3,
-			VulnClass: "dirbusting",
-			Status:    TaskPending,
-			DependsOn: []string{"recon"},
-			Origin:    "auto",
-		})
+	// Phase 3: directory/content discovery — ALWAYS present, step 2 of the
+	// chain. A seeded API surface (OpenAPI/HAR/docs) previously suppressed this
+	// task entirely, which left no early forcing function for hidden non-API
+	// paths (debug consoles, backups, admin panels — a production scan missed a
+	// Werkzeug console this way) and pushed the wordlist pass to finish-gate
+	// time, after all testing. With a seeded surface the task prescribes a
+	// bounded gap-driven pass instead of a broad crawl.
+	dirbustTitle := "Directory & file discovery (ffuf/gobuster) + hidden paths"
+	dirbustNotes := ""
+	if len(endpoints) > 0 {
+		dirbustTitle = "Bounded content discovery — gap-driven wordlist pass for hidden non-API paths"
+		dirbustNotes = "A seeded API surface is known; do NOT broad-crawl it. Run ONE bounded wordlist pass (ffuf -w common wordlist, -maxtime, -noninteractive) against the host root for hidden NON-API paths (debug consoles, admin panels, backups, source/config files), save and inspect the output, and fold any new live routes into the endpoint inventory."
 	}
+	p.add(&Task{
+		ID:        "dirbust",
+		Title:     dirbustTitle,
+		Phase:     3,
+		VulnClass: "dirbusting",
+		Status:    TaskPending,
+		DependsOn: []string{"recon"},
+		Notes:     dirbustNotes,
+		Origin:    "auto",
+	})
 
 	// Start with the full baseline coverage contract, then add specialized
 	// technology lanes such as Node.js prototype pollution or PHP LFI.
@@ -477,7 +487,13 @@ func AutoPlan(endpoints []string, detectedTechs map[string]bool) *Plan {
 	// the endpoint set in its Notes so the model tests them all; when unknown,
 	// the task is whole-target and the model refines after discovery.
 	for _, class := range classes {
-		p.add(newCoverageTask(class, endpoints))
+		t := newCoverageTask(class, endpoints)
+		// Step-by-step execution: testing (phases 5+) waits for recon AND
+		// content discovery (phase 3), so the attack surface is mapped before
+		// any class lane opens. NextTasks presents dirbust as the only ready
+		// task until it completes.
+		t.DependsOn = []string{"recon", "dirbust"}
+		p.add(t)
 	}
 
 	// Phase 5: full authentication & session testing - always a complete lane,
@@ -490,7 +506,7 @@ func AutoPlan(endpoints []string, detectedTechs map[string]bool) *Plan {
 		Phase:     5,
 		VulnClass: "auth",
 		Status:    TaskPending,
-		DependsOn: []string{"recon"},
+		DependsOn: []string{"recon", "dirbust"},
 		Notes:     authNotes,
 		Origin:    "auto",
 	})
