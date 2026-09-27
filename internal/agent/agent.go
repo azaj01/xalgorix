@@ -1205,13 +1205,13 @@ func (a *Agent) Run(targets []string, instruction string) {
 		// are persisted, so this is a graceful teardown, not a data loss.
 		if over, why := a.overBudget(toolCallsTotal); over {
 			a.emit(Event{Type: "message", Content: fmt.Sprintf("⏱️ Resource budget reached (%s) — stopping and finalizing. Findings reported so far are preserved.", why), TotalTokens: tokenCount()})
-			a.emit(Event{Type: "finished", Content: fmt.Sprintf("Scan stopped: resource budget reached (%s).", why), TotalTokens: tokenCount()})
+			a.emit(Event{Type: "finished", Content: fmt.Sprintf("Scan stopped: resource budget reached (%s).", why), TotalTokens: tokenCount(), Aborted: true, AbortReason: "resource_budget"})
 			return
 		}
 		if a.scanBudget != nil && !a.scanBudget.reserveIteration(a.maxIter) {
 			reason := fmt.Sprintf("%d shared agent iterations ≥ scan cap %d", a.scanBudget.iterationCount(), a.maxIter)
 			a.emit(Event{Type: "message", Content: "⏱️ Resource budget reached (" + reason + ") — stopping and finalizing. Findings reported so far are preserved.", TotalTokens: tokenCount()})
-			a.emit(Event{Type: "finished", Content: "Scan stopped: resource budget reached (" + reason + ").", TotalTokens: tokenCount()})
+			a.emit(Event{Type: "finished", Content: "Scan stopped: resource budget reached (" + reason + ").", TotalTokens: tokenCount(), Aborted: true, AbortReason: "resource_budget"})
 			return
 		}
 		if guardMsg := a.maybeCompletePassiveReconGuardAtIterationStart(iter); guardMsg != "" {
@@ -1739,7 +1739,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 			if toolCallHook.EmitMessage != "" {
 				a.emit(Event{Type: "message", Content: toolCallHook.EmitMessage, TotalTokens: tokenCount()})
 				if strings.Contains(toolCallHook.EmitMessage, "Force finishing") || strings.Contains(toolCallHook.EmitMessage, "Loop limit reached") {
-					a.emit(Event{Type: "finished", Content: toolCallHook.EmitMessage, TotalTokens: tokenCount(), Aborted: false, AbortReason: "report_retry_limit"})
+					a.emit(Event{Type: "finished", Content: toolCallHook.EmitMessage, TotalTokens: tokenCount(), Aborted: true, AbortReason: "report_retry_limit"})
 					return
 				}
 			}
@@ -1755,7 +1755,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 					if content == "" || strings.Contains(content, "automated safety boundaries") {
 						content = "Scan completed: Loop limit reached — testing safely finalized with existing findings."
 					}
-					a.emit(Event{Type: "finished", Content: content, TotalTokens: tokenCount(), Aborted: false, AbortReason: "stuck_loop_limit"})
+					a.emit(Event{Type: "finished", Content: content, TotalTokens: tokenCount(), Aborted: true, AbortReason: "stuck_loop_limit"})
 					return
 				}
 			}

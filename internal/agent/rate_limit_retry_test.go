@@ -106,20 +106,26 @@ func TestRateLimitRetry_RecoversAfter429(t *testing.T) {
 		t.Fatalf("expected at least 2 requests (initial 429 + retry), got %d", atomic.LoadInt32(&requestCount))
 	}
 
-	var finishedNormally bool
+	// The mock replies with the same finish call for EVERY request, so the
+	// completion gate correctly blocks it and the repeat-loop guard force-stops
+	// the run — a scenario that was previously mislabeled as a normal finish
+	// (Aborted=false). The recovery this test verifies is the 429 retry itself;
+	// the terminal event must exist, and its aborted/partial label is now the
+	// honest outcome for a force-stop.
+	var finished bool
 	for _, ev := range eventList {
 		if ev.Type == "error" && (strings.Contains(strings.ToLower(ev.Content), "rate limit") ||
 			strings.Contains(strings.ToLower(ev.Content), "quota") ||
 			strings.Contains(strings.ToLower(ev.Content), "billing")) {
 			t.Errorf("rate limit/quota message must NOT be emitted to user event stream: %s", ev.Content)
 		}
-		if ev.Type == "finished" && !ev.Aborted {
-			finishedNormally = true
+		if ev.Type == "finished" {
+			finished = true
 		}
 	}
 
-	if !finishedNormally {
-		t.Error("expected agent to finish normally after recovering from rate limit")
+	if !finished {
+		t.Error("expected agent to reach a terminal finished event after recovering from rate limit")
 	}
 	if ag.state.ConsecutiveRateLimits != 0 {
 		t.Errorf("expected ConsecutiveRateLimits to be reset to 0 after healthy response, got %d", ag.state.ConsecutiveRateLimits)
@@ -261,19 +267,22 @@ func TestRateLimitRetry_QuotaExhaustionWaitsAndRecovers(t *testing.T) {
 		t.Fatalf("expected at least 2 requests (initial quota error + retry after refresh), got %d", reqs)
 	}
 
-	var finishedNormally bool
+	// Same termination semantics as the 429 test: the mock's fixed finish
+	// response cannot pass the completion gate, so the run ends via the
+	// repeat-loop force-stop — now honestly labeled aborted/partial.
+	var finished bool
 	for _, ev := range eventList {
 		if ev.Type == "error" && (strings.Contains(strings.ToLower(ev.Content), "quota") ||
 			strings.Contains(strings.ToLower(ev.Content), "billing") ||
 			strings.Contains(strings.ToLower(ev.Content), "rate limit")) {
 			t.Errorf("quota error message must NOT be emitted to user event stream: %s", ev.Content)
 		}
-		if ev.Type == "finished" && !ev.Aborted {
-			finishedNormally = true
+		if ev.Type == "finished" {
+			finished = true
 		}
 	}
-	if !finishedNormally {
-		t.Errorf("expected scan to finish normally after quota refresh")
+	if !finished {
+		t.Errorf("expected scan to reach a terminal finished event after quota refresh")
 	}
 }
 

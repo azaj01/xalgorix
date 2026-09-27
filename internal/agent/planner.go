@@ -136,14 +136,17 @@ func (p *Plan) RemainingCount() int {
 	return pending + active
 }
 
-// ProgressPct returns whole-percent completion (completed+skipped over total).
-// Returns 0 for an empty plan.
+// ProgressPct returns the whole-percent share of tasks actually EXECUTED
+// (completed over total). Skipped work is deliberately excluded: a plan with
+// 12 completed and 8 justified-skip tasks is 60% executed, not 100% — folding
+// skips into a completion percentage presented a dispositioned plan as full
+// assessed coverage. Returns 0 for an empty plan.
 func (p *Plan) ProgressPct() int {
 	if p == nil || len(p.Tasks) == 0 {
 		return 0
 	}
-	_, _, completed, skipped := p.Counts()
-	return int(float64(completed+skipped) / float64(len(p.Tasks)) * 100)
+	_, _, completed, _ := p.Counts()
+	return int(float64(completed) / float64(len(p.Tasks)) * 100)
 }
 
 // NextTasks returns the tasks that are ready to run: status pending AND every
@@ -601,7 +604,7 @@ func FormatPlan(p *Plan, gaps []CoverageGap) string {
 	}
 	pending, active, completed, skipped := p.Counts()
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("## Active Plan — %d%% complete (%d done, %d active, %d pending, %d skipped)\n",
+	sb.WriteString(fmt.Sprintf("## Active Plan — %d%% executed (%d done, %d active, %d pending, %d skipped — skips are not executed coverage)\n",
 		p.ProgressPct(), completed, active, pending, skipped))
 
 	next := p.NextTasks(3)

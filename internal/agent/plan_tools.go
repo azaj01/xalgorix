@@ -268,7 +268,7 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 		}
 	}
 	pending, active, completed, skipped := plan.Counts()
-	return tools.Result{Output: fmt.Sprintf("Task %q → %s. Plan: %d pending, %d active, %d completed, %d skipped (%d%% complete).", id, st, pending, active, completed, skipped, plan.ProgressPct())}, nil
+	return tools.Result{Output: fmt.Sprintf("Task %q → %s. Plan: %d pending, %d active, %d completed, %d skipped (%d%% executed; skips are not executed coverage).", id, st, pending, active, completed, skipped, plan.ProgressPct())}, nil
 }
 
 // inferPlanTaskID picks the task an update_plan call with no task_id most likely
