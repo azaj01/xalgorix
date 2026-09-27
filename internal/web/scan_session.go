@@ -517,6 +517,15 @@ func (s *Server) executeScanSession(sess *scanSession) {
 					}
 				}
 			}
+			// The report being generated IS phase-22 work: record it on the phase
+			// ledger so a completed scan never shows "Final report" as pending.
+			if sess.record != nil && phaseAllowed(sess.phases, 22) {
+				sess.record.markPhaseWorked(22)
+				if sess.record.CurrentPhase < 22 {
+					sess.record.CurrentPhase = 22
+				}
+				s.saveScanRecordTo(sess.record, sess.scanDir)
+			}
 			if sess.instanceID != "" {
 				reportEvt := WSEvent{Type: "report_ready", Content: fmt.Sprintf("/api/report/%s", sess.id)}
 				if phaseAllowed(sess.phases, 22) {
@@ -568,6 +577,13 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 		// so rejected reports were indistinguishable from clean ones unless a
 		// consumer parsed prose.
 		wsEvt.ResultMeta = evt.ToolResult.Metadata
+		// The plan's completed tasks are the richest per-phase work signal:
+		// merge their phases into the worked ledger whenever the plan changes.
+		if evt.ToolName == "update_plan" && sess.record != nil && sess.agent != nil {
+			for _, phase := range sess.agent.PlanWorkedPhases() {
+				sess.record.markPhaseWorked(phase)
+			}
+		}
 
 		// Push vuln to UI in real-time when report_vulnerability succeeds
 		if evt.ToolName == "report_vulnerability" && evt.ToolResult.Error == "" {
@@ -993,6 +1009,15 @@ func inferCurrentPhase(evt WSEvent, allowed []int) int {
 		if phaseAllowed(allowed, 1) {
 			return 1
 		}
+	// Fallback: any remaining request-bearing tool call (plain curl/wget/
+	// http_request) is target interaction that previously fell through
+	// unclassified, so the every-scan-does-it recon phase never registered
+	// as worked and rendered "skipped" on completed scans. This only feeds
+	// the WORKED ledger; it cannot jump the progress bar.
+	case strings.Contains(args, "http"):
+		if phaseAllowed(allowed, 1) {
+			return 1
+		}
 	}
 
 	return 0
@@ -1109,6 +1134,13 @@ func (s *Server) capturePlanDisposition(sess *scanSession) {
 	}
 	sess.record.PlanTasksTotal, sess.record.PlanTasksCompleted,
 		sess.record.PlanTasksSkipped, sess.record.PlanTasksUnfinished = sess.agent.PlanDisposition()
+	// Completed plan tasks carry explicit phase numbers - the richest
+	// per-phase work evidence (auth=5, business-logic=12, classes the command
+	// heuristics never see). Merge them into the worked ledger so terminal
+	// records are complete.
+	for _, phase := range sess.agent.PlanWorkedPhases() {
+		sess.record.markPhaseWorked(phase)
+	}
 }
 
 // finalizeScanSessionRecord saves the terminal or interrupted scan record to disk.

@@ -799,6 +799,29 @@ func (a *Agent) PlanDisposition() (total, completed, skipped, unfinished int) {
 	return len(a.state.Plan.Tasks), completed, skipped, pending + active
 }
 
+// PlanWorkedPhases returns the phases of plan tasks that were COMPLETED.
+// The plan's own phase attribution is the richest per-phase work signal:
+// AutoPlan and model-authored tasks both carry explicit phase numbers, so a
+// completed auth-session task marks phase 5 worked, a completed business-
+// logic task marks phase 12, and so on - classes the command heuristics and
+// phase-mention parsing cannot see. Only completed tasks count; skips are
+// dispositions, not work.
+func (a *Agent) PlanWorkedPhases() []int {
+	if a == nil || a.state == nil || a.state.Plan == nil {
+		return nil
+	}
+	var phases []int
+	seen := map[int]bool{}
+	for _, t := range a.state.Plan.Tasks {
+		if t.Status != TaskCompleted || t.Phase <= 0 || seen[t.Phase] {
+			continue
+		}
+		seen[t.Phase] = true
+		phases = append(phases, t.Phase)
+	}
+	return phases
+}
+
 // SetDiscoveryMode configures the agent to skip minimum iteration checks on finish.
 // Used for Phase 1 subdomain enumeration where we want the agent to exit immediately.
 func (a *Agent) SetDiscoveryMode(enabled bool) {
