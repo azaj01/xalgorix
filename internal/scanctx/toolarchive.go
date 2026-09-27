@@ -13,8 +13,11 @@ import (
 // toolArchiveDir is the per-scan directory holding archived raw tool outputs.
 const toolArchiveDir = "tool-outputs"
 
-// archiveIDPattern validates retrieval ids (to_<seq>).
-var archiveIDPattern = regexp.MustCompile(`^to_[0-9]{1,12}$`)
+// archiveIDPattern validates retrieval ids (to_<seq>) and extracts the
+// sequence number as submatch 1 (used by NewToolArchive to resume the counter
+// past existing records). The capture group is load-bearing: indexing a
+// groupless pattern panics on the first nonempty reopen.
+var archiveIDPattern = regexp.MustCompile(`^to_([0-9]{1,12})$`)
 
 // ToolArchive persists the complete, untruncated raw output of tool results so
 // the conversation can replace aged tool-result messages with tiny retrieval

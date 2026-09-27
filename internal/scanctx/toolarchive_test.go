@@ -103,3 +103,35 @@ func TestToolArchiveConcurrentArchive(t *testing.T) {
 		seen[id] = true
 	}
 }
+
+// A reopened archive must never reuse a retrieval id or overwrite an existing
+// record: this is the regression for the reopen crash (groupless-pattern
+// submatch panic in NewToolArchive) and the sequence-restart overwrite it
+// masked. Reopen a NONEMPTY archive, archive new content, and require the
+// original record byte-intact under its original id.
+func TestToolArchiveReopenPreservesExistingRecords(t *testing.T) {
+	dir := t.TempDir()
+	a1 := NewToolArchive(dir)
+	id1 := a1.Archive("terminal_execute", "first record", 1)
+	if id1 == "" {
+		t.Fatal("first archive call failed")
+	}
+
+	// Reopen over the same directory and archive different content.
+	a2 := NewToolArchive(dir)
+	id2 := a2.Archive("terminal_execute", "second record", 1)
+	if id2 == "" {
+		t.Fatal("second archive call failed")
+	}
+	if id1 == id2 {
+		t.Fatalf("reopened archive reused id %s for different content", id1)
+	}
+
+	got, ok := a2.Get(id1)
+	if !ok {
+		t.Fatalf("original record %s disappeared after reopen", id1)
+	}
+	if !strings.Contains(got, "first record") || strings.Contains(got, "second record") {
+		t.Fatalf("record %s was overwritten: %q", id1, got)
+	}
+}

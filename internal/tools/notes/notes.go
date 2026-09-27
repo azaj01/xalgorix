@@ -365,10 +365,11 @@ func LoadFromDiskForContext(contextID string) (int, error) {
 
 	data, err := os.ReadFile(s.persistPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("notes restore failed: %w", err)
+		// The only caller is the resume path, where the predecessor saved notes:
+		// an absent expected snapshot is itself a state worth surfacing, not one
+		// to fold into "zero notes loaded". Wrap ErrNotExist so callers can
+		// distinguish absent-expected from corrupt-expected from fresh-empty.
+		return 0, fmt.Errorf("notes restore: %w", err)
 	}
 
 	loaded := make(map[string]string)

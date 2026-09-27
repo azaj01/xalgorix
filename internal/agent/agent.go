@@ -786,6 +786,19 @@ func (a *Agent) eligibleSpecialistProfiles() []specialistProfile {
 	return profiles
 }
 
+// PlanDisposition returns the root plan's final task dispositions for
+// reporting: total tasks, completed, skipped, and unfinished (pending+active).
+// Completed-vs-skipped is the honest coverage distinction (skips are not
+// executed coverage), and unfinished work at terminal time is the visible
+// signal of an incomplete assessment.
+func (a *Agent) PlanDisposition() (total, completed, skipped, unfinished int) {
+	if a == nil || a.state == nil || a.state.Plan == nil {
+		return 0, 0, 0, 0
+	}
+	pending, active, completed, skipped := a.state.Plan.Counts()
+	return len(a.state.Plan.Tasks), completed, skipped, pending + active
+}
+
 // SetDiscoveryMode configures the agent to skip minimum iteration checks on finish.
 // Used for Phase 1 subdomain enumeration where we want the agent to exit immediately.
 func (a *Agent) SetDiscoveryMode(enabled bool) {
