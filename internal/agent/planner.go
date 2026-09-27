@@ -480,7 +480,7 @@ func AutoPlan(endpoints []string, detectedTechs map[string]bool) *Plan {
 	// Phase 5: full authentication & session testing - always a complete lane,
 	// regardless of whether operator-supplied credentials exist.
 	authTitle := "Authentication & session testing (login bypass, JWT, session fixation)"
-	authNotes := "Test all authentication controls thoroughly - login bypass, JWT/session manipulation, weak credentials, registration flows. Never skip or downgrade this task."
+	authNotes := "Test all authentication controls thoroughly - login bypass, JWT/session manipulation, weak credentials, registration flows. Include: token identity (two different logins must not mint identical/interchangeable tokens), token expiry enforcement (expired credentials must be rejected), and a bounded failed-login burst to check authentication rate limiting. Never skip or downgrade this task."
 	p.add(&Task{
 		ID:        "auth-session",
 		Title:     authTitle,

