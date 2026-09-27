@@ -1080,6 +1080,18 @@ func isRootAgentEvent(sess *scanSession, evt agent.Event) bool {
 	return !strings.HasPrefix(evt.AgentID, "sub_") && !strings.HasPrefix(evt.AgentID, "sync_")
 }
 
+// capturePlanDisposition records the root plan's final task dispositions on
+// the scan record. Called on every terminal path (interrupted, server-shutdown,
+// failed, and clean finish) so partial assessments are visible everywhere, not
+// only on the happy path.
+func (s *Server) capturePlanDisposition(sess *scanSession) {
+	if sess == nil || sess.record == nil || sess.agent == nil {
+		return
+	}
+	sess.record.PlanTasksTotal, sess.record.PlanTasksCompleted,
+		sess.record.PlanTasksSkipped, sess.record.PlanTasksUnfinished = sess.agent.PlanDisposition()
+}
+
 // finalizeScanSessionRecord saves the terminal or interrupted scan record to disk.
 // Returns true if the scan finished normally and report generation should proceed,
 // or false if the session was interrupted/stopped and must not generate a report.
@@ -1091,6 +1103,7 @@ func (s *Server) finalizeScanSessionRecord(sess *scanSession) bool {
 		sess.record.Status = instStatus
 		sess.record.StopReason = stopReason
 		sess.record.FinishedAt = time.Now().Format(time.RFC3339)
+		s.capturePlanDisposition(sess)
 		s.saveScanRecordTo(sess.record, sess.scanDir)
 		return false
 	}
@@ -1098,6 +1111,7 @@ func (s *Server) finalizeScanSessionRecord(sess *scanSession) bool {
 		sess.record.Status = "stopped"
 		sess.record.StopReason = "server_shutdown"
 		sess.record.FinishedAt = time.Now().Format(time.RFC3339)
+		s.capturePlanDisposition(sess)
 		s.saveScanRecordTo(sess.record, sess.scanDir)
 		return false
 	}
@@ -1116,10 +1130,7 @@ func (s *Server) finalizeScanSessionRecord(sess *scanSession) bool {
 	// Final plan dispositions: the completion label alone cannot express what
 	// the assessment actually executed. A clean finish with 8 skipped and 2
 	// unfinished tasks is a different report from one with everything executed.
-	if sess.agent != nil {
-		sess.record.PlanTasksTotal, sess.record.PlanTasksCompleted,
-			sess.record.PlanTasksSkipped, sess.record.PlanTasksUnfinished = sess.agent.PlanDisposition()
-	}
+	s.capturePlanDisposition(sess)
 	sess.record.Status = "finished"
 	sess.record.FinishedAt = time.Now().Format(time.RFC3339)
 
