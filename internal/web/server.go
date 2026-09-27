@@ -445,6 +445,11 @@ type WSEvent struct {
 	SubTargetTotal int               `json:"sub_target_total,omitempty"` // total subdomains for current wildcard target
 	ParentTarget   string            `json:"parent_target,omitempty"`    // parent domain for subdomain scans
 	CurrentPhase   int               `json:"current_phase,omitempty"`    // inferred active methodology phase
+	// Aborted/AbortReason carry structured termination semantics through the
+	// public event stream so consumers never have to parse prose ("Force
+	// finishing") to learn a scan was force-stopped.
+	Aborted     bool   `json:"aborted,omitempty"`
+	AbortReason string `json:"abort_reason,omitempty"`
 }
 
 // VulnSummary is a simplified vulnerability for the UI.
@@ -496,6 +501,7 @@ type ScanRecord struct {
 	FinishedAt               string    `json:"finished_at,omitempty"`
 	Status                   string    `json:"status"`                               // saved, running, finished, stopped
 	StopReason               string    `json:"stop_reason,omitempty"`                // why scan stopped (error, user, watchdog, etc.)
+	Completion               string    `json:"completion,omitempty"`                 // "" / "full" / "partial": partial = terminated by a forced stop (loop limit, budget, unrecoverable error) — findings retained but the assessment is not complete
 	ScanMode                 string    `json:"scan_mode,omitempty"`                  // single, wildcard, dast
 	Instruction              string    `json:"instruction,omitempty"`                // custom scan instructions
 	SeverityFilter           []string  `json:"severity_filter,omitempty"`            // severity filter for scan

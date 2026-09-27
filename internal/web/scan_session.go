@@ -530,6 +530,8 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 		AgentID:     evt.AgentID,
 		Timestamp:   evt.Timestamp.Format(time.RFC3339),
 		TotalTokens: evt.TotalTokens,
+		Aborted:     evt.Aborted,
+		AbortReason: evt.AbortReason,
 	}
 
 	if evt.Type == "tool_result" {
@@ -1083,6 +1085,17 @@ func (s *Server) finalizeScanSessionRecord(sess *scanSession) bool {
 		return false
 	}
 
+	// Structured completeness: a session that terminated through a forced stop
+	// (loop limit, exhausted budget, unrecoverable error) is NOT a complete
+	// assessment even when findings exist and a report is generated. Persist
+	// the completion outcome and reason separately from the terminal status so
+	// billing/report flows stay unchanged while the record stays honest — a
+	// forced stop must never read as an unqualified coverage-success claim.
+	sess.record.Completion = "full"
+	if sess.abortReason != "" {
+		sess.record.Completion = "partial"
+		sess.record.StopReason = sess.abortReason
+	}
 	sess.record.Status = "finished"
 	sess.record.FinishedAt = time.Now().Format(time.RFC3339)
 
