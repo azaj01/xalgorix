@@ -683,7 +683,7 @@ for host in SUBDOMAINS_FROM_STEP3; do
 done
 
 # Check common API paths & test HTTP Verb Tampering + Header Bypasses on protected (401/403) endpoints:
-for path in /swagger.json /swagger/v1/swagger.json /api-docs /graphql /.well-known/openid-configuration /actuator/env /health; do
+for path in /swagger.json /swagger/v1/swagger.json /api-docs /graphql /.well-known/openid-configuration /actuator/env /health /console; do
   curl -skI "https://TARGET$path" -A "Mozilla/5.0" --max-time 5 2>&1 | head -5
 done
 
