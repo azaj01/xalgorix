@@ -466,7 +466,7 @@ func reportVulnWithContextIDAndVerifier(contextID string, verifier FindingVerifi
 	// operators receive always reflects a real, reproducible finding.
 	if rejection := checkFabricatedFinding(title, endpoint, args["description"], proof, severity); rejection != "" {
 		log.Printf("[reporting] fabricated/unreachable gate rejected finding: severity=%s title=%q", severity, title)
-		return tools.Result{Output: rejection}, nil
+		return tools.Result{Output: rejection, Metadata: map[string]any{"report_outcome": "validation_rejected"}}, nil
 	}
 
 	// ── Bridge: fold a deterministic verify_* confirmation from the ledger ──
@@ -667,7 +667,7 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	// severity so an inflated vector cannot evade the remaining semantic checks
 	// merely because normalization reduced its final score to informational.
 	if rejection := checkClaimConsistency(title, args["cwe_id"], method, args["cvss_vector"], claimSeverity, args["description"], proof); rejection != "" {
-		return tools.Result{Output: rejection}, nil
+		return tools.Result{Output: rejection, Metadata: map[string]any{"report_outcome": "validation_rejected"}}, nil
 	}
 
 	// ── Gate 4: Smart Deduplication — same vuln type on same endpoint = duplicate ──

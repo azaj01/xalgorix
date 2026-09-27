@@ -786,7 +786,14 @@ func (s *Server) applyInstanceSnapshot(rec *ScanRecord, includeEvents bool) {
 	} else {
 		rec.Status = snapshot.Status
 		rec.FinishedAt = snapshot.FinishedAt
-		rec.StopReason = snapshot.StopReason
+		// A blank instance reason must not erase a reason the session
+		// finalizer already recorded (observed in production: a forced-stop
+		// scan lost its stop_reason in the detail response because the
+		// in-memory instance overlay carried an empty reason). Prefer the
+		// nonempty value; the record is the authoritative terminal outcome.
+		if snapshot.StopReason != "" || rec.StopReason == "" {
+			rec.StopReason = snapshot.StopReason
+		}
 	}
 	if snapshot.Iterations > rec.Iterations {
 		rec.Iterations = snapshot.Iterations
