@@ -257,3 +257,57 @@ func TestProcessEvent_SubAgentProviderPaused_PausesSession(t *testing.T) {
 		t.Fatalf("abortReason = %q, want %q", sess.abortReason, "provider_quota_exhausted")
 	}
 }
+
+// A phase-mention jump (e.g. a "phase 20" note while the timeline is on
+// phase 1) must mark ONLY its endpoints as worked: phases 2-19 were skipped
+// past, not completed. Rendering every phase below current as complete was
+// dishonest.
+func TestProcessEvent_PhaseJumpMarksOnlyWorkedPhases(t *testing.T) {
+	s := newTestServer(t, nil)
+	allPhases := make([]int, 22)
+	for i := range allPhases {
+		allPhases[i] = i + 1
+	}
+	sess := &scanSession{
+		id:      "phase-jump",
+		target:  "https://example.com",
+		scanDir: t.TempDir(),
+		record: &ScanRecord{
+			ID:     "phase-jump",
+			Target: "https://example.com",
+			Status: "running",
+			Phases: allPhases,
+		},
+		server: s,
+	}
+
+	// Phase-1 evidence (target start maps to the first selected phase).
+	s.processEvent(agent.Event{Type: "target_started", Content: "starting"}, sess)
+	// A phase-20 mention while the timeline is still on phase 1.
+	s.processEvent(agent.Event{Type: "message", Content: "Moving to phase 20 for final reporting now."}, sess)
+
+	if sess.record.CurrentPhase != 20 {
+		t.Fatalf("CurrentPhase = %d, want 20", sess.record.CurrentPhase)
+	}
+	if len(sess.record.PhasesWorked) != 2 {
+		t.Fatalf("PhasesWorked = %v, want exactly [1 20]", sess.record.PhasesWorked)
+	}
+	for _, want := range []int{1, 20} {
+		found := false
+		for _, p := range sess.record.PhasesWorked {
+			if p == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("PhasesWorked = %v, want %d recorded as worked", sess.record.PhasesWorked, want)
+		}
+	}
+
+	// Intermediate phases must NOT be in the worked set.
+	for _, p := range sess.record.PhasesWorked {
+		if p > 1 && p < 20 {
+			t.Fatalf("phase %d was never worked but is in PhasesWorked = %v", p, sess.record.PhasesWorked)
+		}
+	}
+}
