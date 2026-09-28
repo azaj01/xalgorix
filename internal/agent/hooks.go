@@ -257,6 +257,11 @@ type HookResult struct {
 	ForceSkip      bool   // skip current tool call
 	EmitMessage    string // emit to UI without injecting into conversation
 	CleanupBrowser bool   // signal to force-close browser
+	// PruneContext signals the agent loop to HARD-TRUNCATE the message
+	// history (keep the system prompt + the Nudge) before the next LLM call.
+	// Used when the conversation itself is the cause of the failure — a text
+	// nudge into a poisoned context just gets corrupted again.
+	PruneContext bool
 }
 
 // ── Hook Registry ────────────────────────────────────────────────────────────
@@ -2515,16 +2520,23 @@ func hookNoToolHandler(state *ScanState, args map[string]string) HookResult {
 		// work — the model needs a completely different framing.
 		if state.MalformedToolOutputCount >= MalformedToolContextResetAt {
 			return HookResult{
+				// HARD context reset: the conversation itself is causing the
+				// corruption (oversized, poisoned by provider control-token
+				// leaks, or the model few-shot-mimicking its own malformed
+				// turns). A nudge into the same context just gets corrupted
+				// again. PruneContext=true tells the agent loop to truncate
+				// the message history before this nudge is sent.
+				PruneContext: true,
 				Nudge: fmt.Sprintf(`⛔ PROTOCOL RESET (%s) — your last %d responses were all malformed.
-			
-The conversation context may be corrupted. STOP all current work and START FRESH with the simplest possible tool call. Do NOT reference, retry, or continue any previous action.
-			
+
+The conversation context has been RESET to a clean state. Do NOT reference, retry, or continue any previous action.
+
 Your ONLY next action: make exactly ONE tool call in perfect XML format:
-			
+
 <function=add_note>
 <parameter=content>Protocol reset after %d malformed responses. Resuming scan from clean state.</parameter>
 </function>
-			
+
 After that note succeeds, resume your scan plan from the first uncompleted task. Use clean, minimal, properly-closed XML for every subsequent call.`,
 					malformedReason, state.MalformedToolOutputCount, state.MalformedToolOutputCount),
 			}

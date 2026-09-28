@@ -1777,7 +1777,25 @@ func (a *Agent) Run(targets []string, instruction string) {
 			// still happens independently in the main loop (shouldPruneBeforeLLM).
 			// NoToolCount is not reset here; the count climbing is what drives
 			// the escalating nudges (and, in bounded mode, the eventual abort).
-			if noToolResult.Nudge != "" {
+			if noToolResult.PruneContext {
+				// Hard context reset: truncate the conversation to the system
+				// prompt only. The model's own context (oversized, poisoned by
+				// provider control-token leaks, or few-shot-mimicking its own
+				// malformed turns) is the CAUSE of the corruption — nudging
+				// into the same context just produces more of the same.
+				a.msgMu.Lock()
+				if len(a.messages) > 0 && a.messages[0].Role == "system" {
+					a.messages = append(a.messages[:0:1], llm.Message{Role: "user", Content: noToolResult.Nudge})
+				} else {
+					a.messages = []llm.Message{{Role: "user", Content: noToolResult.Nudge}}
+				}
+				a.msgMu.Unlock()
+				a.emit(Event{Type: "recovery", Content: "Context hard-reset: truncated conversation to system prompt + protocol recovery instruction.", TotalTokens: tokenCount()})
+				// The count resets so the model gets a full recovery window in the
+				// clean context — a relapse starts the ladder from step 1, not
+				// from the abort edge.
+				a.state.MalformedToolOutputCount = 0
+			} else if noToolResult.Nudge != "" {
 				a.msgMu.Lock()
 				a.messages = append(a.messages, llm.Message{Role: "user", Content: noToolResult.Nudge})
 				a.msgMu.Unlock()
