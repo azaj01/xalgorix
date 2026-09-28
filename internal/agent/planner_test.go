@@ -699,3 +699,115 @@ func TestPlanWorkedPhasesCountsOnlyCompletedTasks(t *testing.T) {
 		}
 	}
 }
+
+// ── Recon coverage model tests ─────────────────────────────────────────────
+
+// Recon must NOT complete with only the legacy booleans (one curl, one
+// ffuf, a note, a tech header). The coverage model demands HTTP probing,
+// tech fingerprinting, and crawling/JS analysis.
+func TestReconIncompleteWithOnlyLegacyBooleans(t *testing.T) {
+	a := &Agent{state: NewScanState()}
+	s := a.state
+	s.ReconDone = true
+	s.EndpointInventorySaved = true
+	s.DirBustingDone = true
+	s.DetectedTechs["nginx"] = true
+	// No coverage evidence set.
+
+	if a.reconPhaseComplete() {
+		t.Fatal("recon must not complete without coverage evidence (HTTP probing, tech fingerprinting, crawling)")
+	}
+	reasons := a.reconIncompleteReasons()
+	if len(reasons) == 0 {
+		t.Fatal("missing-dimension reasons must be reported")
+	}
+	found := false
+	for _, r := range reasons {
+		if strings.Contains(r, "HTTP probing") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("HTTP probing dimension missing from reasons: %v", reasons)
+	}
+}
+
+// Full coverage evidence completes recon.
+func TestReconCompleteWithCoverageEvidence(t *testing.T) {
+	a := &Agent{state: NewScanState()}
+	s := a.state
+	s.ReconDone = true
+	s.EndpointInventorySaved = true
+	s.DirBustingDone = true
+	s.DetectedTechs["flask"] = true
+	s.ReconCoverage.HTTPProbed = true
+	s.ReconCoverage.TechFingerprinted = true
+	s.ReconCoverage.Crawled = true
+	s.ReconCoverage.ContentDiscoveredHosts["example.test"] = true
+
+	if !a.reconPhaseComplete() {
+		reasons := a.reconIncompleteReasons()
+		t.Fatalf("recon should complete with full evidence, missing: %v", reasons)
+	}
+}
+
+// N/A marks skip dimensions that genuinely do not apply.
+func TestReconNAExempt(t *testing.T) {
+	a := &Agent{state: NewScanState()}
+	s := a.state
+	s.ReconDone = true
+	s.EndpointInventorySaved = true
+	s.DirBustingDone = true
+	s.DetectedTechs["static"] = true
+	s.ReconCoverage.HTTPProbed = true
+	s.ReconCoverage.TechFingerprinted = true
+	s.ReconCoverage.ContentDiscoveredHosts["example.test"] = true
+	// No crawling or JS analysis — a static site with no JS.
+	s.ReconCoverage.NAMarked["crawling"] = true
+
+	if !a.reconPhaseComplete() {
+		reasons := a.reconIncompleteReasons()
+		t.Fatalf("crawling N/A should not block completion, missing: %v", reasons)
+	}
+}
+
+// WorkTracker populates the coverage model from commands.
+func TestReconCoverageFromCommands(t *testing.T) {
+	state := NewScanState()
+
+	// HTTP probe
+	hookWorkTracker(state, map[string]string{"tool_name": "terminal_execute", "command": "curl -sk https://example.test/ -o tmp/main.html"})
+	if !state.ReconCoverage.HTTPProbed {
+		t.Fatal("curl should mark HTTPProbed")
+	}
+
+	// Tech fingerprint
+	hookWorkTracker(state, map[string]string{"tool_name": "terminal_execute", "command": "whatweb https://example.test"})
+	if !state.ReconCoverage.TechFingerprinted {
+		t.Fatal("whatweb should mark TechFingerprinted")
+	}
+
+	// Crawling
+	hookWorkTracker(state, map[string]string{"tool_name": "terminal_execute", "command": "curl -sk https://example.test/robots.txt -o tmp/robots.txt; cat tmp/robots.txt"})
+	if !state.ReconCoverage.Crawled {
+		t.Fatal("robots.txt fetch should mark Crawled")
+	}
+
+	// JS analysis
+	hookWorkTracker(state, map[string]string{"tool_name": "terminal_execute", "command": "curl -sk https://example.test/static/app.js -o tmp/app.js; grep -oP 'api[^\"]+' tmp/app.js"})
+	if !state.ReconCoverage.JSAnalyzed {
+		t.Fatal("JS download should mark JSAnalyzed")
+	}
+
+	// Content discovery per-host
+	hookWorkTracker(state, map[string]string{"tool_name": "terminal_execute", "command": "ffuf -w /usr/share/wordlists/common.txt -u https://example.test/FUZZ -mc 200"})
+	if !state.ReconCoverage.ContentDiscoveredHosts["example.test"] {
+		t.Fatal("ffuf should mark ContentDiscoveredHosts for the host")
+	}
+
+	// Parameter discovery
+	hookWorkTracker(state, map[string]string{"tool_name": "terminal_execute", "command": "arjun -u https://example.test/search"})
+	if !state.ReconCoverage.ParamDiscovered {
+		t.Fatal("arjun should mark ParamDiscovered")
+	}
+}

@@ -120,6 +120,12 @@ func TestMaybeAutoDelegateLaunchesOneDeterministicWave(t *testing.T) {
 	state := NewScanState()
 	state.Iteration = 5
 	state.ReconDone = true
+	// Coverage-model evidence: the recon completion gate requires
+	// HTTP probing, tech fingerprinting, and crawling/JS analysis.
+	state.ReconCoverage.HTTPProbed = true
+	state.ReconCoverage.TechFingerprinted = true
+	state.ReconCoverage.Crawled = true
+	state.ReconCoverage.ContentDiscoveredHosts["example.test"] = true
 	state.Plan = AutoPlan([]string{"/api/users"}, nil) // stale: built from the seeded surface only
 	state.DiscoveredEndpoints = []string{"/api/users", "/admin/export", "/search"}
 	state.PlanBuilt = true
@@ -255,6 +261,10 @@ func TestMaybeAutoDelegateSkipsNarrowModes(t *testing.T) {
 		state.EndpointInventorySaved = true
 		state.DirBustingDone = true
 		state.DetectedTechs["flask"] = true
+		state.ReconCoverage.HTTPProbed = true
+		state.ReconCoverage.TechFingerprinted = true
+		state.ReconCoverage.Crawled = true
+		state.ReconCoverage.ContentDiscoveredHosts["example.test"] = true
 		state.Plan = AutoPlan([]string{"/"}, nil)
 		state.PlanBuilt = true
 		state.LedgerSeeded = true

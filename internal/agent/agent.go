@@ -659,7 +659,65 @@ func (a *Agent) reconPhaseComplete() bool {
 		return false
 	}
 	s := a.state
-	return s.ReconDone && s.EndpointInventorySaved && s.DirBustingDone && len(s.DetectedTechs) > 0
+
+	// Legacy booleans remain the floor: a curl, an inventory note, one
+	// content-discovery pass, and at least one detected tech. The coverage
+	// model adds the breadth that was previously missing.
+	if !s.ReconDone || !s.EndpointInventorySaved || !s.DirBustingDone || len(s.DetectedTechs) == 0 {
+		return false
+	}
+
+	// Per-dimension requirements: each must be complete or marked
+	// not-applicable. Raw IP targets skip DNS/subdomain dimensions;
+	// static sites skip API/JS; targets without auth skip auth mapping.
+	rc := s.ReconCoverage
+
+	// HTTP probing and tech fingerprinting are always required for web targets.
+	if !rc.HTTPProbed {
+		return false
+	}
+	if !rc.TechFingerprinted && !rc.NAMarked["tech_fingerprint"] {
+		return false
+	}
+
+	// Crawling OR JS analysis must have occurred (at least one surface-
+	// mapping technique beyond a single curl).
+	if !rc.Crawled && !rc.JSAnalyzed && !rc.NAMarked["crawling"] {
+		return false
+	}
+
+	// Content discovery: at least one host received a real wordlist pass.
+	// Per-host coverage is tracked but not fully enforced yet — a single
+	// pass on the primary host satisfies this dimension for now, matching
+	// the existing step-by-step chain.
+	if len(rc.ContentDiscoveredHosts) == 0 && !rc.NAMarked["content_discovery"] {
+		return false
+	}
+
+	// Deep mode expects additional breadth. Standard mode treats these
+	// as recommended but not blocking.
+	if a.scanIntensity == activityModeActive && a.isDeepMode() {
+		// Deep: service enumeration and parameter discovery expected.
+		if !rc.ServicesProbed && !rc.NAMarked["service_discovery"] {
+			return false
+		}
+		if !rc.ParamDiscovered && !rc.NAMarked["parameter_discovery"] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isDeepMode reports whether the scan runs in deep-intensity mode. The current
+// engine has active/passive intensity; deep is inferred from the phase
+// selection (all 22 phases selected) or a scan mode override.
+func (a *Agent) isDeepMode() bool {
+	if a == nil {
+		return false
+	}
+	// A full 22-phase selection implies deep methodology.
+	return len(a.state.AllowedPhases) >= 20
 }
 
 // reconIncompleteReasons lists the reconnaissance milestones still missing,
@@ -669,7 +727,9 @@ func (a *Agent) reconIncompleteReasons() []string {
 		return nil
 	}
 	s := a.state
+	rc := s.ReconCoverage
 	var missing []string
+
 	if !s.ReconDone {
 		missing = append(missing, "banner/technology fingerprinting (curl -sI, whatweb)")
 	}
@@ -681,6 +741,28 @@ func (a *Agent) reconIncompleteReasons() []string {
 	}
 	if len(s.DetectedTechs) == 0 {
 		missing = append(missing, "technology stack detection (whatweb / server headers)")
+	}
+
+	// Coverage-model dimensions
+	if !rc.HTTPProbed {
+		missing = append(missing, "HTTP probing of the live web surface (confirm status, title, redirects)")
+	}
+	if !rc.TechFingerprinted && !rc.NAMarked["tech_fingerprint"] {
+		missing = append(missing, "deliberate technology fingerprinting (whatweb / wappalyzer, not just a Server header)")
+	}
+	if !rc.Crawled && !rc.JSAnalyzed && !rc.NAMarked["crawling"] {
+		missing = append(missing, "web crawling or JavaScript analysis (katana/gospider/sitemap or JS bundle routes)")
+	}
+	if len(rc.ContentDiscoveredHosts) == 0 && !rc.NAMarked["content_discovery"] {
+		missing = append(missing, "content discovery with a real wordlist on the primary host")
+	}
+	if a.isDeepMode() {
+		if !rc.ServicesProbed && !rc.NAMarked["service_discovery"] {
+			missing = append(missing, "service/port enumeration (nmap/naabu on the target)")
+		}
+		if !rc.ParamDiscovered && !rc.NAMarked["parameter_discovery"] {
+			missing = append(missing, "parameter/input discovery (arjun/x8, forms, query parameters)")
+		}
 	}
 	return missing
 }
