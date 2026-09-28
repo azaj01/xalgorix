@@ -344,3 +344,45 @@ func TestDelegatedSubagentInheritsRootLLMClient(t *testing.T) {
 		t.Fatalf("subAgent url = %q, want %q", ep.URL, "https://api.crusoecloud.com/v1/chat/completions")
 	}
 }
+
+// XALGORIX_DISABLED_SPECIALISTS excludes named lanes from both the early
+// discovery stage and the testing wave, without touching the binary version.
+func TestSpecialistDisabled(t *testing.T) {
+	a := &Agent{}
+	if a.specialistDisabled("recon-discovery") {
+		t.Fatal("recon-discovery should be enabled with no config")
+	}
+
+	a = &Agent{cfg: &config.Config{
+		DisabledSpecialists: []string{"recon-discovery"},
+	}}
+	if !a.specialistDisabled("recon-discovery") {
+		t.Fatal("recon-discovery should be disabled")
+	}
+	if !a.specialistDisabled("RECON-DISCOVERY") {
+		t.Fatal("case-insensitive match failed")
+	}
+	if a.specialistDisabled("injection-serverside") {
+		t.Fatal("injection-serverside should still be enabled")
+	}
+
+	a = &Agent{cfg: &config.Config{
+		DisabledSpecialists: []string{"recon-discovery", "authz-logic"},
+	}}
+	if !a.specialistDisabled("recon-discovery") || !a.specialistDisabled("authz-logic") {
+		t.Fatal("both lanes should be disabled")
+	}
+	if a.specialistDisabled("client-source") {
+		t.Fatal("client-source should still be enabled")
+	}
+
+	authenticated := &Agent{
+		cfg:        &config.Config{DisabledSpecialists: []string{"injection-serverside"}},
+		targetAuth: "Authorization: Bearer x",
+	}
+	for _, p := range authenticated.eligibleSpecialistProfiles() {
+		if p.Role == "injection-serverside" {
+			t.Fatal("disabled lane appeared in the testing wave")
+		}
+	}
+}

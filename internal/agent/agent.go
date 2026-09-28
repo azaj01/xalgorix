@@ -633,6 +633,12 @@ func (a *Agent) noteDelegationDefer(reason string) {
 	if a == nil || a.state == nil {
 		return
 	}
+	// Surface operator-disabled lanes in the defer message so the log
+	// explains itself: the operator turned them off, the engine didn't lose
+	// them.
+	if a.cfg != nil && len(a.cfg.DisabledSpecialists) > 0 && strings.Contains(reason, "not complete") {
+		reason += " (operator-disabled lanes: " + strings.Join(a.cfg.DisabledSpecialists, ", ") + ")"
+	}
 	if a.state.DelegationDeferReason == reason {
 		return
 	}
@@ -722,7 +728,7 @@ func (a *Agent) maybeAutoDelegate(targets []string) string {
 		a.state.LedgerSeeded && a.state.EndpointInventorySaved && a.state.Iteration >= 5 &&
 		a.agentGraph.DelegationCount() == 0 {
 		for _, profile := range defaultSpecialistProfiles {
-			if profile.Role != "recon-discovery" {
+			if profile.Role != "recon-discovery" || a.specialistDisabled(profile.Role) {
 				continue
 			}
 			if id := a.spawnSpecialistProfile(profile, targets); id != "" {
@@ -767,6 +773,9 @@ func (a *Agent) maybeAutoDelegate(targets []string) string {
 	profiles := a.eligibleSpecialistProfiles()
 	spawned := make([]string, 0, len(profiles))
 	for _, profile := range profiles {
+		if a.specialistDisabled(profile.Role) {
+			continue
+		}
 		if id := a.spawnSpecialistProfile(profile, targets); id != "" {
 			spawned = append(spawned, id)
 		}
@@ -797,6 +806,10 @@ func (a *Agent) eligibleSpecialistProfiles() []specialistProfile {
 			continue
 		}
 		if profile.Role == "authz-logic" && len(a.authzIdentities()) <= 1 {
+			continue
+		}
+		// Operator-toggled lanes are excluded from the wave entirely.
+		if a.specialistDisabled(profile.Role) {
 			continue
 		}
 		profiles = append(profiles, profile)
@@ -835,6 +848,22 @@ Stopping rule: %s.`, profile.Role, target, strings.Join(profile.VulnClasses, ", 
 	}
 	id, _ := result.Metadata["agent_id"].(string)
 	return id
+}
+
+// specialistDisabled reports whether the named specialist lane is turned off
+// via XALGORIX_DISABLED_SPECIALISTS (comma-separated lane names). Names match
+// the profile Role exactly and are matched case-insensitively.
+func (a *Agent) specialistDisabled(role string) bool {
+	if a == nil || a.cfg == nil || len(a.cfg.DisabledSpecialists) == 0 {
+		return false
+	}
+	want := strings.ToLower(strings.TrimSpace(role))
+	for _, d := range a.cfg.DisabledSpecialists {
+		if d == want {
+			return true
+		}
+	}
+	return false
 }
 
 // PlanDisposition returns the root plan's final task dispositions for
