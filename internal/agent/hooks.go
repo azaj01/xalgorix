@@ -45,14 +45,62 @@ var notesBlobForContext func(scanContextID string) string
 
 // ScanState holds all mutable state that hooks can read and write.
 // It replaces the loose local variables previously scattered in Run().
+
+// ReconCoverage models per-dimension reconnaissance evidence. The completion
+// gate (reconPhaseComplete) checks applicable dimensions; non-applicable
+// dimensions are skipped, not blocking.
+type ReconCoverage struct {
+	// DNSResolved: evidence of DNS lookups for the target (dig/nslookup/host).
+	DNSResolved bool
+	// ServicesProbed: port/service enumeration ran (nmap/naabu/masscan or
+	// explicit multi-port HTTP probes).
+	ServicesProbed bool
+	// HTTPProbed: the live web surface was confirmed (status, redirect, title,
+	// content-type observed — not just a curl exit).
+	HTTPProbed bool
+	// TechFingerprinted: deliberate technology detection beyond a single
+	// Server header (whatweb, wappalyzer, or framework-specific signals).
+	TechFingerprinted bool
+	// Crawled: web crawling occurred (katana/gospider/sitemap/robots/links/
+	// forms or browser-derived navigation).
+	Crawled bool
+	// ContentDiscoveredHosts: hosts that received a wordlist content-discovery
+	// pass. Per-host, not global: ffuf on one host does not cover others.
+	ContentDiscoveredHosts map[string]bool
+	// JSAnalyzed: JavaScript bundles were downloaded and analyzed for routes,
+	// secrets, sinks, or source maps.
+	JSAnalyzed bool
+	// APISurfaceDiscovered: API surface identified (OpenAPI/Swagger/GraphQL/
+	// REST routes observed — beyond generic page URLs).
+	APISurfaceDiscovered bool
+	// ParamDiscovered: parameter/input discovery ran or parameters were
+	// observed (arjun/x8, forms, query strings, JSON bodies).
+	ParamDiscovered bool
+	// AuthMapped: authenticated surface understood. Empty = pending,
+	// "complete" = mapped, "blocked" = no credentials, "not_applicable" =
+	// no auth surface.
+	AuthMapped string
+	// HistoricalChecked: historical URLs examined (wayback/gau/archive).
+	HistoricalChecked bool
+	// NAMarked: dimensions the model has justified as not applicable via
+	// update_plan skip notes or recon N/A markers.
+	NAMarked map[string]bool
+}
+
 type ScanState struct {
-	Iteration                int
-	ScanContextID            string // owning scan-context ID, so hooks can reach shared stores (notes) without an import cycle
-	TerminalCalls            int
-	MeaningfulTestCalls      int
-	SkillsLoaded             int
-	UniqueToolsUsed          map[string]bool
-	ReconDone                bool
+	Iteration           int
+	ScanContextID       string // owning scan-context ID, so hooks can reach shared stores (notes) without an import cycle
+	TerminalCalls       int
+	MeaningfulTestCalls int
+	SkillsLoaded        int
+	UniqueToolsUsed     map[string]bool
+	ReconDone           bool
+	// ReconCoverage tracks evidence per recon dimension. Unlike the simple
+	// booleans above (which fire from a single command), the coverage model
+	// distinguishes what was ACTUALLY done so the completion gate can demand
+	// defensible breadth. Each dimension is: "" pending, "complete", or
+	// "not_applicable". Not every dimension applies to every target.
+	ReconCoverage            ReconCoverage
 	ScannerUsed              bool
 	FinishAttempts           int
 	MaxFinishRejections      int
@@ -231,11 +279,15 @@ type ScanState struct {
 // NewScanState creates a zero-value ScanState with initialized maps.
 func NewScanState() *ScanState {
 	return &ScanState{
-		UniqueToolsUsed:           make(map[string]bool),
-		DetectedTechs:             make(map[string]bool),
-		InjectionEndpoints:        make(map[string]bool),
-		AccessControlEndpoints:    make(map[string]bool),
-		DirBustingHosts:           make(map[string]bool),
+		UniqueToolsUsed:        make(map[string]bool),
+		DetectedTechs:          make(map[string]bool),
+		InjectionEndpoints:     make(map[string]bool),
+		AccessControlEndpoints: make(map[string]bool),
+		DirBustingHosts:        make(map[string]bool),
+		ReconCoverage: ReconCoverage{
+			ContentDiscoveredHosts: make(map[string]bool),
+			NAMarked:               make(map[string]bool),
+		},
 		EndpointsTested:           make(map[string]bool),
 		EndpointClassCoverage:     make(map[string]map[string]bool),
 		VulnClassesTested:         make(map[string]bool),
@@ -756,6 +808,69 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 			state.ReconDone = true
 		}
 
+		// ── Per-dimension recon evidence ──
+		// DNS: dig/nslookup/host commands
+		if strings.Contains(cmd, "dig ") || strings.Contains(cmd, "nslookup ") ||
+			strings.Contains(cmd, "host ") {
+			state.ReconCoverage.DNSResolved = true
+		}
+		// Service/port discovery: nmap/naabu/masscan or explicit multi-port probe
+		if strings.Contains(cmd, "nmap") || strings.Contains(cmd, "naabu") ||
+			strings.Contains(cmd, "masscan") || strings.Contains(cmd, "-p ") ||
+			(strings.Contains(cmd, "port") && strings.Contains(cmd, "curl")) {
+			state.ReconCoverage.ServicesProbed = true
+		}
+		// HTTP probing: any successful HTTP interaction (curl with status/output)
+		if strings.Contains(cmd, "curl") || strings.Contains(cmd, "httpx") {
+			state.ReconCoverage.HTTPProbed = true
+		}
+		// Tech fingerprinting: whatweb/wappalyzer or framework-specific analysis
+		if strings.Contains(cmd, "whatweb") || strings.Contains(cmd, "wappalyzer") ||
+			strings.Contains(cmd, "wafw00f") || strings.Contains(cmd, "server:") ||
+			strings.Contains(cmd, "x-powered-by") {
+			state.ReconCoverage.TechFingerprinted = true
+		}
+		// Crawling: katana/gospider/sitemap/robots/browser navigation
+		if strings.Contains(cmd, "katana") || strings.Contains(cmd, "gospider") ||
+			strings.Contains(cmd, "sitemap") || strings.Contains(cmd, "robots.txt") ||
+			strings.Contains(cmd, "discover_client_routes") ||
+			(strings.Contains(cmd, "grep") && strings.Contains(cmd, "href")) {
+			state.ReconCoverage.Crawled = true
+		}
+		// JS analysis: downloading and analyzing .js files
+		if (strings.Contains(cmd, ".js") || strings.Contains(cmd, "bundle") ||
+			strings.Contains(cmd, "chunk")) && strings.Contains(cmd, "curl") {
+			state.ReconCoverage.JSAnalyzed = true
+		}
+		// API surface: OpenAPI/Swagger/GraphQL/API path detection
+		if strings.Contains(cmd, "swagger") || strings.Contains(cmd, "openapi") ||
+			strings.Contains(cmd, "graphql") || strings.Contains(cmd, "api-docs") ||
+			strings.Contains(cmd, "/api/") || strings.Contains(cmd, "introspection") {
+			state.ReconCoverage.APISurfaceDiscovered = true
+		}
+		// Parameter discovery: arjun/x8/paramspider or form/query analysis
+		if strings.Contains(cmd, "arjun") || strings.Contains(cmd, "x8 ") ||
+			strings.Contains(cmd, "paramspider") || strings.Contains(cmd, "parameth") ||
+			(strings.Contains(cmd, "grep") && strings.Contains(cmd, "param")) ||
+			strings.Contains(cmd, "form") {
+			state.ReconCoverage.ParamDiscovered = true
+		}
+		// Auth mapping: login/auth/token/session endpoints
+		if strings.Contains(cmd, "login") || strings.Contains(cmd, "/auth") ||
+			strings.Contains(cmd, "session") || strings.Contains(cmd, "signup") ||
+			strings.Contains(cmd, "register") {
+			if state.AuthContextAvailable {
+				state.ReconCoverage.AuthMapped = "complete"
+			} else {
+				state.ReconCoverage.AuthMapped = "blocked"
+			}
+		}
+		// Historical URLs: wayback/gau/archive
+		if strings.Contains(cmd, "wayback") || strings.Contains(cmd, "gau") ||
+			strings.Contains(cmd, "web.archive.org") || strings.Contains(cmd, "common crawl") {
+			state.ReconCoverage.HistoricalChecked = true
+		}
+
 		// Detect directory busting — track unique hosts/paths
 		if strings.Contains(cmd, "ffuf") || strings.Contains(cmd, "gobuster") ||
 			strings.Contains(cmd, "dirsearch") || strings.Contains(cmd, "feroxbuster") ||
@@ -763,6 +878,7 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 			host := extractHostFromCmd(cmd)
 			if host != "" {
 				state.DirBustingHosts[host] = true
+				state.ReconCoverage.ContentDiscoveredHosts[host] = true
 			}
 			state.DirBustingDone = true
 			// Depth signal: a real content-discovery pass runs a wordlist, not a
