@@ -634,6 +634,12 @@ const defaultChecklist = `
 **The more you find here, the more attack surface you can test later!**
 **MUST COMPLETE THIS PHASE FULLY BEFORE MOVING ON - Do not skip!**
 
+**Load reconnaissance skills FIRST, before any exploitation skill:**
+- read_skill(name="api-discovery") - comprehensive API attack-surface discovery
+- read_skill(name="javascript-analysis") - extracting routes, secrets, and sinks from JS bundles
+- read_skill(name="subdomain-enumeration") - subdomain and asset discovery
+Only AFTER these are loaded and Phase 1 is progressing should you load exploitation-class skills.
+
 ## ⚡ MANDATORY FIRST 5 ITERATIONS — EXECUTE IN THIS EXACT ORDER
 These steps MUST be completed FIRST, IN ORDER, before any creative exploration.
 Skipping or reordering these causes inconsistent coverage across scans.
