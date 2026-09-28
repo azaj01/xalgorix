@@ -73,23 +73,38 @@ type specialistProfile struct {
 
 var defaultSpecialistProfiles = []specialistProfile{
 	{
+		// Discovery lane: launches EARLY (as soon as the plan + ledger exist),
+		// in parallel with the root's remaining baseline recon — not with the
+		// testing wave. Deep enumeration beyond the root's bounded baseline is
+		// the highest-leverage coverage lever: undiscovered surface is silently
+		// untested surface (missed debug consoles, backup files, source maps).
+		Role:  "recon-discovery",
+		Focus: "Deep surface enumeration: crawling, content/file discovery, fingerprinting depth, hidden paths, parameter mining",
+		VulnClasses: []string{
+			"dirbusting", "parameter_mining", "file_disclosure", "subdomain-takeover",
+			"email-security", "cms-fingerprinting", "cloud-config",
+		},
+		EvidenceContract: "surface DISCOVERY only — never exploit; report suspected exposures (open .git, readable backups, leaked config) as hypotheses for the testing lanes. Go BEYOND the root's already-inventoried baseline routes: extension-based content fuzzing (.bak/.old/.orig/.save, backup archives, .git/.env/config source files, debug consoles), recursive crawling of forms/links/JS-declared routes, source-map hunting, parameter mining (arjun/x8), CMS/plugin fingerprinting, mail-domain SPF/DKIM/DMARC checks, CNAME/takeover checks for discovered subdomains. LIVE-VERIFY every candidate route (a real HTTP response class, not a wordlist hit alone) and fold ALL new routes into a note titled 'Discovery Manifest' with the heading 'Discovered Endpoints:' followed by one path per line, so the coordinator's plan and the testing lanes absorb them. Do not re-run the root's baseline wordlist or re-fingerprint what the inventory already records",
+		StoppingRule:     "bounded: stop when a full discovery pass over every technique adds no new live route to the Discovery Manifest, or the lane budget is exhausted; never re-enumerate already-inventoried routes",
+	},
+	{
 		Role:             "authz-logic",
 		Focus:            "Authorization, access control, and business-logic abuse",
-		VulnClasses:      []string{"idor", "bola", "bfla", "privilege-escalation", "auth-bypass", "business-logic"},
+		VulnClasses:      []string{"idor", "bola", "bfla", "privilege-escalation", "auth-bypass", "business-logic", "race-conditions"},
 		EvidenceContract: "only enter this lane when live reconnaissance provides the required account/session roles or an operator-supplied credential path; use a baseline request as the legitimate role AND the same request as another/lower-privileged role, showing a concrete cross-role difference (cross-user/cross-tenant data or a state-changing action) — the authz_matrix tool produces this differential automatically across role A / role B / anonymous. For EVERY user-scoped state-changing endpoint, test ownership AND uniqueness enforcement with two distinct identities (act as user A on user B\u2019s object or repeat user A\u2019s submission as user B — cross-user bookings/reservations/records must fail). For authentication flows, test token identity (two different users logging in must NOT receive identical or interchangeable tokens) and expiry enforcement (an expired token must be rejected), plus a bounded failed-login burst to check authentication rate limiting (stop early once the counter proves unlimited attempts; do not lock out real accounts). Do not substitute default-password spraying, account creation on a disabled signup flow, or offline hash cracking for missing role prerequisites",
 		StoppingRule:     "do not stop after the first finding; exhaust every assigned object/action and role boundary, report each distinct proven failure, reject each safe hypothesis with its baseline, and finish only when no assigned queued/testing hypothesis remains",
 	},
 	{
 		Role:             "injection-serverside",
 		Focus:            "Injection and server-side behavior",
-		VulnClasses:      []string{"rce", "remote-code-execution", "code-injection", "expression-injection", "jndi-injection", "jdbc-injection", "sqli", "blind-sqli", "nosqli", "ssti", "cmdi", "ssrf", "xxe", "lfi", "path_traversal", "deserialization"},
+		VulnClasses:      []string{"rce", "remote-code-execution", "code-injection", "expression-injection", "jndi-injection", "jdbc-injection", "sqli", "blind-sqli", "nosqli", "ssti", "cmdi", "ssrf", "xxe", "lfi", "path_traversal", "deserialization", "file-upload", "websocket"},
 		EvidenceContract: "own remote/code-execution hypotheses as well as injection primitives, including version-matched public-advisory leads on a reachable route. For an exact product/version or CVE lead, use web_search/exploit_search and cve_search once, recover the authoritative request byte-for-byte, and replay that exact request before adapting it; preserve nested JSON, escaped Unicode/newlines, quoting, and Content-Type instead of reconstructing a multi-line payload ad hoc. Require a concrete exploitation outcome — extracted data, command/template output, a target-attributable out-of-band (interactsh/OAST) callback emitted by the claimed primitive, or verify_timing's repeated control/probe differential for an unambiguous safe delay primitive — not a version banner, reflected payload, scanner-origin callback, single slow response, or timing hunch. For RCE/CMDi, a RUNSCRIPT/URL/XML/webhook/database fetch proves only that fetch primitive; the callback must be emitted by an injected OS/runtime/template execution expression. For blind JVM/native-runtime exploits prefer a server-native safe primitive such as Thread.sleep over assuming curl/wget exists. Once one exact root cause is proven, report its strongest safe impact and move to the next distinct class/endpoint; do not repeatedly read more files or crack recovered hashes merely to inflate the same finding",
 		StoppingRule:     "do not stop after the first finding; exhaust every assigned endpoint × class hypothesis, report each distinct proven issue, reject each safe hypothesis with its control, and finish only when no assigned queued/testing hypothesis remains",
 	},
 	{
 		Role:             "client-source",
 		Focus:            "Client/API surface, including discovered dynamic URL routes, and source-to-sink data flow when source is available",
-		VulnClasses:      []string{"xss", "dom-xss", "csrf", "open-redirect", "cors", "secret-exposure", "api-auth"},
+		VulnClasses:      []string{"xss", "dom-xss", "csrf", "open-redirect", "cors", "secret-exposure", "api-auth", "content-spoofing", "broken-link-hijacking"},
 		EvidenceContract: "use the first-class discover_client_routes on the live root/login page before manually downloading or grepping bundles, then inventory its dynamic path segments; it automatically browser-checks a bounded set of the highest-priority public prefixes when AngularJS signals are returned, and any AUTOMATED PATH-XSS CONFIRMED result must be reported immediately. Use browser_action command=verify_path_template_xss only for additional candidates. For other XSS/DOM contexts use command=verify_xss. Require browser-confirmed script execution, not reflection; for source review require an attacker-input→sensitive-sink path plus a live request that exercises it",
 		StoppingRule:     "do not stop after the first finding; exhaust every assigned client/API/source hypothesis, report each distinct proven issue, reject each defended path with evidence, and finish only when no assigned queued/testing hypothesis remains",
 	},

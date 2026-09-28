@@ -324,7 +324,13 @@ func TestSpecialistProfilesCoverWeakClasses(t *testing.T) {
 		for _, c := range p.VulnClasses {
 			covered[c] = true
 		}
-		if !strings.Contains(p.StoppingRule, "do not stop after the first finding") ||
+		// The recon-discovery lane is a bounded ENUMERATION lane, not a
+		// hypothesis-exhaustion lane: its stop rule is budget/manifest-shaped.
+		if p.Role == "recon-discovery" {
+			if !strings.Contains(p.StoppingRule, "bounded") {
+				t.Fatalf("discovery lane must have a bounded stop rule: %s", p.StoppingRule)
+			}
+		} else if !strings.Contains(p.StoppingRule, "do not stop after the first finding") ||
 			!strings.Contains(p.StoppingRule, "no assigned queued/testing hypothesis remains") {
 			t.Fatalf("specialist profile %q permits premature lane completion: %s", p.Role, p.StoppingRule)
 		}
@@ -340,7 +346,15 @@ func TestSpecialistProfilesCoverWeakClasses(t *testing.T) {
 			t.Fatalf("expected specialist profiles to cover %q", want)
 		}
 	}
-	injection := defaultSpecialistProfiles[1]
+	var injection *specialistProfile
+	for i := range defaultSpecialistProfiles {
+		if defaultSpecialistProfiles[i].Role == "injection-serverside" {
+			injection = &defaultSpecialistProfiles[i]
+		}
+	}
+	if injection == nil {
+		t.Fatal("missing injection-serverside profile")
+	}
 	for _, want := range []string{"version-matched public-advisory leads", "web_search/exploit_search", "cve_search", "target-attributable", "verify_timing", "Thread.sleep"} {
 		if !strings.Contains(injection.EvidenceContract, want) {
 			t.Fatalf("server-side specialist is missing advisory-guided proof rule %q: %s", want, injection.EvidenceContract)

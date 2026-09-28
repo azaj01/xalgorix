@@ -104,8 +104,10 @@ func TestMaybeAutoDelegateLaunchesOneDeterministicWave(t *testing.T) {
 	tasks := make(chan struct {
 		name string
 		task string
-	}, len(defaultSpecialistProfiles))
-	graph := agentsgraph.New(context.Background(), func(_ context.Context, _ string, name string, _ []string, task string) (string, error) {
+	}, len(defaultSpecialistProfiles)+1)
+	// Match the production lifetime cap: every engine lane (discovery +
+	// testing wave) plus one manual spawn.
+	graph := agentsgraph.NewWithLimit(context.Background(), len(defaultSpecialistProfiles)+1, func(_ context.Context, _ string, name string, _ []string, task string) (string, error) {
 		tasks <- struct {
 			name string
 			task string
@@ -134,20 +136,53 @@ func TestMaybeAutoDelegateLaunchesOneDeterministicWave(t *testing.T) {
 		t.Fatalf("delegation launched before an endpoint inventory: message=%q count=%d", got, graph.DelegationCount())
 	}
 	state.EndpointInventorySaved = true
-	// Recon-first sequencing: an inventory note alone must not launch the wave
-	// while content discovery and technology detection are still outstanding.
-	if got := a.maybeAutoDelegate([]string{"https://example.test"}); got != "" || graph.DelegationCount() != 0 {
-		t.Fatalf("delegation launched before comprehensive recon completed: message=%q count=%d", got, graph.DelegationCount())
+
+	// ── Stage E: the discovery lane launches right after the inventory +
+	// plan + ledger exist, in parallel with the root's remaining baseline
+	// recon (dirbust + tech detection are still outstanding here).
+	discoveryMsg := a.maybeAutoDelegate([]string{"https://example.test"})
+	if graph.DelegationCount() != 1 {
+		t.Fatalf("discovery lane: delegated %d agents, want 1", graph.DelegationCount())
+	}
+	if !strings.Contains(discoveryMsg, "ENGINE DISCOVERY LANE STARTED") {
+		t.Fatalf("discovery lane message missing: %q", discoveryMsg)
+	}
+	if !state.ReconLaneLaunched || state.DelegationAttempted {
+		t.Fatalf("discovery lane flags wrong: reconLane=%v waveAttempted=%v", state.ReconLaneLaunched, state.DelegationAttempted)
+	}
+	select {
+	case got := <-tasks:
+		if got.name != "recon-discovery" {
+			t.Fatalf("first launch should be the discovery lane, got %q", got.name)
+		}
+		if !strings.Contains(got.task, "Discovery Manifest") {
+			t.Fatalf("discovery lane task lacks the manifest contract: %s", got.task)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for discovery-lane task")
+	}
+
+	// The testing wave still waits for comprehensive recon.
+	if got := a.maybeAutoDelegate([]string{"https://example.test"}); got != "" || graph.DelegationCount() != 1 {
+		t.Fatalf("testing wave launched before comprehensive recon: message=%q count=%d", got, graph.DelegationCount())
 	}
 	state.DirBustingDone = true
 	state.DetectedTechs["flask"] = true
+
+	// ── Stage W: the testing wave launches the non-overlapping lanes
+	// (authz-logic included: operator token supplies both identities).
 	message := a.maybeAutoDelegate([]string{"https://example.test"})
 	if graph.DelegationCount() != len(defaultSpecialistProfiles) {
-		t.Fatalf("delegated %d agents, want one %d-agent wave", graph.DelegationCount(), len(defaultSpecialistProfiles))
+		t.Fatalf("delegated %d agents total, want %d (1 discovery + testing lanes)", graph.DelegationCount(), len(defaultSpecialistProfiles))
 	}
-	for range defaultSpecialistProfiles {
+	waveNames := map[string]bool{}
+	for range a.eligibleSpecialistProfiles() {
 		select {
 		case got := <-tasks:
+			if got.name == "recon-discovery" {
+				t.Fatal("discovery lane must not relaunch with the testing wave")
+			}
+			waveNames[got.name] = true
 			if want := "tmp/" + got.name + "/"; !strings.Contains(got.task, want) {
 				t.Errorf("specialist %q lacks an isolated scratch directory %q in task: %s", got.name, want, got.task)
 			}
@@ -155,8 +190,8 @@ func TestMaybeAutoDelegateLaunchesOneDeterministicWave(t *testing.T) {
 			t.Fatal("timed out waiting for delegated task")
 		}
 	}
-	if !state.DelegationAttempted || !strings.Contains(message, "ENGINE DELEGATION STARTED") {
-		t.Fatalf("automatic delegation was not recorded: attempted=%v message=%q", state.DelegationAttempted, message)
+	if !state.DelegationAttempted || !state.WaveLaunched || !strings.Contains(message, "ENGINE DELEGATION STARTED") {
+		t.Fatalf("wave not recorded: attempted=%v wave=%v message=%q", state.DelegationAttempted, state.WaveLaunched, message)
 	}
 	// The stale one-endpoint plan must have been rebuilt from the full
 	// discovered surface at wave launch, so specialists partition every
@@ -180,19 +215,29 @@ func TestMaybeAutoDelegateLaunchesOneDeterministicWave(t *testing.T) {
 }
 
 func TestEligibleSpecialistProfilesRequireAuthenticatedIdentityForAuthz(t *testing.T) {
+	// The recon-discovery lane launches EARLY and is excluded from the
+	// testing wave; authz is filtered without identities.
 	unauthenticated := (&Agent{}).eligibleSpecialistProfiles()
-	if len(unauthenticated) != len(defaultSpecialistProfiles)-1 {
-		t.Fatalf("anonymous-only scan got %d profiles, want %d", len(unauthenticated), len(defaultSpecialistProfiles)-1)
+	if len(unauthenticated) != len(defaultSpecialistProfiles)-2 {
+		t.Fatalf("anonymous-only scan got %d profiles, want %d", len(unauthenticated), len(defaultSpecialistProfiles)-2)
 	}
 	for _, profile := range unauthenticated {
 		if profile.Role == "authz-logic" {
 			t.Fatal("anonymous-only scan must not auto-launch the authz specialist")
 		}
+		if profile.Role == "recon-discovery" {
+			t.Fatal("recon-discovery launches early, never with the testing wave")
+		}
 	}
 
 	authenticated := (&Agent{targetAuth: "Authorization: Bearer operator-test-token"}).eligibleSpecialistProfiles()
-	if len(authenticated) != len(defaultSpecialistProfiles) {
-		t.Fatalf("authenticated scan got %d profiles, want %d", len(authenticated), len(defaultSpecialistProfiles))
+	if len(authenticated) != len(defaultSpecialistProfiles)-1 {
+		t.Fatalf("authenticated scan got %d profiles, want %d", len(authenticated), len(defaultSpecialistProfiles)-1)
+	}
+	for _, profile := range authenticated {
+		if profile.Role == "recon-discovery" {
+			t.Fatal("recon-discovery launches early, never with the testing wave")
+		}
 	}
 }
 

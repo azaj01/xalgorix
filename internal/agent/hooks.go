@@ -214,6 +214,8 @@ type ScanState struct {
 	DelegationAttempted         bool            // coordinator called spawn_agent/create_agent
 	ReconGateBlocks             int             // coordinator claim attempts blocked by the recon-first gate (bounded bypass)
 	DelegationDeferReason       string          // last specialist-wave defer reason, for change-triggered diagnostics
+	ReconLaneLaunched           bool            // engine launched the early recon-discovery lane
+	WaveLaunched                bool            // engine launched the testing specialist wave
 	DirBustingUsedWordlist      bool            // content discovery ran with a real wordlist (-w/--wordlist), not a single targeted probe
 	DelegationNudgeFired        bool            // multi-agent role decomposition nudge sent once
 	DelegationNudgeAt           int             // iteration of the initial decomposition nudge
