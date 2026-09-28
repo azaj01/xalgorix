@@ -26,6 +26,7 @@ type Config struct {
 	APIKey              string   // XALGORIX_API_KEY — API key
 	APIKeys             []string // XALGORIX_API_KEYS — additional provider API keys rotated to dodge provider rate limits (combined with APIKey)
 	DisableAutoDelegate bool     // XALGORIX_DISABLE_AUTO_DELEGATE — skip the deterministic specialist wave entirely
+	DisabledSpecialists []string // XALGORIX_DISABLED_SPECIALISTS — comma-separated lane names to skip
 	Checklist           string   // XALGORIX_CHECKLIST - full or professional
 	LLMProfile          string   // XALGORIX_LLM_PROFILE — active credential pointer "<provider>:<profileId>" (v4.4.22+)
 	ReasoningEffort     string   // XALGORIX_REASONING_EFFORT — "none", "low", "medium", "high", or "xhigh"
@@ -393,6 +394,7 @@ func load() *Config {
 		APIKey:                  envOr("XALGORIX_API_KEY", ""),
 		APIKeys:                 ParseAPIKeyList(envOr("XALGORIX_API_KEYS", "")),
 		DisableAutoDelegate:     envOrBool("XALGORIX_DISABLE_AUTO_DELEGATE", false),
+		DisabledSpecialists:     envOrStringSlice("XALGORIX_DISABLED_SPECIALISTS"),
 		Checklist:               envOrChecklist(envOr("XALGORIX_CHECKLIST", "full")),
 		LLMProfile:              envOr("XALGORIX_LLM_PROFILE", ""),
 		ReasoningEffort:         envOr("XALGORIX_REASONING_EFFORT", "high"),
@@ -751,6 +753,23 @@ func envOrFloatPtr(key string, fallback float64) *float64 {
 		}
 	}
 	return &fallback
+}
+
+// envOrStringSlice reads a comma-separated env var into a trimmed, non-empty
+// string slice. Empty/unset returns nil.
+func envOrStringSlice(key string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, strings.ToLower(t))
+		}
+	}
+	return out
 }
 
 func envOrBool(key string, fallback bool) bool {
