@@ -511,7 +511,10 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 
 	if a.agentGraph == nil {
 		a.ownsAgentGraph = true
-		a.agentGraph = agentsgraph.New(a.ctx, func(ctx context.Context, agentID, subName string, targets []string, task string) (string, error) {
+		// The lifetime cap must cover every engine lane plus one manual
+		// model-spawned agent: the early recon-discovery lane launches before
+		// the testing wave, so the old default (3) would strand the wave.
+		a.agentGraph = agentsgraph.NewWithLimit(a.ctx, len(defaultSpecialistProfiles)+1, func(ctx context.Context, agentID, subName string, targets []string, task string) (string, error) {
 			subEvents := make(chan Event, 256)
 			// All descendants join this root's graph and inherit its cancellation
 			// context. Creating a child therefore cannot overwrite another scan's
@@ -701,15 +704,50 @@ func (a *Agent) maybeAutoDelegate(targets []string) string {
 		a.state.DelegationAttempted = true
 		return ""
 	}
-	if !a.reconPhaseComplete() || a.state.Iteration < 5 || a.state.Plan == nil ||
-		!a.state.PlanBuilt || !a.state.LedgerSeeded || a.agentGraph.DelegationCount() > 0 {
-		if a.state.Iteration >= 5 {
-			a.noteDelegationDefer("comprehensive recon not complete (missing: " + strings.Join(a.reconIncompleteReasons(), ", ") + ")")
-		}
-		return ""
-	}
 	if _, ok := a.registry.Get("spawn_agent"); !ok {
 		a.noteDelegationDefer("spawn_agent tool is not available in this agent's registry")
+		return ""
+	}
+
+	// ── Stage E: early discovery lane ──
+	// The recon-discovery specialist launches as soon as the plan + ledger
+	// exist — in PARALLEL with the root's remaining baseline recon (bounded
+	// dirbust, tech detection). Deep enumeration beyond the baseline is the
+	// highest-leverage coverage lever: undiscovered surface is silently
+	// untested surface. Its discoveries flow back through the shared
+	// Discovery Manifest note, which the root's planner re-extracts into the
+	// plan's endpoint set every iteration. Skipped when the model already
+	// spawned anything itself (manual delegation disables engine launches).
+	if !a.state.ReconLaneLaunched && a.state.Plan != nil && a.state.PlanBuilt &&
+		a.state.LedgerSeeded && a.state.EndpointInventorySaved && a.state.Iteration >= 5 &&
+		a.agentGraph.DelegationCount() == 0 {
+		for _, profile := range defaultSpecialistProfiles {
+			if profile.Role != "recon-discovery" {
+				continue
+			}
+			if id := a.spawnSpecialistProfile(profile, targets); id != "" {
+				a.state.ReconLaneLaunched = true
+				a.state.DelegationNudgeFired = true
+				a.state.DelegationDeferReason = ""
+				return fmt.Sprintf("🔭 ENGINE DISCOVERY LANE STARTED: launched the recon-discovery specialist (%s). It enumerates BEYOND your baseline — extensions, params, JS routes, backups, source files — and folds live-verified routes into the 'Discovery Manifest' note; your plan absorbs them automatically. YOU continue the baseline recon NOW (bounded wordlist pass + tech detection): the testing wave still waits for YOUR recon milestones. Do not spawn another discovery agent.", id)
+			}
+		}
+	}
+
+	// ── Stage W: the testing wave ──
+	// One wave over the testing lanes, gated on comprehensive recon as before.
+	// DelegationCount is compared against the engine's own launches: if the
+	// model manually spawned anything beyond the discovery lane, the engine
+	// stays out of delegation entirely (the manual wave owns the graph).
+	engineLaunched := 0
+	if a.state.ReconLaneLaunched {
+		engineLaunched++
+	}
+	if a.state.WaveLaunched || !a.reconPhaseComplete() || a.state.Iteration < 5 || a.state.Plan == nil ||
+		!a.state.PlanBuilt || !a.state.LedgerSeeded || a.agentGraph.DelegationCount() > engineLaunched {
+		if a.state.Iteration >= 5 && !a.state.WaveLaunched {
+			a.noteDelegationDefer("comprehensive recon not complete (missing: " + strings.Join(a.reconIncompleteReasons(), ", ") + ")")
+		}
 		return ""
 	}
 
@@ -726,36 +764,10 @@ func (a *Agent) maybeAutoDelegate(targets []string) string {
 		reconcilePlan(a.state)
 	}
 
-	target := ""
-	if len(targets) > 0 {
-		target = strings.TrimSpace(targets[0])
-	}
 	profiles := a.eligibleSpecialistProfiles()
 	spawned := make([]string, 0, len(profiles))
 	for _, profile := range profiles {
-		task := fmt.Sprintf(`Own ONLY the %q lane against %s.
-Assigned vulnerability classes: %s.
-Start with read_ledger(filter=schedulable), then claim_next_hypothesis separately for every assigned class. Do not repeat root reconnaissance or work outside this lane.
-Local workspace: create and use tmp/%s/ for every scanner-side artifact. Never use host /tmp and never read or overwrite another lane's scratch files.
-Required proof: %s.
-Stopping rule: %s.`, profile.Role, target, strings.Join(profile.VulnClasses, ", "), profile.Role, profile.EvidenceContract, profile.StoppingRule)
-		args := map[string]string{
-			"name": profile.Role,
-			"task": task,
-		}
-		if target != "" {
-			args["target"] = target
-		}
-		a.emit(Event{Type: "tool_call", ToolName: "spawn_agent", ToolArgs: args})
-		result, err := a.registry.Execute("spawn_agent", args)
-		if err != nil {
-			result = tools.Result{Error: err.Error()}
-		}
-		a.emit(Event{Type: "tool_result", ToolName: "spawn_agent", ToolResult: result})
-		if result.Metadata == nil || result.Metadata["spawned"] != true {
-			continue
-		}
-		if id, _ := result.Metadata["agent_id"].(string); id != "" {
+		if id := a.spawnSpecialistProfile(profile, targets); id != "" {
 			spawned = append(spawned, id)
 		}
 	}
@@ -763,6 +775,7 @@ Stopping rule: %s.`, profile.Role, target, strings.Join(profile.VulnClasses, ", 
 		return ""
 	}
 	a.state.DelegationAttempted = true
+	a.state.WaveLaunched = true
 	a.state.DelegationNudgeFired = true
 	a.state.DelegationDeferReason = ""
 	return fmt.Sprintf("🚀 ENGINE DELEGATION STARTED: launched %d non-overlapping specialists (%s). "+
@@ -778,12 +791,50 @@ Stopping rule: %s.`, profile.Role, target, strings.Join(profile.VulnClasses, ", 
 func (a *Agent) eligibleSpecialistProfiles() []specialistProfile {
 	profiles := make([]specialistProfile, 0, len(defaultSpecialistProfiles))
 	for _, profile := range defaultSpecialistProfiles {
+		// The discovery lane launches EARLY (stage E), not with the testing
+		// wave — its work is the wave's prerequisite, not a testing lane.
+		if profile.Role == "recon-discovery" {
+			continue
+		}
 		if profile.Role == "authz-logic" && len(a.authzIdentities()) <= 1 {
 			continue
 		}
 		profiles = append(profiles, profile)
 	}
 	return profiles
+}
+
+// spawnSpecialistProfile launches one specialist with the standard lane
+// contract and returns its agent id ("" when the spawn was rejected).
+func (a *Agent) spawnSpecialistProfile(profile specialistProfile, targets []string) string {
+	target := ""
+	if len(targets) > 0 {
+		target = strings.TrimSpace(targets[0])
+	}
+	task := fmt.Sprintf(`Own ONLY the %q lane against %s.
+Assigned vulnerability classes: %s.
+Start with read_ledger(filter=schedulable), then claim_next_hypothesis separately for every assigned class. Do not repeat root reconnaissance or work outside this lane.
+Local workspace: create and use tmp/%s/ for every scanner-side artifact. Never use host /tmp and never read or overwrite another lane's scratch files.
+Required proof: %s.
+Stopping rule: %s.`, profile.Role, target, strings.Join(profile.VulnClasses, ", "), profile.Role, profile.EvidenceContract, profile.StoppingRule)
+	args := map[string]string{
+		"name": profile.Role,
+		"task": task,
+	}
+	if target != "" {
+		args["target"] = target
+	}
+	a.emit(Event{Type: "tool_call", ToolName: "spawn_agent", ToolArgs: args})
+	result, err := a.registry.Execute("spawn_agent", args)
+	if err != nil {
+		result = tools.Result{Error: err.Error()}
+	}
+	a.emit(Event{Type: "tool_result", ToolName: "spawn_agent", ToolResult: result})
+	if result.Metadata == nil || result.Metadata["spawned"] != true {
+		return ""
+	}
+	id, _ := result.Metadata["agent_id"].(string)
+	return id
 }
 
 // PlanDisposition returns the root plan's final task dispositions for
