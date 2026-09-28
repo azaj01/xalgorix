@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -687,10 +688,30 @@ func (a *Agent) reconPhaseComplete() bool {
 	}
 
 	// Content discovery: at least one host received a real wordlist pass.
-	// Per-host coverage is tracked but not fully enforced yet — a single
-	// pass on the primary host satisfies this dimension for now, matching
-	// the existing step-by-step chain.
 	if len(rc.ContentDiscoveredHosts) == 0 && !rc.NAMarked["content_discovery"] {
+		return false
+	}
+	// Per-application coverage: every distinct host the inventory surfaced
+	// (bounded to the first maxReconHostRequirement) must have been
+	// content-discovered OR carry a typed disposition (not_applicable,
+	// blocked, covered-by-equivalent-app). One pass on app.example.com no
+	// longer silently satisfies api/admin/files.example.com.
+	for _, host := range distinctApplicationHosts(s) {
+		if rc.ContentDiscoveredHosts[host] || reconHostDispositioned(s, host) {
+			continue
+		}
+		return false
+	}
+	// Applicability-informed required dimensions (N/A dispositions honored):
+	// API signals require API-surface discovery; an auth surface requires
+	// auth mapping; input-bearing surface requires parameter discovery.
+	if apiSignalsExist(s) && !rc.APISurfaceDiscovered && !rc.NAMarked["api_surface"] {
+		return false
+	}
+	if authSurfaceExists(s) && rc.AuthMapped == "" && !rc.NAMarked["auth_mapping"] {
+		return false
+	}
+	if parameterizedSurfaceExists(s) && !rc.ParamDiscovered && !rc.NAMarked["parameter_discovery"] {
 		return false
 	}
 
@@ -709,15 +730,17 @@ func (a *Agent) reconPhaseComplete() bool {
 	return true
 }
 
-// isDeepMode reports whether the scan runs in deep-intensity mode. The current
-// engine has active/passive intensity; deep is inferred from the phase
-// selection (all 22 phases selected) or a scan mode override.
+// isDeepMode reports whether the scan runs in deep-intensity mode. Deep used
+// to be inferred from len(AllowedPhases) >= 20, which misread the EMPTY
+// selection (meaning the full methodology is allowed) as "not deep" and
+// silently disabled deep-mode recon requirements for full scans. The explicit
+// ScanDepth field is now derived once at scan start; this accessor stays for
+// compatibility.
 func (a *Agent) isDeepMode() bool {
-	if a == nil {
+	if a == nil || a.state == nil {
 		return false
 	}
-	// A full 22-phase selection implies deep methodology.
-	return len(a.state.AllowedPhases) >= 20
+	return a.state.ScanDepth == "deep"
 }
 
 // reconIncompleteReasons lists the reconnaissance milestones still missing,
@@ -760,9 +783,21 @@ func (a *Agent) reconIncompleteReasons() []string {
 		if !rc.ServicesProbed && !rc.NAMarked["service_discovery"] {
 			missing = append(missing, "service/port enumeration (nmap/naabu on the target)")
 		}
-		if !rc.ParamDiscovered && !rc.NAMarked["parameter_discovery"] {
-			missing = append(missing, "parameter/input discovery (arjun/x8, forms, query parameters)")
+	}
+	for _, host := range distinctApplicationHosts(s) {
+		if rc.ContentDiscoveredHosts[host] || reconHostDispositioned(s, host) {
+			continue
 		}
+		missing = append(missing, "content discovery on "+host+" (or a typed disposition via update_plan: host "+host+": blocked/na/covered_by_equivalent)")
+	}
+	if apiSignalsExist(s) && !rc.APISurfaceDiscovered && !rc.NAMarked["api_surface"] {
+		missing = append(missing, "API-surface discovery (OpenAPI/GraphQL/route enumeration)")
+	}
+	if authSurfaceExists(s) && rc.AuthMapped == "" && !rc.NAMarked["auth_mapping"] {
+		missing = append(missing, "auth mapping (login flows, session capture)")
+	}
+	if parameterizedSurfaceExists(s) && !rc.ParamDiscovered && !rc.NAMarked["parameter_discovery"] {
+		missing = append(missing, "parameter/input discovery (arjun/x8, forms, query parameters)")
 	}
 	return missing
 }
@@ -847,7 +882,7 @@ func (a *Agent) maybeAutoDelegate(targets []string) string {
 	// same fully mapped endpoint set instead of whatever a one-minute
 	// inventory happened to contain. An LLM-authored plan is never clobbered.
 	if planIsEngineAuthored(a.state.Plan) && len(a.state.DiscoveredEndpoints) > 0 {
-		a.state.Plan = AutoPlan(a.state.DiscoveredEndpoints, a.state.DetectedTechs)
+		a.state.Plan = AutoPlanFromState(a.state)
 		a.state.PlanBuilt = true
 		reconcilePlan(a.state)
 	}
@@ -906,12 +941,13 @@ func (a *Agent) spawnSpecialistProfile(profile specialistProfile, targets []stri
 	if len(targets) > 0 {
 		target = strings.TrimSpace(targets[0])
 	}
+	brief, laneHypothesisIDs := a.specialistLaneBrief(profile)
 	task := fmt.Sprintf(`Own ONLY the %q lane against %s.
 Assigned vulnerability classes: %s.
 Start with read_ledger(filter=schedulable), then claim_next_hypothesis separately for every assigned class. Do not repeat root reconnaissance or work outside this lane.
 Local workspace: create and use tmp/%s/ for every scanner-side artifact. Never use host /tmp and never read or overwrite another lane's scratch files.
 Required proof: %s.
-Stopping rule: %s.`, profile.Role, target, strings.Join(profile.VulnClasses, ", "), profile.Role, profile.EvidenceContract, profile.StoppingRule)
+Stopping rule: %s.%s`, profile.Role, target, strings.Join(profile.VulnClasses, ", "), profile.Role, profile.EvidenceContract, profile.StoppingRule, brief)
 	args := map[string]string{
 		"name": profile.Role,
 		"task": task,
@@ -929,7 +965,107 @@ Stopping rule: %s.`, profile.Role, target, strings.Join(profile.VulnClasses, ", 
 		return ""
 	}
 	id, _ := result.Metadata["agent_id"].(string)
+	if id != "" && len(laneHypothesisIDs) > 0 {
+		if l := a.ledger(); l != nil {
+			for _, h := range laneHypothesisIDs {
+				// Soft lane ownership: the hypotheses stay queued and
+				// claimable, but the child's finish gate can now see
+				// assigned-but-never-claimed work instead of an empty lane
+				// looking exhausted.
+				l.MarkAssigned(h, id)
+			}
+		}
+	}
 	return id
+}
+
+// specialistLaneBrief grounds a specialist's spawn task in CONCRETE schedulable
+// work: the live ledger's queued hypotheses for its assigned classes, plus the
+// resolved methodology skills for those classes. "Test business logic
+// everywhere" becomes "H-18 business-logic POST /api/checkout", and the class
+// knowledge loads deterministically instead of hoping the child remembers the
+// catalog.
+func (a *Agent) specialistLaneBrief(profile specialistProfile) (string, []string) {
+	var b strings.Builder
+	l := a.ledger()
+
+	// Concrete hypotheses per assigned class (bounded).
+	var lines []string
+	var ids []string
+	if l != nil {
+		for _, class := range profile.VulnClasses {
+			count := 0
+			for _, h := range l.All() {
+				if count >= 3 {
+					break
+				}
+				if h.Status != scanctx.HypothesisQueued && h.Status != scanctx.HypothesisBlocked {
+					continue
+				}
+				if !vulnClassMatches(h.VulnClass, class) {
+					continue
+				}
+				if strings.TrimSpace(h.AssignedTo) != "" {
+					continue // already owned by another lane
+				}
+				loc := strings.TrimSpace(h.VulnClass + " " + h.Endpoint)
+				if h.Parameter != "" {
+					loc += " [" + h.Parameter + "]"
+				}
+				lines = append(lines, fmt.Sprintf("  • %s: %s", h.ID, loc))
+				ids = append(ids, h.ID)
+				count++
+			}
+		}
+	}
+	if len(lines) > 0 {
+		sort.Strings(lines)
+		b.WriteString("\nAssigned concrete hypotheses (claim these FIRST, one per class, until the lane is exhausted):\n")
+		b.WriteString(strings.Join(lines, "\n"))
+	}
+
+	// Resolved lane methodology (1-3 skills).
+	var skills []string
+	for _, class := range profile.VulnClasses {
+		if name, ok := VulnClassSkill(class); ok && name != "" {
+			dup := false
+			for _, s := range skills {
+				if s == name {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				skills = append(skills, name)
+			}
+		}
+		if len(skills) >= 3 {
+			break
+		}
+	}
+	if len(skills) > 0 {
+		quoted := make([]string, 0, len(skills))
+		for _, s := range skills {
+			quoted = append(quoted, strconv.Quote(s))
+		}
+		b.WriteString("\nLane methodology: load read_skill(name=" + strings.Join(quoted, "), then read_skill(name=") + ") before your first probe.")
+	}
+	return b.String(), ids
+}
+
+// vulnClassMatches compares a ledger hypothesis class with a lane class,
+// normalizing both through the canonical registry so "bola" matches "idor" and
+// "race-condition" matches "race-conditions".
+func vulnClassMatches(have, want string) bool {
+	have, want = strings.TrimSpace(have), strings.TrimSpace(want)
+	if have == "" || want == "" {
+		return false
+	}
+	if strings.EqualFold(have, want) {
+		return true
+	}
+	hc, wc := CanonicalVulnClassID(have), CanonicalVulnClassID(want)
+	return hc != "" && hc == wc
 }
 
 // specialistDisabled reports whether the named specialist lane is turned off
@@ -1401,6 +1537,14 @@ func (a *Agent) Run(targets []string, instruction string) {
 	}
 	a.state.DiscoveryMode = a.discoveryMode
 	a.state.AllowedPhases = append([]int(nil), a.allowedPhases...)
+	// Derive the explicit depth mode ONCE from the phase selection. Empty
+	// AllowedPhases = the full methodology is allowed = deep requirements
+	// apply; it must never be misread as "no phases selected = shallow".
+	if len(a.allowedPhases) == 0 || len(a.allowedPhases) >= 20 {
+		a.state.ScanDepth = "deep"
+	} else {
+		a.state.ScanDepth = "standard"
+	}
 	a.state.ReconOnlyMode = isReconReportOnlyPhaseSelection(a.allowedPhases)
 	if a.state.ReconOnlyMode {
 		a.state.DiscoveryMode = true
@@ -2056,6 +2200,18 @@ func (a *Agent) Run(targets []string, instruction string) {
 			}
 			resultArgs["output"] = result.Output
 			resultArgs["error"] = result.Error
+			// Propagate tool-emitted identity metadata (e.g. read_skill tags
+			// its result with the canonical skill name and duplicate flag) so
+			// result hooks can count successful canonical loads instead of
+			// guessing from the raw request args.
+			if result.Metadata != nil {
+				if v, ok := result.Metadata["skill_name"].(string); ok && v != "" {
+					resultArgs["skill_name"] = v
+				}
+				if v, ok := result.Metadata["skill_duplicate"].(bool); ok && v {
+					resultArgs["skill_duplicate"] = "true"
+				}
+			}
 			toolResultHook := a.hooks.Fire(OnToolResult, a.state, resultArgs)
 			if toolResultHook.EmitMessage != "" {
 				a.emit(Event{Type: "message", Content: toolResultHook.EmitMessage, TotalTokens: tokenCount()})
@@ -2087,6 +2243,20 @@ func (a *Agent) Run(targets []string, instruction string) {
 						count = len(reporting.GetVulnerabilitiesForContext(a.scanCtx.ID))
 					}
 					content = authoritativeFinishSummary(content, count)
+					// ── Honest completion assessment ──
+					// The gates release a finish after the bounded rejection
+					// ceiling; that must never read as "full assessment
+					// completed". Compute the explicit terminal state, make it
+					// visible in the final summary, and emit one compact
+					// telemetry block for post-scan debugging.
+					status, reasons := scanCompletionAssessment(a.state)
+					a.state.CompletionStatus = status
+					if status != CompletionStatusCompleted {
+						content += "\n\n" + formatIncompleteSummary(status, reasons)
+					}
+					if summary := scanTelemetrySummary(a.state, status, reasons); summary != "" {
+						a.emit(Event{Type: "message", Content: summary, TotalTokens: tokenCount()})
+					}
 				}
 				a.emit(Event{Type: "finished", Content: content, TotalTokens: tokenCount()})
 				return
@@ -2520,6 +2690,28 @@ func (a *Agent) prepareScanEnvironment() {
 			// the text briefing. Idempotent (the ledger dedups), so sub-agents
 			// that also parse the context add nothing new.
 			seeded := a.seedLedgerFromSurface(res)
+			// Retain the typed endpoint metadata (methods, parameters) for
+			// the structured applicability layer — the notes briefing stays
+			// the prose mirror, but the planner consumes this typed form.
+			for _, e := range res.Endpoints {
+				host, epath := splitSurfaceEndpoint(e.Path, res.BaseURLs)
+				if epath == "" {
+					continue
+				}
+				record := SeededSurfaceEndpoint{
+					Path:   epath,
+					Method: strings.ToUpper(strings.TrimSpace(e.Method)),
+					Source: "context",
+				}
+				if e.Source != "" {
+					record.Source = "context:" + e.Source
+				}
+				record.Params = append(record.Params, e.Params...)
+				if host != "" {
+					recordEndpointMethod(a.state, host+epath, record.Method)
+				}
+				a.state.SeededSurface = append(a.state.SeededSurface, record)
+			}
 			if a.scanContextBriefing != "" {
 				msg := fmt.Sprintf("🗺️ Attack surface seeded from context (%d endpoints", len(res.Endpoints))
 				if seeded > 0 {

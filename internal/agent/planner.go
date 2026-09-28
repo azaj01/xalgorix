@@ -33,6 +33,7 @@ package agent
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -60,6 +61,51 @@ type Task struct {
 	DependsOn []string   `json:"depends_on"`       // task IDs that must complete first
 	Notes     string     `json:"notes,omitempty"`  // free-form rationale / finding refs
 	Origin    string     `json:"origin,omitempty"` // "auto" (engine-generated) or "llm" (model-built)
+	// Disposition is the TYPED terminal reason when a task does not complete:
+	// not_applicable, blocked_missing_auth, blocked_missing_second_identity,
+	// blocked_unreachable, blocked_policy, exhausted, superseded — or "" when
+	// the task completed (or was skipped legacy-style before typed
+	// dispositions existed). Skipped-without-disposition remains readable for
+	// old persisted plans.
+	Disposition string `json:"disposition,omitempty"`
+}
+
+// Typed disposition values (Part 13). All map onto TaskSkipped for plan
+// counting — they are terminal "not executed" states, never completed
+// coverage — but each carries an explicit, auditable reason category so vague
+// prose cannot launder work away.
+const (
+	DispositionNotApplicable          = "not_applicable"
+	DispositionBlockedMissingAuth     = "blocked_missing_auth"
+	DispositionBlockedMissingSecondID = "blocked_missing_second_identity"
+	DispositionBlockedUnreachable     = "blocked_unreachable"
+	DispositionBlockedPolicy          = "blocked_policy"
+	DispositionExhausted              = "exhausted"
+	DispositionSuperseded             = "superseded"
+)
+
+// vagueDispositionReasons are the shortcut rationalizations that cannot clear
+// an engine-owned coverage task. The model must state a concrete surface fact
+// or a typed blocked reason instead.
+var vagueDispositionReasons = []string{
+	"likely not vulnerable",
+	"probably not applicable",
+	"probably not relevant",
+	"nothing interesting",
+	"nothing found",
+	"no obvious",
+	"already found another bug",
+	"one finding is enough",
+	"already achieved",
+	"not worth",
+	"low value",
+	"low priority",
+	"out of time",
+	"no time to",
+	"moving on",
+	"skipping for now",
+	"seems fine",
+	"looks safe",
 }
 
 // Plan is the ordered task graph for one scan.
@@ -260,6 +306,12 @@ func CoverageGaps(state *ScanState, discoveredEndpoints []string) []CoverageGap 
 	sort.Strings(discoveredEndpoints)
 	for _, ep := range discoveredEndpoints {
 		for _, class := range classes {
+			// Applicability filter: only (class, endpoint) pairs the observed
+			// surface makes testable are coverage obligations. /robots.txt
+			// owes no XXE/SSTI/CSRF probe; an XML route always owes XXE.
+			if !classAppliesToEndpoint(state, ep, class) {
+				continue
+			}
 			if !endpointTestedForClass(state, ep, class) {
 				gaps = append(gaps, CoverageGap{
 					VulnClass: class,
@@ -270,6 +322,58 @@ func CoverageGaps(state *ScanState, discoveredEndpoints []string) []CoverageGap 
 		}
 	}
 	return gaps
+}
+
+// applicabilityExtraClasses are the canonical classes outside the fixed
+// baseline floor that become REAL plan tasks only when the observed surface
+// carries applicable endpoints (workflow routes owe business-logic and
+// race-condition work; upload routes owe file-upload testing; GraphQL and
+// WebSocket surfaces owe their dedicated lanes). This is how the planner
+// stops being a small fixed class floor without exploding into a Cartesian
+// endpoint × class matrix.
+var applicabilityExtraClasses = []string{
+	"business-logic",
+	"race-conditions",
+	"mass-assignment",
+	"file-upload",
+	"websocket",
+	"graphql",
+	"nosqli",
+	"deserialization",
+	"open-redirect",
+	"cors",
+	"secret-exposure",
+	"dom-xss",
+	"privilege-escalation",
+	"auth-bypass",
+}
+
+// AutoPlanFromState builds the engine plan with the applicability layer
+// applied: the baseline floor from AutoPlan plus one task per extra class
+// that has at least one applicable endpoint, with the concrete endpoint list
+// in the task notes. Bounded and deterministic; classes with no applicable
+// endpoint are NOT scheduled (that is the point).
+func AutoPlanFromState(state *ScanState) *Plan {
+	if state == nil {
+		return NewPlan()
+	}
+	p := AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs)
+	for _, class := range applicabilityExtraClasses {
+		eps := ApplicableEndpointsForClass(state, class)
+		if len(eps) == 0 {
+			continue
+		}
+		t := newCoverageTask(class, eps)
+		t.DependsOn = []string{"recon", "dirbust"}
+		if p.Get(t.ID) != nil {
+			t.ID += "-coverage"
+		}
+		if skill, ok := VulnClassSkill(class); ok {
+			t.Notes += " Load the methodology first: read_skill(name=" + strconv.Quote(skill) + ")."
+		}
+		p.add(t)
+	}
+	return p
 }
 
 // endpointTestedForClass reports whether this exact endpoint has coverage
@@ -294,6 +398,19 @@ func endpointTestedForClass(state *ScanState, endpoint, class string) bool {
 		if classes, ok := state.EndpointClassCoverage[alias]; ok {
 			hasEndpointMatrixEvidence = true
 			if classes[class] {
+				return true
+			}
+		}
+	}
+	// Verifier-attributed scan-level evidence (Part 20): a deterministic
+	// verifier that actually executed this (endpoint, class) pair — from ANY
+	// agent, root or specialist — is trustworthy coverage. The coordinator
+	// is not forced to repeat the probe; at the same time, raw request-level
+	// child probes remain invisible here, so one shallow request still
+	// cannot close a class.
+	if shared := sharedCoverageForState(state); shared != nil {
+		for _, alias := range aliases {
+			if shared.HasVerified(alias, class) {
 				return true
 			}
 		}
@@ -389,6 +506,13 @@ func taskCoverageComplete(state *ScanState, task *Task) bool {
 		return state.VulnClassesTested[task.VulnClass]
 	}
 	for _, endpoint := range state.DiscoveredEndpoints {
+		// Non-applicable pairs are not obligations: a class completes when
+		// every APPLICABLE endpoint is covered, so /robots.txt can never
+		// hold an injection lane open and an unrelated signal can never
+		// complete a class either.
+		if !classAppliesToEndpoint(state, endpoint, task.VulnClass) {
+			continue
+		}
 		if !endpointTestedForClass(state, endpoint, task.VulnClass) {
 			return false
 		}
@@ -577,6 +701,23 @@ func defaultVulnClasses(detectedTechs map[string]bool) []string {
 	return classes
 }
 
+// isVagueDispositionReason reports whether a skip/disposition note is a
+// shortcut rationalization rather than a concrete surface fact. Used by both
+// the update_plan transition guard and the finish gate so the model cannot
+// clear engine-owned work with prose like "probably not applicable".
+func isVagueDispositionReason(note string) bool {
+	note = strings.ToLower(strings.TrimSpace(note))
+	if note == "" {
+		return true
+	}
+	for _, vague := range vagueDispositionReasons {
+		if strings.Contains(note, vague) {
+			return true
+		}
+	}
+	return false
+}
+
 // classPhase maps a vuln class to its methodology phase.
 func classPhase(class string) int {
 	switch class {
@@ -611,6 +752,18 @@ func truncList(items []string, n int) string {
 	return strings.Join(items[:n], ", ") + fmt.Sprintf(" … +%d more", len(items)-n)
 }
 
+// planBriefSkillsState is the optional state FormatPlan consults to avoid
+// recommending an already-loaded skill. agent.go sets it once; nil disables
+// the loaded-skill check (recommendations then always show).
+var planBriefSkillsState *ScanState
+
+// FormatPlanState is FormatPlan with the ScanState for skill-aware hints.
+func FormatPlanState(state *ScanState, p *Plan, gaps []CoverageGap) string {
+	planBriefSkillsState = state
+	defer func() { planBriefSkillsState = nil }()
+	return FormatPlan(p, gaps)
+}
+
 // FormatPlan renders the plan as a compact, model-facing brief: progress,
 // the next ready tasks, and any coverage gaps. Used as the per-iteration
 // "what to work on now" injection.
@@ -633,6 +786,16 @@ func FormatPlan(p *Plan, gaps []CoverageGap) string {
 			}
 			if t.Notes != "" {
 				sb.WriteString(fmt.Sprintf("      %s\n", t.Notes))
+			}
+			// Task activation loads its methodology (Part 18): when the
+			// next ready task's class resolves to a skill that has not been
+			// loaded yet, the brief names it — the model no longer has to
+			// remember the catalog, and never loads more than the current
+			// lane's 1-3 skills.
+			if t.VulnClass != "" {
+				if skill, ok := VulnClassSkill(t.VulnClass); ok && skill != "" && !skillCovered(planBriefSkillsState, skill) {
+					sb.WriteString(fmt.Sprintf("      methodology: read_skill(name=%q) before testing %s\n", skill, t.VulnClass))
+				}
 			}
 		}
 	} else if p.RemainingCount() == 0 {

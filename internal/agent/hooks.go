@@ -83,7 +83,8 @@ type ReconCoverage struct {
 	// HistoricalChecked: historical URLs examined (wayback/gau/archive).
 	HistoricalChecked bool
 	// NAMarked: dimensions the model has justified as not applicable via
-	// update_plan skip notes or recon N/A markers.
+	// update_plan typed dispositions (the real mutation path is
+	// MarkReconDimensionNA / applyReconDispositions in recon_coverage.go).
 	NAMarked map[string]bool
 }
 
@@ -125,6 +126,19 @@ type ScanState struct {
 	PassiveReconGuardActive      bool
 	PassiveReconPassiveLookups   int
 	PassiveReconBlockedActive    int
+	// ScanDepth is the explicit depth mode: "deep" enforces the full-
+	// methodology recon requirements (service enumeration, parameter
+	// discovery), "standard" treats them as recommended. It is derived once
+	// at scan start from the phase selection: an EMPTY AllowedPhases means
+	// the full methodology is allowed, which previously (len >= 20) was
+	// misread as "not deep" and silently disabled deep-mode requirements for
+	// exactly the scans that ran every phase.
+	ScanDepth string
+	// CompletionStatus is the honest terminal state computed when the finish
+	// gate finally allows the scan to end: "completed",
+	// "completed_with_blocked_work", or "incomplete". Finish-gate exhaustion
+	// can no longer masquerade as a successful assessment.
+	CompletionStatus string
 
 	// Coverage counters — track UNIQUE endpoints per test category.
 	// These replace the old boolean flags (InjectionTested, etc.) which
@@ -254,11 +268,43 @@ type ScanState struct {
 	// from the seeded surface and the "Endpoint Inventory" note.
 	DiscoveredEndpoints []string
 
+	// ── Structured attack-surface observation ──
+	// Typed per-endpoint evidence the applicability layer (surface.go)
+	// consumes: observed HTTP methods and content types from real requests,
+	// plus artifact-seeded endpoints (OpenAPI/HAR/Postman, which carry
+	// methods and parameters). The "Endpoint Inventory" note remains the
+	// human/model-facing mirror; these are the machine-readable source of
+	// truth for what testing applies where.
+	ObservedEndpointMethods map[string]string
+	EndpointContentTypes    map[string]string
+	SeededSurface           []SeededSurfaceEndpoint
+	ReconHostDispositions   map[string]string
+	// ── Auth coverage dimensions (auth_coverage.go) ──
+	// AuthCoverage maps each applicable auth dimension to its state:
+	// "" (pending), "complete" (engine-detected evidence), "not_applicable",
+	// or "blocked" (typed dispositions). Bearer/CookieAuthObserved activate
+	// the token/session dimension families.
+	AuthCoverage       map[string]string
+	BearerAuthObserved bool
+	CookieAuthObserved bool
+
 	// New enrichment hooks
-	WAFDetected                 bool
-	RedirectDetected            bool
-	DetectedTechs               map[string]bool // e.g. "php", "nodejs", "java"
-	SkillSuggestionFired        bool            // prevents hookAutoSkillSuggester from firing more than once
+	WAFDetected          bool
+	RedirectDetected     bool
+	DetectedTechs        map[string]bool // e.g. "php", "nodejs", "java"
+	SkillSuggestionFired bool            // first skill recommendation was delivered (advisory history; no longer a global off-switch)
+	// LoadedSkills records every SUCCESSFULLY loaded canonical skill with the
+	// request context, replacing the old blind SkillsLoaded counter (which
+	// incremented on every read_skill call — failures and duplicates
+	// included). SkillsLoaded is now derived: len(LoadedSkills).
+	LoadedSkills map[string]*LoadedSkillInfo
+	// FailedSkillLoads counts read_skill lookups that errored (unknown
+	// skill names) — a quality signal, never coverage.
+	FailedSkillLoads int
+	// SkillSuggestionsSent dedupes recommendations PER SKILL, not per scan:
+	// loading the SQLi skill must never suppress a later GraphQL or JWT
+	// recommendation for a different detected technology.
+	SkillSuggestionsSent        map[string]bool
 	DelegationAttempted         bool            // coordinator called spawn_agent/create_agent
 	ReconGateBlocks             int             // coordinator claim attempts blocked by the recon-first gate (bounded bypass)
 	DelegationDeferReason       string          // last specialist-wave defer reason, for change-triggered diagnostics
@@ -294,6 +340,12 @@ func NewScanState() *ScanState {
 		AdvisoryLeadsNudged:       make(map[string]bool),
 		OASTVerificationNudged:    make(map[string]bool),
 		OASTVerificationReminders: make(map[string]int),
+		LoadedSkills:              make(map[string]*LoadedSkillInfo),
+		SkillSuggestionsSent:      make(map[string]bool),
+		ObservedEndpointMethods:   make(map[string]string),
+		EndpointContentTypes:      make(map[string]string),
+		ReconHostDispositions:     make(map[string]string),
+		AuthCoverage:              make(map[string]string),
 	}
 }
 
@@ -314,6 +366,14 @@ type HookResult struct {
 	// Used when the conversation itself is the cause of the failure — a text
 	// nudge into a poisoned context just gets corrupted again.
 	PruneContext bool
+
+	// Directives is the structured multi-hook guidance channel. Unlike Nudge
+	// (first-non-empty-wins), every returned directive is composed centrally
+	// by Fire so no hook's "delivered" state mutation can outrun what the
+	// model actually received. Hooks migrate to Directives for iteration-
+	// start guidance; legacy Nudge still works and is appended after the
+	// directives. See directives.go.
+	Directives []Directive
 }
 
 // ── Hook Registry ────────────────────────────────────────────────────────────
@@ -345,13 +405,20 @@ func (r *HookRegistry) Register(event string, fn HookFn) {
 
 // Fire dispatches all hooks for the given event and merges results.
 // First non-empty string fields win. Bool fields use OR logic.
+//
+// Directives are the exception: every hook's directives are composed together
+// (see composeDirectives) so guidance from multiple hooks cannot silently
+// disappear while the producing hook has already marked it delivered. Only the
+// directives that verifiably reach the composed message run OnDelivered.
 func (r *HookRegistry) Fire(event string, state *ScanState, args map[string]string) HookResult {
 	merged := HookResult{}
+	var directives []Directive
 	for _, fn := range r.hooks[event] {
 		result := fn(state, args)
 		if merged.Nudge == "" && result.Nudge != "" {
 			merged.Nudge = result.Nudge
 		}
+		directives = append(directives, result.Directives...)
 		if result.Block {
 			merged.Block = true
 			if merged.BlockReason == "" {
@@ -366,6 +433,15 @@ func (r *HookRegistry) Fire(event string, state *ScanState, args map[string]stri
 		}
 		if result.CleanupBrowser {
 			merged.CleanupBrowser = true
+		}
+	}
+	if len(directives) > 0 {
+		composed, delivered := composeDirectives(directives, merged.Nudge)
+		merged.Nudge = composed
+		for _, d := range delivered {
+			if d.OnDelivered != nil {
+				d.OnDelivered(state)
+			}
 		}
 	}
 	return merged
@@ -479,6 +555,9 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	reg.Register(OnToolCall, hookCurlPreference)
 	reg.Register(OnToolExecute, hookWorkTracker)
 	reg.Register(OnStuckCheck, hookStuckNudge)
+	reg.Register(OnToolResult, hookSkillLoadTracker)
+	reg.Register(OnToolResult, hookAuthCoverageTracker)
+	reg.Register(OnToolResult, hookVerifierEvidenceBridge)
 	reg.Register(OnToolResult, hookWAFDetector)
 	reg.Register(OnToolResult, hookRedirectDetector)
 	reg.Register(OnToolResult, hookTargetHealthDetector)
@@ -797,6 +876,17 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 		if endpoint != "" {
 			state.EndpointsTested[endpoint] = true
 		}
+		// Structured-surface evidence: the method and content type of this
+		// concrete request drive the applicability layer (state-changing
+		// routes owe business-logic/race obligations, XML owes XXE, ...).
+		if endpoint != "" {
+			if m := methodFromCurlCmd(rawCmd); m != "" {
+				recordEndpointMethod(state, endpoint, m)
+			}
+			if ct := contentTypeFromCmd(rawCmd); ct != "" {
+				recordEndpointContentType(state, endpoint, ct)
+			}
+		}
 
 		// Detect recon commands
 		if strings.Contains(cmd, "nmap") || strings.Contains(cmd, "whatweb") ||
@@ -964,6 +1054,12 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 		endpoint := endpointFromToolArgs(args)
 		if endpoint != "" {
 			state.EndpointsTested[endpoint] = true
+			if m := strings.ToUpper(strings.TrimSpace(args["method"])); m != "" {
+				recordEndpointMethod(state, endpoint, m)
+			}
+			if ct := strings.TrimSpace(args["content_type"]); ct != "" {
+				recordEndpointContentType(state, endpoint, ct)
+			}
 		}
 		requestText := joinedToolArgs(args)
 		recordDetectedClassCoverage(state, endpoint, requestText)
@@ -972,10 +1068,6 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 			markEndpointClassCoverage(state, endpoint, "idor")
 		}
 		recordVerifierCoverage(state, endpoint, toolName, args)
-	}
-
-	if toolName == "read_skill" {
-		state.SkillsLoaded++
 	}
 
 	// Track endpoint inventory saved (mandatory recon checklist step 5)
@@ -1107,7 +1199,10 @@ func detectedVulnClasses(text string) []string {
 	if containsSSRFIndicator(text) {
 		classes = append(classes, "ssrf")
 	}
-	if strings.Contains(text, "<!doctype") || strings.Contains(text, "<!entity") ||
+	// XXE requires an actual entity/doctype-injection attempt: a harmless
+	// XML request carrying a plain DOCTYPE is not XXE coverage.
+	if strings.Contains(text, "<!entity") ||
+		strings.Contains(text, "<!doctype test [") ||
 		strings.Contains(text, "xxe") {
 		classes = append(classes, "xxe")
 	}
@@ -1140,14 +1235,28 @@ func containsSSRFIndicator(text string) bool {
 
 func containsAccessControlIndicator(text string) bool {
 	text = strings.ToLower(text)
-	return strings.Contains(text, "/user/1") || strings.Contains(text, "/user/2") ||
+	// URL-only tokens ("/admin" in a normal GET) and parameter names alone
+	// ("role=" in a request) are NOT access-control coverage — visiting an
+	// admin URL proves nothing about authorization. Coverage needs a
+	// boundary-crossing signal: a method override, a rewrite header, a
+	// state-changing method swap, or the classic cross-object probes
+	// (/user/1 vs /user/2, id substitution).
+	if strings.Contains(text, "/user/1") || strings.Contains(text, "/user/2") ||
 		strings.Contains(text, "id=1") || strings.Contains(text, "id=2") ||
-		strings.Contains(text, "role=admin") || strings.Contains(text, "isadmin") ||
-		strings.Contains(text, "x-forwarded-for") || strings.Contains(text, "x-original-url") ||
+		strings.Contains(text, "x-original-url") ||
 		strings.Contains(text, "x-http-method-override") || strings.Contains(text, "x-rewrite-url") ||
 		strings.Contains(text, "-x options") || strings.Contains(text, "-x put") ||
-		strings.Contains(text, "-x patch") || strings.Contains(text, "-x delete") ||
-		strings.Contains(text, "/admin")
+		strings.Contains(text, "-x patch") || strings.Contains(text, "-x delete") {
+		return true
+	}
+	// role-parameter TAMPERING (sending role=admin/isadmin=true as input) is
+	// a genuine attempt; merely naming the role in a normal request is not.
+	for _, marker := range []string{"role=admin", "isadmin=true", "is_admin=true", "admin=true", "role=user", "privilege=admin"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // markEndpointClassCoverage updates both the exact matrix and the existing
@@ -1321,6 +1430,71 @@ func recordVerifierCoverage(state *ScanState, endpoint, toolName string, args ma
 		class = normalizeCoverageClass(args["vuln_class"])
 	}
 	markEndpointClassCoverage(state, endpoint, class)
+}
+
+// verifierClassForTool maps a deterministic verifier tool to its canonical
+// class using the same routing as recordVerifierCoverage.
+func verifierClassForTool(toolName string, args map[string]string) string {
+	switch toolName {
+	case "verify_sqli":
+		return "sqli"
+	case "verify_ssti":
+		return "ssti"
+	case "verify_path_traversal":
+		return "path_traversal"
+	case "verify_xss":
+		return "xss"
+	case "verify_xxe":
+		return "xxe"
+	case "verify_csrf":
+		return "csrf"
+	case "authz_matrix":
+		return "idor"
+	case "verify_oob":
+		if c := normalizeCoverageClass(args["vuln_class"]); c != "" {
+			return c
+		}
+		return normalizeCoverageClass(args["class"])
+	case "verify_timing":
+		return normalizeCoverageClass(args["vuln_class"])
+	}
+	return ""
+}
+
+// hookVerifierEvidenceBridge is the specialist-to-global coverage channel
+// (Part 20). When a deterministic verifier actually EXECUTES against an
+// endpoint — no error, real output — the (endpoint, class) pair is recorded
+// in the shared verifier-attributed tier, whichever agent ran it. The
+// coordinator can then rely on that pair without re-running the probe
+// itself (no duplicated negative work), while raw request-level child probes
+// still never cross agents: one shallow probe cannot close a class.
+func hookVerifierEvidenceBridge(state *ScanState, args map[string]string) HookResult {
+	if state == nil || state.ScanContextID == "" {
+		return HookResult{}
+	}
+	toolName := args["tool_name"]
+	class := verifierClassForTool(toolName, args)
+	if class == "" {
+		return HookResult{}
+	}
+	if args["error"] != "" || strings.TrimSpace(args["output"]) == "" {
+		return HookResult{} // failed/tool-errored verification is not evidence
+	}
+	endpoint := endpointFromToolArgs(args)
+	if endpoint == "" {
+		endpoint = extractEndpointFromCmd(joinedToolArgs(args))
+	}
+	if endpoint == "" {
+		return HookResult{}
+	}
+	shared := sharedCoverageForState(state)
+	if shared == nil {
+		return HookResult{}
+	}
+	for _, alias := range endpointCoverageAliases(endpoint) {
+		shared.MarkVerified(alias, class)
+	}
+	return HookResult{}
 }
 
 func normalizeCoverageClass(class string) string {
@@ -2891,70 +3065,74 @@ func hookDelegationCoordinator(state *ScanState, args map[string]string) HookRes
 		if state.Iteration < state.DelegationNudgeAt+2 || state.DelegationReminders >= 2 {
 			return HookResult{}
 		}
-		state.DelegationReminders++
-		return HookResult{Nudge: "⛔ DELEGATION STILL PENDING: no valid specialist was launched. Call spawn_agent NOW with BOTH required parameters: name and task. Launch one bounded, non-overlapping wave (2–3 specialists total); do not continue serial whole-target testing first."}
+		return HookResult{Directives: []Directive{{
+			Priority:  DirectivePriorityCritical,
+			Category:  "delegation",
+			DedupeKey: "delegation-reminder",
+			Content:   "⛔ DELEGATION STILL PENDING: no valid specialist was launched. Call spawn_agent NOW with BOTH required parameters: name and task. Launch one bounded, non-overlapping wave (2–3 specialists total); do not continue serial whole-target testing first.",
+			OnDelivered: func(s *ScanState) {
+				s.DelegationReminders++
+			},
+		}}}
 	}
 
-	state.DelegationNudgeFired = true
-	state.DelegationNudgeAt = state.Iteration
 	// The nudge is built from the deterministic specialist profiles and the
 	// shared ledger's schedulable hypotheses (see ledger_hooks.go), so the
 	// coordinator assigns disjoint, contract-bound work instead of three generic
-	// scans.
-	return HookResult{Nudge: buildDelegationNudge(state)}
+	// scans. The one-shot reservation now happens ONLY on delivery — a lost
+	// nudge no longer burns the coordinator's only decomposition prompt.
+	return HookResult{Directives: []Directive{{
+		Priority:  DirectivePriorityCritical,
+		Category:  "delegation",
+		DedupeKey: "delegation-initial",
+		Content:   buildDelegationNudge(state),
+		OnDelivered: func(s *ScanState) {
+			s.DelegationNudgeFired = true
+			s.DelegationNudgeAt = s.Iteration
+		},
+	}}}
 }
 
 // ── hookAutoSkillSuggester ───────────────────────────────────────────────────
-// On iteration start, suggests loading skills if techs have been detected
-// but no skills have been loaded yet. Only fires once, at iteration 15.
+// On iteration start, recommends loading methodology skills for DETECTED
+// technologies whose skill has neither been loaded nor previously recommended.
+// Suggestions are PER SKILL, driven by uncovered work: loading the SQLi skill
+// no longer suppresses a later GraphQL or prototype-pollution recommendation
+// (the old global SkillsLoaded>0 bail was a one-skill-disables-all off-switch).
+// Re-evaluated every iteration from 15 on, so technologies detected later in
+// the scan still get their recommendation; already-delivered suggestions are
+// deduplicated per skill name, keeping the loop bounded.
 func hookAutoSkillSuggester(state *ScanState, args map[string]string) HookResult {
-	if state.ReconOnlyMode {
+	if state == nil || state.ReconOnlyMode || state.DelegatedAgent {
 		return HookResult{}
 	}
-
-	// Fire once at iteration >= 15 — early enough to help, late enough to have tech data
-	if state.Iteration < 15 || state.SkillSuggestionFired {
+	// From iteration 15 — early enough to help, late enough to have tech data.
+	if state.Iteration < 15 {
 		return HookResult{}
 	}
-
-	if state.SkillsLoaded > 0 {
-		return HookResult{} // already loading skills
-	}
-
-	if len(state.DetectedTechs) == 0 && !state.WAFDetected {
-		return HookResult{} // no tech data to suggest from
-	}
-
-	suggestions := []string{}
-	techSkillMap := map[string]string{
-		"php":    "sql-injection",
-		"nodejs": "prototype-pollution",
-		"java":   "ssti",
-		"python": "ssti",
-		"aspnet": "sql-injection",
-	}
-
-	for tech := range state.DetectedTechs {
-		if skill, ok := techSkillMap[tech]; ok {
-			suggestions = append(suggestions, fmt.Sprintf("read_skill(name=%q) for %s targets", skill, tech))
-		}
-	}
-
-	if state.WAFDetected {
-		suggestions = append(suggestions, `read_skill(name="xss") and read_skill(name="sql-injection") for WAF bypass payloads`)
-	}
-
-	if len(suggestions) == 0 {
+	pending := recommendedSkillsForState(state)
+	if len(pending) == 0 {
 		return HookResult{}
 	}
-
-	state.SkillSuggestionFired = true
-	return HookResult{
-		Nudge: fmt.Sprintf(`💡 SKILL RECOMMENDATION: You have detected technologies but haven't loaded any deep knowledge skills yet. Consider:
-%s
-
-Skills contain expert-level payloads, WAF bypass techniques, and technology-specific attack chains that significantly improve testing depth.`, strings.Join(suggestions, "\n")),
+	lines := make([]string, 0, len(pending))
+	for _, rec := range pending {
+		lines = append(lines, fmt.Sprintf("read_skill(name=%q) — %s", rec.Skill, rec.Reason))
 	}
+	content := fmt.Sprintf("💡 SKILL RECOMMENDATION: methodology for technologies you have detected but not loaded yet:\n%s\n\nSkills contain expert-level payloads, WAF bypass techniques, and technology-specific attack chains that significantly improve testing depth. Load the ones relevant to your current lane before deep work.", strings.Join(lines, "\n"))
+	return HookResult{Directives: []Directive{{
+		Priority:  DirectivePriorityAdvisory,
+		Category:  "skill",
+		DedupeKey: "skill-suggestion",
+		Content:   content,
+		// Mark suggested only when the recommendation verifiably reached the
+		// model. A dropped directive leaves every suggestion eligible again.
+		OnDelivered: func(s *ScanState) {
+			s.SkillSuggestionFired = true
+			for _, rec := range pending {
+				s.SkillSuggestionsSent[rec.Skill] = true
+			}
+		},
+	}}}
 }
 
 // ── hookPlanner ──────────────────────────────────────────────────────────────
@@ -2984,7 +3162,12 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 	// were mapped, repeatedly missing known bugs. Wait for an inventory note.
 	if !state.EndpointInventorySaved && state.Plan == nil && state.ReconDone {
 		if state.Iteration >= 5 && state.Iteration%5 == 0 {
-			return HookResult{Nudge: "Save an Endpoint Inventory note now: list only LIVE, observed routes from responses, links, forms, and first-party JavaScript, including dynamic path segments and file-serving directories. Then prioritize concrete hypotheses and build the assessment plan. Do not invent paths to satisfy this gate."}
+			return HookResult{Directives: []Directive{{
+				Priority:  DirectivePriorityCritical,
+				Category:  "planner",
+				DedupeKey: "endpoint-inventory",
+				Content:   "Save an Endpoint Inventory note now: list only LIVE, observed routes from responses, links, forms, and first-party JavaScript, including dynamic path segments and file-serving directories. Then prioritize concrete hypotheses and build the assessment plan. Do not invent paths to satisfy this gate.",
+			}}}
 		}
 		return HookResult{}
 	}
@@ -3002,11 +3185,7 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 	// which case PlanBuilt is true and we leave its plan alone.
 	if !state.PlanBuilt && state.Plan == nil && state.ReconDone &&
 		(len(state.DiscoveredEndpoints) > 0 || len(state.DetectedTechs) > 0) {
-		if state.AuthContextKnown {
-			state.Plan = AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs)
-		} else {
-			state.Plan = AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs)
-		}
+		state.Plan = AutoPlanFromState(state)
 		state.PlanBuilt = true
 	}
 
@@ -3019,13 +3198,24 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 	// gate) to avoid spamming the context after completion.
 	if state.Plan != nil && state.Plan.RemainingCount() > 0 {
 		gaps := CoverageGaps(state, state.DiscoveredEndpoints)
-		brief := FormatPlan(state.Plan, gaps)
+		brief := FormatPlanState(state, state.Plan, gaps)
 		if brief != "" {
 			if brief == state.LastPlanBrief {
 				return HookResult{}
 			}
-			state.LastPlanBrief = brief
-			return HookResult{Nudge: brief}
+			// LastPlanBrief is recorded ONLY on delivery. The old code set it
+			// before knowing whether the nudge survived Fire's merge, which
+			// permanently suppressed the plan brief whenever another hook's
+			// nudge won the first-non-empty race.
+			return HookResult{Directives: []Directive{{
+				Priority:  DirectivePriorityPlanner,
+				Category:  "planner",
+				DedupeKey: "planner-brief",
+				Content:   brief,
+				OnDelivered: func(s *ScanState) {
+					s.LastPlanBrief = brief
+				},
+			}}}
 		}
 	}
 	return HookResult{}
@@ -3076,9 +3266,24 @@ func reconcilePlan(state *ScanState) {
 				t.Status = TaskCompleted
 			}
 		case "auth-session":
-			// Auth testing is hard to detect precisely; treat as done once the
-			// agent has exercised any auth/access-control endpoint.
-			if state.AccessControlTested && len(state.AccessControlEndpoints) > 0 {
+			// Auth/session completion is DIMENSION-DRIVEN (auth_coverage.go):
+			// generic access-control activity (a request to /admin, an
+			// X-Original-URL probe) must never complete authentication work.
+			// A target with no auth surface at all is auto-dispositioned
+			// not_applicable instead of silently blocking.
+			if !authSurfaceExists(state) && !state.AuthContextAvailable &&
+				// Only after recon actually surfaced a surface: a black-box
+				// target whose inventory is still empty must not get a premature
+				// auth N/A.
+				state.EndpointInventorySaved && len(state.DiscoveredEndpoints) > 0 {
+				t.Status = TaskSkipped
+				t.Disposition = DispositionNotApplicable
+				if t.Notes == "" {
+					t.Notes = "engine: no authentication surface discovered (no auth routes in inventory, no ingested credentials)"
+				}
+				continue
+			}
+			if authTaskComplete(state) {
 				t.Status = TaskCompleted
 			}
 		case "verify", "report":
